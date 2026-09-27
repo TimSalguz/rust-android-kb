@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Run kbdemo on a connected Android device, with the local CLI's interface:
+#   tools/adb-kbdemo --query word1 word2 ...
+# so the typo benchmark runs on the phone's CPU:
+#   tools/eval.py dict.fst --bin tools/adb-kbdemo
+# Needs target/aarch64-linux-android/release/kbdemo
+# (`cargo ndk -t arm64-v8a build --release -p cli`) and $DICT_FST (default dict.fst);
+# both are pushed to /data/local/tmp/kb when they change. KB_* env vars pass through.
+set -euo pipefail
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+BIN=$ROOT/target/aarch64-linux-android/release/kbdemo
+DICT=${DICT_FST:-$ROOT/dict.fst}
+DIR=/data/local/tmp/kb
+
+push() {
+    local remote
+    remote=$(adb shell md5sum "$2" 2>/dev/null | cut -d' ' -f1 || true)
+    if [ "$remote" != "$(md5sum "$1" | cut -d' ' -f1)" ]; then
+        adb push "$1" "$2" >/dev/null
+    fi
+}
+
+adb shell mkdir -p "$DIR"
+push "$BIN" "$DIR/kbdemo"
+adb shell chmod 755 "$DIR/kbdemo"
+push "$DICT" "$DIR/dict.fst"
+
+[ "${1:-}" = "--query" ] && shift
+args=$(mktemp)
+printf '%s\0' "$@" > "$args"
+adb push "$args" "$DIR/args" >/dev/null
+rm -f "$args"
+
+envs="DICT_FST=dict.fst"
+for v in KB_PROFILE KB_PRESET KB_SET KB_FLIP KB_HOMEROW KB_MAXCOST KB_MAXNODES KB_MINRESULTS KB_CEILING; do
+    if [ -n "${!v:-}" ]; then envs="$envs $v=${!v}"; fi
+done
+adb shell "cd $DIR && $envs xargs -0 ./kbdemo --query < args"

@@ -1,0 +1,2052 @@
+//! The correction engine: a weighted Damerau-Levenshtein DP carried along a
+//! depth-first walk of the mmap'd FST. Each FST node holds a DP row over the
+//! input; costs come from [`Config`] + keyboard geometry.
+//!
+//! A branch is pruned when its lower bound exceeds the current bound: the row
+//! minimum (all edit costs are non-negative) plus the smallest prior in the
+//! subtree — the FST output accumulated so far, since outputs only add up.
+//! Children are visited ordered by how well they continue the input (and by
+//! frequency), so the walk dives along the intended word and reaches deep
+//! matches before the node cap. The budget starts low and is **widened** while
+//! close matches are scarce — this reconsiders the branches pruned at a tighter
+//! budget, surfacing heavily-misspelled words only when nothing closer exists,
+//! so the common case stays fast and precise.
+//!
+//! The input is read under several hypotheses (as typed, wrong layout, hands on
+//! the home row), each with its own precomputed cost table and penalty.
+
+use std::collections::{BinaryHeap, HashMap};
+use std::fs::File;
+use std::io;
+use std::path::Path;
+
+use fst::raw::{CompiledAddr, Fst, Node};
+use fst::Map;
+use memmap2::Mmap;
+
+use crate::alphabet;
+use crate::config::Config;
+use crate::dict::DictFormat;
+use crate::keyboard::{Keyboard, N};
+
+#[derive(Clone, Debug)]
+pub struct Candidate {
+    pub word: String,
+    /// Total cost: `channel + w_lm·(−log P(word))` (lower = more likely).
+    pub cost: f32,
+    /// The channel part alone: how much typing error (or untyped completion)
+    /// this candidate assumes, hypothesis penalty included — independent of
+    /// how rare the word is.
+    pub edit: f32,
+}
+
+/// What the keyboard observed about how one input char was pressed. Letters
+/// such a press may have swallowed are cheap to be missing next to it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Hint {
+    /// Held still noticeably longer than the user's rhythm: the same letter
+    /// again or a key within reach may have been meant too (`сс`, `мас`).
+    pub held: bool,
+    /// Keys the finger slid across, without lifting, before settling on this one.
+    pub slid: Vec<char>,
+    /// Pressed almost together with the previous letter (fingers overlapped,
+    /// or within a roll-over window): the two may have registered swapped.
+    pub rollover: bool,
+    /// Substitution costs measured from the actual touch point: `(letter,
+    /// cost)` for keys around the tap. A tap on the border of two keys makes
+    /// both cheap; a tap dead-center makes the neighbors expensive. Letters
+    /// not listed keep the engine's key-to-key geometry.
+    pub spatial: Vec<(char, f32)>,
+    /// The user saw this letter and kept it while editing the word: any edit
+    /// that changes it (replace, drop, swap, a letter slipped in next to it)
+    /// costs this much more. 0: an ordinary press.
+    pub kept: f32,
+}
+
+/// Work done by one [`Engine::suggest_with_stats`] call.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Stats {
+    /// FST nodes visited across all hypotheses and widening passes.
+    pub nodes: usize,
+}
+
+fn row_min(row: &[f32]) -> f32 {
+    row.iter().copied().fold(f32::INFINITY, f32::min)
+}
+
+/// Best-first completion frontier entry (a min-heap on `cost`).
+struct Frontier {
+    cost: f32,
+    acc: u64,
+    path: Vec<u8>,
+    addr: CompiledAddr,
+}
+
+impl PartialEq for Frontier {
+    fn eq(&self, o: &Self) -> bool {
+        self.cost.total_cmp(&o.cost).is_eq()
+    }
+}
+impl Eq for Frontier {}
+impl PartialOrd for Frontier {
+    fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(o))
+    }
+}
+impl Ord for Frontier {
+    fn cmp(&self, o: &Self) -> std::cmp::Ordering {
+        o.cost.total_cmp(&self.cost)
+    }
+}
+
+/// One reading of the input with its per-query cost tables, so the DP inner
+/// loop is pure array loads.
+struct Query {
+    input: Vec<u8>,
+    /// `sub[c * m + j]`: cost of word char `c` aligned with input char `j`.
+    sub: Vec<f32>,
+    /// `ins[j]`: cost of input char `j` being an extra keypress.
+    ins: Vec<f32>,
+    /// `trans[j]` (j ≥ 2): cost of input chars `j−2`, `j−1` being swapped.
+    trans: Vec<f32>,
+    penalty: f32,
+    /// Cap on this hypothesis' edit budget (no widening past it).
+    max_budget: f32,
+    /// `absorb[c * (m + 1) + j]`: word char `c` may be missing at input column
+    /// `j` because an adjacent press swallowed it (see [`Hint`]). Empty: none.
+    absorb: Vec<bool>,
+    /// `kept_del[j]`: extra cost of a word char missing at input column `j`
+    /// between two kept letters (see [`Hint::kept`]). Empty: none kept.
+    kept_del: Vec<f32>,
+}
+
+impl Query {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        kb: &Keyboard,
+        cfg: &Config,
+        input: Vec<u8>,
+        hints: &[Hint],
+        home_hyp: bool,
+        penalty: f32,
+        max_budget: f32,
+        taps: bool,
+    ) -> Self {
+        let m = input.len();
+        let mut sub = vec![0.0f32; N * m];
+        for c in 1..N {
+            for (j, &x) in input.iter().enumerate() {
+                sub[c * m + j] = kb.cost(home_hyp, x, c as u8);
+            }
+        }
+        // Touch points refine the reading as typed (other hypotheses
+        // reinterpret the keys, so the taps don't describe them).
+        if taps {
+            for (j, hint) in hints.iter().enumerate().take(m) {
+                for &(ch, cost) in &hint.spatial {
+                    let Some(c) = alphabet::char_to_id(ch.to_lowercase().next().unwrap_or(ch))
+                    else {
+                        continue;
+                    };
+                    if c != input[j] {
+                        sub[c as usize * m + j] = cost.min(kb.confusion(input[j], c));
+                    }
+                }
+            }
+        }
+        // Extra keypresses are cheap when they repeat the previous key (bounce)
+        // or sit next to an adjacent typed key (one press hit two keys).
+        let mut ins: Vec<f32> = (0..m)
+            .map(|j| {
+                let x = input[j];
+                let mut cost = kb.ins_cost(x);
+                if j > 0 && input[j - 1] == x {
+                    cost = cost.min(cfg.c_ins_repeat);
+                }
+                let near = |k: usize| {
+                    input
+                        .get(k)
+                        .is_some_and(|&y| y != x && kb.is_neighbor(x, y))
+                };
+                if (j > 0 && near(j - 1)) || near(j + 1) {
+                    cost = cost.min(cfg.c_ins_neighbor);
+                }
+                cost
+            })
+            .collect();
+        // Letters of different hands swap more easily; nearly simultaneous
+        // presses from both hands swap most easily.
+        let mut trans: Vec<f32> = (0..=m)
+            .map(|j| {
+                if j < 2 || !kb.cross_hand(input[j - 2], input[j - 1]) {
+                    cfg.c_trans
+                } else if hints.get(j - 1).is_some_and(|h| h.rollover) {
+                    cfg.c_trans_rollover
+                } else {
+                    cfg.c_trans_cross
+                }
+            })
+            .collect();
+        // Letters the user kept while editing stay as typed (е may still be ё).
+        let kept: Vec<f32> = (0..m)
+            .map(|j| hints.get(j).map_or(0.0, |h| h.kept))
+            .collect();
+        let mut kept_del = Vec::new();
+        if kept.iter().any(|&k| k > 0.0) {
+            for (j, &k) in kept.iter().enumerate().filter(|(_, &k)| k > 0.0) {
+                let x = input[j];
+                for c in 1..N {
+                    if c as u8 != x && kb.cost(false, x, c as u8) > cfg.c_yo.max(cfg.c_accent) {
+                        sub[c * m + j] += k;
+                    }
+                }
+                ins[j] += k;
+            }
+            for j in 2..=m {
+                trans[j] += kept[j - 2].max(kept[j - 1]);
+            }
+            kept_del = (0..=m)
+                .map(|j| match j {
+                    0 => kept[0],
+                    j if j == m => 0.0,
+                    j => kept[j - 1].min(kept[j]),
+                })
+                .collect();
+        }
+        let mut absorb = Vec::new();
+        if hints.iter().any(|h| h.held || !h.slid.is_empty()) {
+            let w = m + 1;
+            absorb = vec![false; N * w];
+            let slid: Vec<Vec<u8>> = hints
+                .iter()
+                .map(|h| {
+                    h.slid
+                        .iter()
+                        .filter_map(|&c| alphabet::char_to_id(c.to_lowercase().next().unwrap_or(c)))
+                        .collect()
+                })
+                .collect();
+            for c in 1..N as u8 {
+                let swallowed = |k: usize| {
+                    hints
+                        .get(k)
+                        .is_some_and(|h| h.held && kb.in_reach(input[k], c))
+                        || slid.get(k).is_some_and(|s| s.contains(&c))
+                };
+                for j in 0..w {
+                    absorb[c as usize * w + j] =
+                        (j > 0 && swallowed(j - 1)) || (j < m && swallowed(j));
+                }
+            }
+        }
+        Query {
+            input,
+            sub,
+            ins,
+            trans,
+            penalty,
+            max_budget,
+            absorb,
+            kept_del,
+        }
+    }
+}
+
+/// The k best totals over *distinct* words — the branch-and-bound bound.
+struct TopK {
+    k: usize,
+    /// Ascending.
+    v: Vec<f32>,
+}
+
+impl TopK {
+    fn bound(&self) -> f32 {
+        if self.v.len() >= self.k {
+            self.v[self.k - 1]
+        } else {
+            f32::INFINITY
+        }
+    }
+
+    /// A word's total improved from `old` (if it had one) to `new`.
+    fn update(&mut self, old: Option<f32>, new: f32) {
+        if let Some(i) = old.and_then(|o| self.v.iter().position(|&x| x == o)) {
+            self.v.remove(i);
+        }
+        let i = self.v.partition_point(|&x| x <= new);
+        self.v.insert(i, new);
+        self.v.truncate(self.k);
+    }
+}
+
+/// Search state shared by every hypothesis and widening pass of one query.
+struct State {
+    /// Best (total, channel) per word (as an id path).
+    best: HashMap<Vec<u8>, (f32, f32)>,
+    topk: TopK,
+    nodes: usize,
+    /// DP rows, one per depth, flattened with stride `m + 1`.
+    rows: Vec<f32>,
+    path: Vec<u8>,
+}
+
+pub struct Engine<D: AsRef<[u8]>> {
+    pub(crate) map: Map<D>,
+    /// How the dictionary's values read (its FST type field): the prior,
+    /// and each word's grammar in a dictionary built with it.
+    pub(crate) format: DictFormat,
+    /// Optional context model: `previous\0word` → quantized `−log P(word |
+    /// previous)`, same encoding as the dictionary (see index-builder).
+    bigrams: Option<Map<D>>,
+    /// Optional casing list: lowercase word → 1 (always Capitalized) or 2 (in
+    /// CAPITALS) — names, places, abbreviations (tools/proper_nouns.py).
+    casing: Option<Map<D>>,
+    /// Words the user added by hand, searched alongside the dictionary (a
+    /// small FST built in memory).
+    pub(crate) user: Option<Map<Vec<u8>>>,
+    kb: Keyboard,
+    pub(crate) cfg: Config,
+}
+
+/// How a word is written however it was typed (see [`Engine::casing`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Casing {
+    AsTyped,
+    /// Москва, Иван, I'm.
+    Capital,
+    /// США, МГУ, NASA.
+    Upper,
+}
+
+/// Separator between the two words of a bigram key (ids start at 1).
+const BIGRAM_SEP: u8 = 0;
+
+/// The prior of a word the user added: as likely as a fairly common word
+/// (−ln P × 1000).
+const USER_PRIOR: u64 = 8_000;
+
+/// PMI of two grammatical classes never seen together (too rare to count).
+const UNSEEN_CLASS_PAIR: f32 = -1.5;
+/// [`Engine::predict_in`] looks this many times further down the context
+/// model's list: the grammar rules some out.
+const PREDICT_POOL: usize = 4;
+/// A guess the phrase weighs down this much (nats) is ruled out.
+const PREDICT_RULED_OUT: f32 = -0.99;
+
+/// Key of an ending pair in the bigram FST (tools/build_bigrams.py
+/// --endings): `0, left class, 0, right class`, a class being `1` + a short
+/// word itself (≤ `whole` letters: в, для) or `2` + the last two letters.
+/// Word keys start with a letter id (≥ 1), so the two never meet.
+pub fn ending_key(previous: &str, word: &str) -> Option<Vec<u8>> {
+    fn class(w: &str, whole: usize, key: &mut Vec<u8>) -> Option<()> {
+        let ids = remap(w)?;
+        if ids.is_empty() {
+            return None;
+        }
+        if ids.len() <= whole {
+            key.push(1);
+            key.extend_from_slice(&ids);
+        } else {
+            key.push(2);
+            key.extend_from_slice(&ids[ids.len() - 2..]);
+        }
+        Some(())
+    }
+    let mut key = vec![BIGRAM_SEP];
+    class(previous, 3, &mut key)?;
+    key.push(BIGRAM_SEP);
+    class(word, 2, &mut key)?;
+    Some(key)
+}
+
+fn remap(word: &str) -> Option<Vec<u8>> {
+    word.to_lowercase()
+        .chars()
+        .map(alphabet::char_to_id)
+        .collect()
+}
+
+fn map_file<P: AsRef<Path>>(path: P) -> io::Result<Map<Mmap>> {
+    let file = File::open(path)?;
+    // SAFETY: the blob is a read-only, prebuilt asset; we don't mutate it.
+    let mmap = unsafe { Mmap::map(&file)? };
+    Map::new(mmap).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+impl Engine<Mmap> {
+    /// Open an FST dictionary blob by memory-mapping it (zero heap for the index).
+    pub fn open<P: AsRef<Path>>(path: P, cfg: Config) -> io::Result<Self> {
+        Ok(Engine::new(map_file(path)?, cfg))
+    }
+
+    /// [`Engine::open`] plus a context model (bigram FST), also mmap'd.
+    pub fn open_with_bigrams<P: AsRef<Path>, Q: AsRef<Path>>(
+        dict: P,
+        bigrams: Q,
+        cfg: Config,
+    ) -> io::Result<Self> {
+        Ok(Engine::new(map_file(dict)?, cfg).with_bigrams(map_file(bigrams)?))
+    }
+
+    /// Add the casing list (see [`Engine::casing`]), mmap'd.
+    pub fn open_casing<P: AsRef<Path>>(self, path: P) -> io::Result<Self> {
+        Ok(self.with_casing(map_file(path)?))
+    }
+}
+
+impl<D: AsRef<[u8]>> Engine<D> {
+    pub fn new(map: Map<D>, cfg: Config) -> Self {
+        Engine {
+            format: DictFormat::from_type(map.as_fst().fst_type()),
+            map,
+            bigrams: None,
+            casing: None,
+            user: None,
+            kb: Keyboard::new(&cfg),
+            cfg,
+        }
+    }
+
+    pub fn config(&self) -> &Config {
+        &self.cfg
+    }
+
+    /// Replace the config (e.g. on a layout change); rebuilds the keyboard cost
+    /// tables once, here, rather than per query.
+    pub fn set_config(&mut self, cfg: Config) {
+        self.kb = Keyboard::new(&cfg);
+        self.cfg = cfg;
+    }
+
+    /// Whether `word` is a dictionary word (case-insensitive, exact) or one
+    /// the user added.
+    pub fn contains(&self, word: &str) -> bool {
+        remap(word).is_some_and(|k| {
+            self.map.contains_key(&k) || self.user.as_ref().is_some_and(|u| u.contains_key(&k))
+        })
+    }
+
+    /// The words the user added by hand (replaces the previous set).
+    pub fn set_user_words<S: AsRef<str>>(&mut self, words: &[S]) {
+        let mut keys: Vec<Vec<u8>> = words
+            .iter()
+            .filter_map(|w| remap(w.as_ref()))
+            .filter(|k| !k.is_empty())
+            .collect();
+        keys.sort();
+        keys.dedup();
+        self.user = if keys.is_empty() {
+            None
+        } else {
+            Map::from_iter(keys.into_iter().map(|k| (k, USER_PRIOR))).ok()
+        };
+    }
+
+    /// Attach a context model (a bigram FST built by index-builder).
+    pub fn with_bigrams(mut self, bigrams: Map<D>) -> Self {
+        self.bigrams = Some(bigrams);
+        self
+    }
+
+    pub fn with_casing(mut self, casing: Map<D>) -> Self {
+        self.casing = Some(casing);
+        self
+    }
+
+    /// How `word` is written: names and places capitalized, abbreviations in
+    /// capitals, everything else as typed.
+    pub fn casing(&self, word: &str) -> Casing {
+        let (Some(map), Some(key)) = (self.casing.as_ref(), remap(word)) else {
+            return Casing::AsTyped;
+        };
+        match map.get(key).map(|v| v & 3) {
+            Some(1) => Casing::Capital,
+            Some(2) => Casing::Upper,
+            _ => Casing::AsTyped,
+        }
+    }
+
+    /// An obscene word (flagged in the casing map): the keyboard can keep it
+    /// out of its suggestions and corrections.
+    pub fn offensive(&self, word: &str) -> bool {
+        let (Some(map), Some(key)) = (self.casing.as_ref(), remap(word)) else {
+            return false;
+        };
+        map.get(key).is_some_and(|v| v & 4 != 0)
+    }
+
+    pub fn has_bigrams(&self) -> bool {
+        self.bigrams.is_some()
+    }
+
+    /// `−log P(word | previous)` in nats, if the pair is in the context model.
+    pub fn bigram_nats(&self, previous: &str, word: &str) -> Option<f32> {
+        let mut key = remap(previous)?;
+        key.push(BIGRAM_SEP);
+        key.extend(remap(word)?);
+        Some(self.bigrams.as_ref()?.get(key)? as f32 * self.cfg.prior_scale)
+    }
+
+    /// `word`'s grammar (tools/build_classes.py): its class and reading set.
+    /// The dictionary value holds its grammar id ([`DictFormat`]), the id's
+    /// pair is in the context model under `0, 10, id`; an older model keeps
+    /// the pair itself under `0, 3, word`.
+    fn word_grammar(&self, word: &str) -> Option<(u64, u64)> {
+        let key = remap(word)?;
+        let bigrams = self.bigrams.as_ref()?;
+        let v = if self.format.shift > 0 {
+            let id = self.format.grammar(self.map.get(&key)?);
+            if id == 0 {
+                return None;
+            }
+            bigrams.get([BIGRAM_SEP, 10, (id >> 8) as u8, id as u8])?
+        } else {
+            bigrams.get([vec![BIGRAM_SEP, 3], key].concat())?
+        };
+        Some((v & 0xFFFF, v >> 16))
+    }
+
+    /// `word`'s grammatical class (its likely readings), if known.
+    fn word_class(&self, word: &str) -> Option<u64> {
+        self.word_grammar(word).map(|g| g.0).filter(|&c| c != 0)
+    }
+
+    /// The grammemes ([`crate::gram::bit`]) of all of `word`'s readings, the
+    /// rare ones too (empty when unknown): its reading set's, one each under
+    /// `0, 9, set (2 bytes), index`.
+    pub fn readings(&self, word: &str) -> Vec<u64> {
+        let (Some(bigrams), Some(set)) = (
+            self.bigrams.as_ref(),
+            self.word_grammar(word).map(|g| g.1).filter(|&s| s != 0),
+        ) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for i in 0..=u8::MAX {
+            match bigrams.get([BIGRAM_SEP, 9, (set >> 8) as u8, set as u8, i]) {
+                Some(bits) => out.push(bits),
+                None => break,
+            }
+        }
+        out
+    }
+
+    /// Re-rank candidates by the phrase before them (`phrase`: its words in
+    /// order, lowercase): the ones it rules out — a case the preposition
+    /// doesn't govern, no agreement with the adjectives after it or of a verb
+    /// with its subject pronoun ([`crate::gram::misfit`]) — cost `w_phrase`
+    /// more.
+    pub fn rerank_phrase(&self, phrase: &[String], cands: &mut [Candidate]) {
+        if phrase.is_empty() || self.cfg.w_phrase <= 0.0 || self.bigrams.is_none() {
+            return;
+        }
+        let known = self.phrase_readings(phrase);
+        let mut changed = false;
+        for c in cands.iter_mut() {
+            let s = self.phrase_score(&known, &self.readings(&c.word));
+            if s != 0.0 {
+                c.cost -= self.cfg.w_phrase * s;
+                changed = true;
+            }
+        }
+        if changed {
+            cands.sort_by(|a, b| a.cost.total_cmp(&b.cost).then_with(|| a.word.cmp(&b.word)));
+        }
+    }
+
+    /// How the phrase before weighs a word (its readings), in nats: with
+    /// the learned frames and agreement weights ([`crate::gram::phrase_score`]),
+    /// or — an older model without them — only what the grammar rules out
+    /// ([`crate::gram::misfit`], -1).
+    fn phrase_score(&self, known: &[(&str, Vec<u64>)], word: &[u64]) -> f32 {
+        let Some(attr) = self.attr_weights() else {
+            return if crate::gram::misfit(known, word) {
+                -1.0
+            } else {
+                0.0
+            };
+        };
+        let walk = crate::gram::walk(known);
+        // Right after its governor the context model weighs the word itself
+        // (the frame is its fallback, see `context_nats`).
+        let frame = walk
+            .governor
+            .filter(|&g| g + 1 < known.len() && crate::gram::governing(&known[g].1))
+            .and_then(|g| self.frame(known[g].0));
+        crate::gram::phrase_score(&walk, frame.as_ref(), &attr, word)
+    }
+
+    /// Log ratios kept as bytes: steps of 0.05 nat around 128.
+    fn log_ratios<const N: usize>(v: u64) -> [f32; N] {
+        std::array::from_fn(|i| ((v >> (8 * i)) & 0xFF) as f32 * 0.05 - 6.4)
+    }
+
+    /// The log odds of a comma between `a` and `b` (tools/build_commas.py):
+    /// the pair's own when it has them, else the odds anywhere moved by what
+    /// each word says (a comma before «что», «но», «который»; after
+    /// «например»). None without the model.
+    pub fn comma_odds(&self, a: &str, b: &str) -> Option<f32> {
+        let m = self.bigrams.as_ref()?;
+        let odds = |key: Vec<u8>| m.get(key).map(|v| v as f32 * 0.05 - 6.4);
+        let base = odds(vec![BIGRAM_SEP, 15, 0])?;
+        let (ka, kb) = (remap(a)?, remap(b)?);
+        let pair = [
+            vec![BIGRAM_SEP, 15, 3],
+            ka.clone(),
+            vec![BIGRAM_SEP],
+            kb.clone(),
+        ]
+        .concat();
+        if let Some(v) = odds(pair) {
+            return Some(v);
+        }
+        let before = odds([vec![BIGRAM_SEP, 15, 1], kb].concat()).map_or(0.0, |v| v - base);
+        let after = odds([vec![BIGRAM_SEP, 15, 2], ka].concat()).map_or(0.0, |v| v - base);
+        Some(base + before + after)
+    }
+
+    /// A word's sense class (tools/build_topics.py): `0, 13, word`.
+    fn topic(&self, word: &str) -> Option<u64> {
+        let key = [vec![BIGRAM_SEP, 13], remap(word)?].concat();
+        self.bigrams.as_ref()?.get(key)
+    }
+
+    /// How much likelier two sense classes share a sentence than by chance
+    /// (nats; 0 when not kept): `0, 14, class, class`.
+    fn topic_pmi(&self, a: u64, b: u64) -> f32 {
+        let (x, y) = (
+            (a.min(b) as u16).to_be_bytes(),
+            (a.max(b) as u16).to_be_bytes(),
+        );
+        self.bigrams
+            .as_ref()
+            .and_then(|m| m.get([BIGRAM_SEP, 14, x[0], x[1], y[0], y[1]]))
+            .map_or(0.0, |v| v as f32 * 0.05 - 6.4)
+    }
+
+    /// Re-rank candidates by what the sentence so far is about (`context`:
+    /// its words, lowercase): a word whose sense class goes with theirs
+    /// gains — «кошка», not «крошка», after «корм» and «котёнок».
+    pub fn rerank_topic(&self, context: &[String], cands: &mut [Candidate]) {
+        if self.cfg.w_topic <= 0.0 || self.bigrams.is_none() {
+            return;
+        }
+        let mut seen: Vec<u64> = context.iter().filter_map(|w| self.topic(w)).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        if seen.is_empty() {
+            return;
+        }
+        let mut changed = false;
+        for c in cands.iter_mut() {
+            let Some(t) = self.topic(&c.word) else {
+                continue;
+            };
+            let s: f32 =
+                seen.iter().map(|&x| self.topic_pmi(t, x)).sum::<f32>() / seen.len() as f32;
+            if s != 0.0 {
+                c.cost -= self.cfg.w_topic * s.clamp(-1.5, 1.5);
+                changed = true;
+            }
+        }
+        if changed {
+            cands.sort_by(|a, b| a.cost.total_cmp(&b.cost).then_with(|| a.word.cmp(&b.word)));
+        }
+    }
+
+    /// The learned frame of a governing word (`0, 11, word`).
+    fn frame(&self, word: &str) -> Option<crate::gram::Frame> {
+        let key = [vec![BIGRAM_SEP, 11], remap(word)?].concat();
+        let v: [f32; 7] = Self::log_ratios(self.bigrams.as_ref()?.get(key)?);
+        Some(crate::gram::Frame {
+            other: v[0],
+            cases: [v[1], v[2], v[3], v[4], v[5], v[6]],
+        })
+    }
+
+    /// The learned weights after adjectives (`0, 12`); None in an older model.
+    fn attr_weights(&self) -> Option<crate::gram::AttrWeights> {
+        let v: [f32; 4] = Self::log_ratios(self.bigrams.as_ref()?.get([BIGRAM_SEP, 12])?);
+        Some(crate::gram::AttrWeights {
+            other: v[0],
+            agree: v[1],
+            disagree: v[2],
+            base_other: v[3],
+        })
+    }
+
+    fn phrase_readings<'a>(&self, phrase: &'a [String]) -> Vec<(&'a str, Vec<u64>)> {
+        phrase
+            .iter()
+            .map(|w| (w.as_str(), self.readings(w)))
+            .collect()
+    }
+
+    /// The likeliest next words after `phrase` (the words before the cursor
+    /// in order, lowercase; the last is the previous word): those the context
+    /// model expects after the previous word, less those the phrase grammar
+    /// rules out (a case the preposition doesn't govern, an adjective's
+    /// gender or number — «к большим деньгам», not «успехом»).
+    pub fn predict_in(&self, phrase: &[String], k: usize) -> Vec<Candidate> {
+        let Some(previous) = phrase.last() else {
+            return Vec::new();
+        };
+        if self.cfg.w_phrase <= 0.0 {
+            return self.predict(previous, k);
+        }
+        let known = self.phrase_readings(phrase);
+        let mut changed = false;
+        let mut cands: Vec<Candidate> = self
+            .predict(previous, k * PREDICT_POOL)
+            .into_iter()
+            .filter_map(|mut c| {
+                let s = self.phrase_score(&known, &self.readings(&c.word));
+                c.cost -= self.cfg.w_phrase * s;
+                changed |= s != 0.0;
+                (s > PREDICT_RULED_OUT).then_some(c)
+            })
+            .collect();
+        if changed {
+            cands.sort_by(|a, b| a.cost.total_cmp(&b.cost));
+        }
+        cands.truncate(k);
+        cands
+    }
+
+    /// The tags of a grammatical class's readings (a byte each, packed
+    /// under `0, 5, class`).
+    fn class_tags(&self, class: u64) -> Vec<u8> {
+        let key = [BIGRAM_SEP, 5, (class >> 8) as u8, class as u8];
+        let mut v = self.bigrams.as_ref().and_then(|b| b.get(key)).unwrap_or(0);
+        let mut out = Vec::with_capacity(8);
+        while v != 0 {
+            out.push(v as u8);
+            v >>= 8;
+        }
+        out
+    }
+
+    /// How much likelier `word`'s grammar is right after `previous`'s than
+    /// anywhere (PMI, nats) — agreement in gender, number, case — for the
+    /// best-fitting pair of their readings (a word fits if any reading does).
+    /// `None` when either is unclassed; a pair of readings never seen counts
+    /// as mildly unlikely.
+    pub fn class_pmi(&self, previous: &str, word: &str) -> Option<f32> {
+        let bigrams = self.bigrams.as_ref()?;
+        let (a, b) = (self.word_class(previous)?, self.word_class(word)?);
+        let (ta, tb) = (self.class_tags(a), self.class_tags(b));
+        let mut best: Option<f32> = None;
+        for &x in &ta {
+            for &y in &tb {
+                if let Some(v) = bigrams.get([BIGRAM_SEP, 4, x, y]) {
+                    let pmi = v as f32 * self.cfg.prior_scale - 8.0;
+                    best = Some(best.map_or(pmi, |b| b.max(pmi)));
+                }
+            }
+        }
+        Some(best.unwrap_or(UNSEEN_CLASS_PAIR))
+    }
+
+    /// The confusion pair `word`/`other` (docs/rules-format.md): its id, and
+    /// whether `word` is the pair's first member. Kept under `0, 7, word, 0,
+    /// other` as `(id + 1)·2 + (word is second)`.
+    fn pair(&self, word: &str, other: &str) -> Option<(u64, bool)> {
+        let mut key = vec![BIGRAM_SEP, 7];
+        key.extend(remap(word)?);
+        key.push(BIGRAM_SEP);
+        key.extend(remap(other)?);
+        let v = self.bigrams.as_ref()?.get(key)?;
+        Some((v / 2 - 1, v % 2 == 0))
+    }
+
+    /// What the next word says about `typed` vs `alt` when the two are a
+    /// confusion pair: the strongest matching rule's evidence (log
+    /// likelihood ratio, nats) — positive for `alt`, negative for `typed`,
+    /// 0 without a rule. Rules sit under `0, 6, pair id (3 bytes), feature`
+    /// as `member·100000 + strength·1000`.
+    pub fn next_evidence(&self, typed: &str, alt: &str, next: &str) -> f32 {
+        let (Some(bigrams), Some((id, typed_first))) =
+            (self.bigrams.as_ref(), self.pair(typed, alt))
+        else {
+            return 0.0;
+        };
+        let mut feats = vec![format!("w+1={}", next.to_lowercase())];
+        if let Some(c) = self.word_class(next) {
+            feats.push(format!("c+1={c}"));
+        }
+        let mut best: Option<(u64, f32)> = None;
+        for f in feats {
+            let mut key = vec![BIGRAM_SEP, 6, (id >> 16) as u8, (id >> 8) as u8, id as u8];
+            key.extend_from_slice(f.as_bytes());
+            if let Some(v) = bigrams.get(key) {
+                let s = (v % 100_000) as f32 / 1000.0;
+                if best.is_none_or(|b| s > b.1) {
+                    best = Some((v / 100_000, s));
+                }
+            }
+        }
+        match best {
+            // Member 0 is the pair's first word; `alt` is first when `typed` isn't.
+            Some((member, s)) if (member == 0) != typed_first => s,
+            Some((_, s)) => -s,
+            None => 0.0,
+        }
+    }
+
+    /// How much likelier `word`'s ending is right after `previous` than
+    /// anywhere (PMI, nats; 0 when unknown).
+    pub fn ending_pmi(&self, previous: &str, word: &str) -> f32 {
+        let (Some(bigrams), Some(key)) = (self.bigrams.as_ref(), ending_key(previous, word)) else {
+            return 0.0;
+        };
+        bigrams
+            .get(key)
+            .map_or(0.0, |v| v as f32 * self.cfg.prior_scale - 8.0)
+    }
+
+    /// The prior part of a cost, `−log P`, with context: `λ·P(w | prev) +
+    /// (1 − λ)·P'(w)`, from the word's plain `−log P(w)` (`unigram` nats);
+    /// `P'` is `P` moved by how well the endings go together.
+    fn context_nats(&self, previous: &str, word: &str, unigram: f32) -> f32 {
+        let l = self.cfg.ctx_lambda.clamp(0.0, 0.99);
+        // Grammar where both words are classed, the endings otherwise.
+        // A governing word's learned frame (the case it takes) says more
+        // than the classes of the two.
+        let frame = self
+            .frame(previous)
+            .filter(|_| self.cfg.w_classes > 0.0)
+            .map(|f| f.next(&self.readings(word)))
+            .filter(|&v| v != 0.0);
+        let fit = match frame.or_else(|| {
+            self.class_pmi(previous, word)
+                .filter(|_| self.cfg.w_classes > 0.0)
+        }) {
+            Some(pmi) => self.cfg.w_classes * pmi.clamp(-4.0, 4.0),
+            None => self.cfg.w_endings * self.ending_pmi(previous, word).clamp(-4.0, 4.0),
+        };
+        let p_uni = (fit - unigram).exp();
+        let p_ctx = self.bigram_nats(previous, word).map_or(0.0, |b| (-b).exp());
+        -(l * p_ctx + (1.0 - l) * p_uni).max(f32::MIN_POSITIVE).ln()
+    }
+
+    /// Re-rank candidates for the word typed after `previous`: each prior
+    /// becomes the context-mixed one. A no-op without a context model.
+    pub fn rerank(&self, previous: &str, cands: &mut [Candidate]) {
+        if self.bigrams.is_none() || self.cfg.w_lm <= 0.0 {
+            return;
+        }
+        for c in cands.iter_mut() {
+            let unigram = (c.cost - c.edit) / self.cfg.w_lm;
+            c.cost = c.edit + self.cfg.w_lm * self.context_nats(previous, &c.word, unigram);
+        }
+        cands.sort_by(|a, b| a.cost.total_cmp(&b.cost).then_with(|| a.word.cmp(&b.word)));
+    }
+
+    /// The likeliest next words after `previous` (most likely first), from the
+    /// context model — best-first over the `previous\0` subtree.
+    pub fn predict(&self, previous: &str, k: usize) -> Vec<Candidate> {
+        self.predict_from(previous, "", k)
+    }
+
+    /// Words the context model expects after `previous` that start with the
+    /// typed `prefix` (and are longer), costed like [`Engine::complete`] so
+    /// [`Engine::rerank`] weighs them with the rest.
+    pub fn complete_after(&self, previous: &str, prefix: &str, k: usize) -> Vec<Candidate> {
+        let typed = prefix.chars().count();
+        self.predict_from(previous, prefix, k)
+            .into_iter()
+            .filter_map(|c| {
+                let edit =
+                    self.cfg.c_complete_char * c.word.chars().count().saturating_sub(typed) as f32;
+                Some(Candidate {
+                    cost: edit + self.word_cost(&c.word)?,
+                    edit,
+                    word: c.word,
+                })
+            })
+            .collect()
+    }
+
+    /// [`Engine::predict`] among the words starting with `start`.
+    fn predict_from(&self, previous: &str, start: &str, k: usize) -> Vec<Candidate> {
+        let (Some(bigrams), Some(mut prefix), Some(start)) =
+            (self.bigrams.as_ref(), remap(previous), remap(start))
+        else {
+            return Vec::new();
+        };
+        if prefix.is_empty() {
+            return Vec::new(); // (keys under a bare separator are the endings)
+        }
+        prefix.push(BIGRAM_SEP);
+        prefix.extend_from_slice(&start);
+        let fst = bigrams.as_fst();
+        let mut node = fst.root();
+        let mut base = 0u64;
+        for &b in &prefix {
+            let Some(i) = node.find_input(b) else {
+                return Vec::new();
+            };
+            let t = node.transition(i);
+            base += t.out.value();
+            node = fst.node(t.addr);
+        }
+        let cost = |acc: u64| self.cfg.w_lm * acc as f32 * self.cfg.prior_scale;
+        let mut out = Vec::new();
+        let mut heap: BinaryHeap<Frontier> = BinaryHeap::new();
+        for t in node.transitions() {
+            let acc = base + t.out.value();
+            heap.push(Frontier {
+                cost: cost(acc),
+                acc,
+                path: [start.as_slice(), &[t.inp]].concat(),
+                addr: t.addr,
+            });
+        }
+        let mut visited = 0;
+        while let Some(Frontier {
+            acc, path, addr, ..
+        }) = heap.pop()
+        {
+            visited += 1;
+            if out.len() >= k || visited > self.cfg.max_nodes {
+                break;
+            }
+            let n = fst.node(addr);
+            if n.is_final() {
+                let c = cost(acc + n.final_output().value());
+                out.push(Candidate {
+                    word: alphabet::ids_to_string(&path),
+                    cost: c,
+                    edit: 0.0,
+                });
+            }
+            for t in n.transitions() {
+                let mut p = path.clone();
+                p.push(t.inp);
+                let a = acc + t.out.value();
+                heap.push(Frontier {
+                    cost: cost(a),
+                    acc: a,
+                    path: p,
+                    addr: t.addr,
+                });
+            }
+        }
+        out.sort_by(|a, b| a.cost.total_cmp(&b.cost));
+        out
+    }
+
+    /// The prior cost `w_lm·(−log P(word))` of a dictionary word, if it is one.
+    pub fn word_cost(&self, word: &str) -> Option<f32> {
+        let key = remap(word)?;
+        let prior = match self.map.get(&key) {
+            Some(v) => self.format.prior(v),
+            None => self.user.as_ref()?.get(&key)?,
+        };
+        Some(self.cfg.w_lm * prior as f32 * self.cfg.prior_scale)
+    }
+
+    /// Whether some dictionary (or user) word starts with `prefix`
+    /// (case-insensitive).
+    pub fn is_prefix(&self, prefix: &str) -> bool {
+        fn walks<F: AsRef<[u8]>>(fst: &Fst<F>, prefix: &str) -> bool {
+            let mut node = fst.root();
+            for c in prefix.to_lowercase().chars() {
+                let Some(id) = alphabet::char_to_id(c) else {
+                    return false;
+                };
+                let Some(i) = node.find_input(id) else {
+                    return false;
+                };
+                node = fst.node(node.transition_addr(i));
+            }
+            true
+        }
+        walks(self.map.as_fst(), prefix)
+            || self
+                .user
+                .as_ref()
+                .is_some_and(|u| walks(u.as_fst(), prefix))
+    }
+
+    /// Rank dictionary words by probability of being the intended word for `raw`.
+    ///
+    /// Starts at the `max_cost` budget; if fewer than `min_results` candidates
+    /// are found, the budget is widened by `widen_step` and the search re-run
+    /// (up to `max_cost_ceiling`). This reconsiders the branches pruned earlier
+    /// — i.e. surfaces words with many typos, but only when close matches are
+    /// scarce, so precision is preserved in the common case.
+    pub fn suggest(&self, raw: &str) -> Vec<Candidate> {
+        self.suggest_with_stats(raw).0
+    }
+
+    /// [`Engine::suggest`] plus how much work it took.
+    pub fn suggest_with_stats(&self, raw: &str) -> (Vec<Candidate>, Stats) {
+        self.suggest_hinted(raw, &[])
+    }
+
+    /// [`Engine::suggest`] with per-char press hints (`hints[i]` for input char
+    /// `i`): letters a press may have swallowed are cheap to be missing.
+    pub fn suggest_hinted(&self, raw: &str, hints: &[Hint]) -> (Vec<Candidate>, Stats) {
+        let cfg = &self.cfg;
+        let input: Vec<u8> = raw
+            .trim()
+            .to_lowercase()
+            .chars()
+            .map(|c| alphabet::char_to_id(c).unwrap_or(0))
+            .collect();
+        // Overly long tokens are not typos of any real word — skip correction.
+        if input.is_empty() || input.len() > cfg.max_input_len {
+            return (Vec::new(), Stats::default());
+        }
+
+        if cfg.one_row_input {
+            // Each key is a column placeholder: read it only as such.
+            let q = Query::new(&self.kb, cfg, input, hints, true, 0.0, f32::INFINITY, true);
+            return self.run(vec![q], None, 1);
+        }
+
+        // Letters kept while editing were read on screen: no other reading.
+        let reviewed = hints.iter().any(|h| h.kept > 0.0);
+        let mut hyps = Vec::with_capacity(3);
+        if cfg.layout_flip && !reviewed {
+            let flipped = self.kb.flip_ids(&input);
+            if flipped != input {
+                hyps.push(Query::new(
+                    &self.kb,
+                    cfg,
+                    flipped,
+                    hints,
+                    false,
+                    cfg.layout_switch,
+                    cfg.layout_max_cost,
+                    false,
+                ));
+            }
+        }
+        // The one-row reading is a fallback: only when the ordinary reading
+        // finds no convincing correction (checked after it ran) — the home row
+        // holds the most frequent Russian letters, so plenty of ordinary words
+        // are typed on it alone.
+        let one_row = (!reviewed
+            && cfg.home_row
+            && input.len() >= 3
+            && input.iter().all(|&c| self.kb.is_home_row(c)))
+        .then(|| {
+            Query::new(
+                &self.kb,
+                cfg,
+                input.clone(),
+                hints,
+                true,
+                cfg.home_row_penalty,
+                f32::INFINITY,
+                false,
+            )
+        });
+        let m = input.len();
+        hyps.insert(
+            0,
+            Query::new(&self.kb, cfg, input, hints, false, 0.0, f32::INFINITY, true),
+        );
+        self.run(hyps, one_row, m)
+    }
+
+    /// Search `hyps` with widening, then the one-row fallback if the ordinary
+    /// readings found nothing convincing; rank and return the candidates.
+    fn run(&self, hyps: Vec<Query>, one_row: Option<Query>, m: usize) -> (Vec<Candidate>, Stats) {
+        let cfg = &self.cfg;
+
+        // Widen the budget while close matches are scarce. Results accumulate
+        // across passes (a word found at a tight budget is kept even if a later,
+        // looser pass would starve before reaching it under the node cap). The
+        // top-k bound persists across passes/hypotheses so branch-and-bound keeps
+        // tightening. Each hypothesis has its own node budget shared by all its
+        // passes — so one can't starve another, and garbage input still can't
+        // blow up latency (at most `hypotheses × max_nodes`).
+        let mut hyp_nodes = vec![0usize; hyps.len()];
+        let mut hyp_budget = vec![f32::NEG_INFINITY; hyps.len()];
+        let mut st = State {
+            best: HashMap::new(),
+            topk: TopK {
+                k: cfg.top_k.max(1),
+                v: Vec::with_capacity(cfg.top_k + 1),
+            },
+            nodes: 0,
+            rows: Vec::new(),
+            path: Vec::with_capacity(32),
+        };
+        let mut budget = cfg.max_cost;
+        loop {
+            for (h, q) in hyps.iter().enumerate() {
+                // A capped hypothesis that already ran at its cap would only redo work.
+                let b = budget.min(q.max_budget);
+                if hyp_nodes[h] < cfg.max_nodes && b > hyp_budget[h] {
+                    st.nodes = hyp_nodes[h];
+                    self.search(q, b, &mut st);
+                    hyp_nodes[h] = st.nodes.min(cfg.max_nodes);
+                    hyp_budget[h] = b;
+                }
+            }
+            let exhausted = hyp_nodes.iter().all(|&n| n >= cfg.max_nodes);
+            if st.best.len() >= cfg.min_results || budget >= cfg.max_cost_ceiling || exhausted {
+                break;
+            }
+            budget = (budget + cfg.widen_step).min(cfg.max_cost_ceiling);
+        }
+
+        // However mangled the input, offer something: one more pass, much
+        // looser, with its own node budget — only when nothing was found.
+        if st.best.is_empty() && cfg.rescue_cost > budget {
+            if let Some(q) = hyps.first() {
+                st.nodes = 0;
+                self.search(q, cfg.rescue_cost, &mut st);
+                hyp_nodes.push(st.nodes.min(cfg.max_nodes));
+            }
+        }
+
+        if let Some(q) = one_row {
+            let best_rate = st
+                .best
+                .values()
+                .map(|&(_, channel)| channel)
+                .fold(f32::INFINITY, f32::min)
+                / m as f32;
+            if best_rate > cfg.home_row_trigger {
+                let (found, mut used, mut budget) = (st.best.len(), 0usize, cfg.max_cost);
+                loop {
+                    st.nodes = used;
+                    self.search(&q, budget, &mut st);
+                    used = st.nodes.min(cfg.max_nodes);
+                    if st.best.len() > found
+                        || budget >= cfg.max_cost_ceiling
+                        || used >= cfg.max_nodes
+                    {
+                        break;
+                    }
+                    budget = (budget + cfg.widen_step).min(cfg.max_cost_ceiling);
+                }
+                hyp_nodes.push(used);
+            }
+        }
+
+        let stats = Stats {
+            nodes: hyp_nodes.iter().sum(),
+        };
+        let mut out: Vec<Candidate> = st
+            .best
+            .into_iter()
+            .map(|(path, (cost, edit))| Candidate {
+                word: alphabet::ids_to_string(&path),
+                cost,
+                edit,
+            })
+            .collect();
+        out.sort_by(|a, b| a.cost.total_cmp(&b.cost).then_with(|| a.word.cmp(&b.word)));
+        out.truncate(cfg.top_k);
+        (out, stats)
+    }
+
+    /// As-you-type completions of an *exactly* typed prefix, cheapest first.
+    /// Returns up to `Config::top_k` words.
+    ///
+    /// A completion costs `w_lm·(−log P(word)) + c_complete_char·(untyped chars)`:
+    /// a long word guessed from a short prefix pays for what the user hasn't
+    /// typed, so it doesn't outrank a close correction (`ди`→`ли`, not
+    /// `директор`). FST outputs are non-negative and accumulate to each word's
+    /// prior, so that cost only grows along a path and a best-first walk visits
+    /// completions in order.
+    pub fn complete(&self, raw: &str) -> Vec<Candidate> {
+        let input: Vec<char> = raw.trim().to_lowercase().chars().collect();
+        if input.is_empty() {
+            return Vec::new();
+        }
+        let mut out = self.complete_in(self.map.as_fst(), self.format, &input);
+        if let Some(user) = &self.user {
+            for c in self.complete_in(user.as_fst(), DictFormat::PLAIN, &input) {
+                if !out.iter().any(|o| o.word == c.word) {
+                    out.push(c);
+                }
+            }
+            out.sort_by(|a, b| a.cost.total_cmp(&b.cost));
+            out.truncate(self.cfg.top_k);
+        }
+        out
+    }
+
+    /// [`Engine::complete`] over one FST.
+    fn complete_in<F: AsRef<[u8]>>(
+        &self,
+        fst: &Fst<F>,
+        format: DictFormat,
+        input: &[char],
+    ) -> Vec<Candidate> {
+        // Follow the exact prefix.
+        let mut node = fst.root();
+        let mut base_out = 0u64;
+        let mut prefix: Vec<u8> = Vec::with_capacity(input.len());
+        for &c in input {
+            let Some(id) = alphabet::char_to_id(c) else {
+                return Vec::new();
+            };
+            let Some(ti) = node.find_input(id) else {
+                return Vec::new();
+            };
+            let t = node.transition(ti);
+            base_out += t.out.value();
+            prefix.push(id);
+            node = fst.node(t.addr);
+        }
+
+        let cost = |acc: u64, extra: usize| {
+            self.cfg.w_lm * format.prior(acc) as f32 * self.cfg.prior_scale
+                + self.cfg.c_complete_char * extra as f32
+        };
+        let candidate = |path: &[u8], acc: u64, extra: usize| Candidate {
+            word: alphabet::ids_to_string(path),
+            cost: cost(acc, extra),
+            edit: self.cfg.c_complete_char * extra as f32,
+        };
+        let mut out: Vec<Candidate> = Vec::new();
+        if node.is_final() {
+            out.push(candidate(
+                &prefix,
+                base_out + node.final_output().value(),
+                0,
+            ));
+        }
+
+        let mut heap: BinaryHeap<Frontier> = BinaryHeap::new();
+        for t in node.transitions() {
+            let mut path = prefix.clone();
+            path.push(t.inp);
+            let acc = base_out + t.out.value();
+            heap.push(Frontier {
+                cost: cost(acc, 1),
+                acc,
+                path,
+                addr: t.addr,
+            });
+        }
+        let mut visited = 0usize;
+        // Collect one extra (the anchor word may be out of best-first order);
+        // the final sort + truncate then yields the true top_k.
+        while let Some(Frontier {
+            acc, path, addr, ..
+        }) = heap.pop()
+        {
+            if out.len() > self.cfg.top_k {
+                break;
+            }
+            visited += 1;
+            if visited > self.cfg.max_nodes {
+                break;
+            }
+            let extra = path.len() - prefix.len();
+            let n = fst.node(addr);
+            if n.is_final() {
+                out.push(candidate(&path, acc + n.final_output().value(), extra));
+            }
+            for t in n.transitions() {
+                let mut p = path.clone();
+                p.push(t.inp);
+                let a = acc + t.out.value();
+                heap.push(Frontier {
+                    cost: cost(a, extra + 1),
+                    acc: a,
+                    path: p,
+                    addr: t.addr,
+                });
+            }
+        }
+        out.sort_by(|a, b| a.cost.total_cmp(&b.cost));
+        out.truncate(self.cfg.top_k);
+        out
+    }
+
+    /// Threshold DFS over the dictionary — and the user's words — for one
+    /// hypothesis at one budget.
+    fn search(&self, q: &Query, budget: f32, st: &mut State) {
+        self.search_in(self.map.as_fst(), self.format, q, budget, st);
+        if let Some(user) = &self.user {
+            self.search_in(user.as_fst(), DictFormat::PLAIN, q, budget, st);
+        }
+    }
+
+    fn search_in<F: AsRef<[u8]>>(
+        &self,
+        fst: &Fst<F>,
+        format: DictFormat,
+        q: &Query,
+        budget: f32,
+        st: &mut State,
+    ) {
+        let w = q.input.len() + 1;
+        if st.rows.len() < 2 * w {
+            st.rows.resize(2 * w, 0.0);
+        }
+        // Row 0: the empty word against the input = every typed char is extra.
+        st.rows[0] = 0.0;
+        for j in 1..w {
+            st.rows[j] = st.rows[j - 1] + q.ins[j - 1];
+        }
+        st.path.clear();
+        self.walk(fst, format, q, budget, st, fst.root(), 0, 0, 0);
+    }
+
+    /// A final word is accepted when `w_ch·row[m] ≤ budget`. A branch is pruned
+    /// when `w_ch·min(row)` exceeds the budget, or when that plus the subtree's
+    /// smallest prior (`out_acc`) and the hypothesis penalty can't beat the k-th
+    /// best total found so far.
+    #[allow(clippy::too_many_arguments)]
+    fn walk<F: AsRef<[u8]>>(
+        &self,
+        fst: &Fst<F>,
+        format: DictFormat,
+        q: &Query,
+        budget: f32,
+        st: &mut State,
+        node: Node,
+        depth: usize,
+        last: u8,
+        out_acc: u64,
+    ) {
+        st.nodes += 1;
+        if st.nodes > self.cfg.max_nodes {
+            return;
+        }
+        let cfg = &self.cfg;
+        let m = q.input.len();
+        let w = m + 1;
+        let row = &st.rows[depth * w..(depth + 1) * w];
+
+        if node.is_final() {
+            let edit = row[m];
+            if cfg.w_ch * edit <= budget {
+                let prior =
+                    format.prior(out_acc + node.final_output().value()) as f32 * cfg.prior_scale;
+                let channel = cfg.w_ch * edit + q.penalty;
+                let total = channel + cfg.w_lm * prior;
+                match st.best.get_mut(&st.path) {
+                    Some(c) if total < c.0 => {
+                        let old = c.0;
+                        *c = (total, channel);
+                        st.topk.update(Some(old), total);
+                    }
+                    Some(_) => {}
+                    None => {
+                        st.best.insert(st.path.clone(), (total, channel));
+                        st.topk.update(None, total);
+                    }
+                }
+            }
+        }
+
+        let lb = cfg.w_ch * row_min(row);
+        if lb > budget
+            || lb + cfg.w_lm * format.prior(out_acc) as f32 * cfg.prior_scale + q.penalty
+                > st.topk.bound()
+        {
+            return;
+        }
+
+        // Visit children cheapest-first: how well each continues the input at
+        // this depth, plus how much rarer its best word is.
+        let jkey = depth.min(m - 1);
+        let mut kids = [(0.0f32, 0u8, 0 as CompiledAddr, 0u64); 64];
+        let mut n = 0;
+        for t in node.transitions() {
+            if n == kids.len() {
+                break;
+            }
+            let key = q.sub[t.inp as usize * m + jkey]
+                + cfg.w_lm * format.prior(t.out.value()) as f32 * cfg.prior_scale;
+            kids[n] = (key, t.inp, t.addr, t.out.value());
+            n += 1;
+        }
+        kids[..n].sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+
+        if st.rows.len() < (depth + 2) * w {
+            st.rows.resize((depth + 2) * w, 0.0);
+        }
+        for &(_, c, addr, out_val) in &kids[..n] {
+            self.step(q, depth, c, last, &mut st.rows);
+            st.path.push(c);
+            self.walk(
+                fst,
+                format,
+                q,
+                budget,
+                st,
+                fst.node(addr),
+                depth + 1,
+                c,
+                out_acc + out_val,
+            );
+            st.path.pop();
+        }
+    }
+
+    /// One DP step: extend the candidate word by char `c` (previous word char
+    /// `last`), writing row `depth + 1` from rows `depth` and `depth − 1`.
+    #[inline]
+    fn step(&self, q: &Query, depth: usize, c: u8, last: u8, rows: &mut [f32]) {
+        let cfg = &self.cfg;
+        let m = q.input.len();
+        let w = m + 1;
+        // A missing letter that doubles the previous one is a common slip.
+        let del = if c == last {
+            self.kb.del_cost(c).min(cfg.c_del_double)
+        } else {
+            self.kb.del_cost(c)
+        };
+        let (head, tail) = rows.split_at_mut((depth + 1) * w);
+        let cur = &head[depth * w..];
+        let prev = if depth >= 1 {
+            Some(&head[(depth - 1) * w..depth * w])
+        } else {
+            None
+        };
+        let out = &mut tail[..w];
+        let crow = &q.sub[c as usize * m..(c as usize + 1) * m];
+        // Letters swallowed by a held key are cheap to be missing.
+        let absorb =
+            (!q.absorb.is_empty()).then(|| &q.absorb[c as usize * w..(c as usize + 1) * w]);
+        let del_at = |j: usize| {
+            let d = if absorb.is_some_and(|a| a[j]) {
+                del.min(cfg.c_del_held)
+            } else {
+                del
+            };
+            d + q.kept_del.get(j).copied().unwrap_or(0.0)
+        };
+
+        // A letter typed as two (oe for œ, ss for ß): about as cheap as a
+        // left-out accent.
+        let digraph = self.kb.digraph(c);
+        out[0] = cur[0] + del_at(0);
+        for j in 1..=m {
+            let mut b = (cur[j - 1] + crow[j - 1])
+                .min(cur[j] + del_at(j))
+                .min(out[j - 1] + q.ins[j - 1]);
+            if let Some(pr) = prev {
+                if j >= 2 && c == q.input[j - 2] && last == q.input[j - 1] {
+                    b = b.min(pr[j - 2] + q.trans[j]);
+                }
+            }
+            if let Some((x, y)) = digraph {
+                if j >= 2 && q.input[j - 2] == x && q.input[j - 1] == y {
+                    b = b.min(cur[j - 2] + cfg.c_accent);
+                }
+            }
+            out[j] = b;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Profile;
+
+    fn engine_with(words: &[(&str, u64)], cfg: Config) -> Engine<Vec<u8>> {
+        let mut kv: Vec<(Vec<u8>, u64)> = words
+            .iter()
+            .map(|(w, v)| {
+                (
+                    w.chars()
+                        .map(|c| alphabet::char_to_id(c).unwrap())
+                        .collect(),
+                    *v,
+                )
+            })
+            .collect();
+        kv.sort();
+        kv.dedup_by(|a, b| a.0 == b.0);
+        let map = Map::from_iter(kv.iter().map(|(k, v)| (k.as_slice(), *v))).unwrap();
+        Engine::new(map, cfg)
+    }
+
+    fn engine_from(words: &[&str]) -> Engine<Vec<u8>> {
+        let kv: Vec<(&str, u64)> = words.iter().map(|w| (*w, 0)).collect();
+        engine_with(&kv, Config::default())
+    }
+
+    fn engine_vals(words: &[(&str, u64)]) -> Engine<Vec<u8>> {
+        engine_with(words, Config::default())
+    }
+
+    fn top(e: &Engine<Vec<u8>>, s: &str) -> String {
+        e.suggest(s)
+            .into_iter()
+            .next()
+            .map(|c| c.word)
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn exact_match_wins() {
+        let e = engine_from(&["hello", "help", "world"]);
+        assert_eq!(top(&e, "hello"), "hello");
+    }
+
+    #[test]
+    fn neighbor_substitution() {
+        // 'e' is adjacent to 'd' on QWERTY.
+        let e = engine_from(&["world", "would", "word"]);
+        assert_eq!(top(&e, "worle"), "world");
+    }
+
+    #[test]
+    fn missing_letter() {
+        let e = engine_from(&["hello", "world"]);
+        assert_eq!(top(&e, "helo"), "hello");
+    }
+
+    #[test]
+    fn extra_letter() {
+        let e = engine_from(&["hello", "help"]);
+        assert_eq!(top(&e, "helllo"), "hello");
+    }
+
+    #[test]
+    fn a_letter_typed_as_two() {
+        let e = engine_vals(&[
+            ("vœux", 400),
+            ("vieux", 3000),
+            ("straße", 500),
+            ("strasser", 10),
+        ]);
+        assert_eq!(top(&e, "voeux"), "vœux");
+        assert_eq!(top(&e, "strasse"), "straße");
+    }
+
+    #[test]
+    fn transposition() {
+        let e = engine_from(&["hello", "world"]);
+        assert_eq!(top(&e, "hlelo"), "hello");
+    }
+
+    #[test]
+    fn wrong_layout() {
+        let e = engine_from(&["привет", "пока"]);
+        assert_eq!(top(&e, "ghbdtn"), "привет");
+    }
+
+    #[test]
+    fn no_wrong_layout_on_phone() {
+        // Phone keys are labelled: the φ hypothesis is off there.
+        let e = engine_with(
+            &[("привет", 0)],
+            Config::default().with_profile(Profile::Phone),
+        );
+        assert!(e.suggest("ghbdtn").iter().all(|c| c.word != "привет"));
+    }
+
+    #[test]
+    fn heavy_typos_surface_via_widening() {
+        // Two deletions exceed the initial budget, so this only appears once
+        // the budget widens because close candidates are scarce.
+        let e = engine_from(&["information", "world"]);
+        let got = e.suggest("infrmaton"); // missing 'o' and 'i'
+        assert_eq!(got.first().map(|c| c.word.as_str()), Some("information"));
+    }
+
+    #[test]
+    fn yo_is_almost_free() {
+        let e = engine_vals(&[("ещё", 5000), ("её", 5000), ("еще", 20000)]);
+        assert_eq!(top(&e, "ещо"), "ещё");
+        assert!(e.suggest("еще").iter().any(|c| c.word == "ещё"));
+    }
+
+    #[test]
+    fn phonetic_vowel() {
+        let e = engine_from(&["корова", "карта", "крова"]);
+        assert_eq!(top(&e, "карова"), "корова");
+    }
+
+    #[test]
+    fn missing_double_letter() {
+        let e = engine_from(&["корректный", "коректор"]);
+        assert_eq!(top(&e, "коректный"), "корректный");
+    }
+
+    #[test]
+    fn key_bounce() {
+        let e = engine_from(&["привет", "приветы", "приведет"]);
+        assert_eq!(top(&e, "приввет"), "привет");
+    }
+
+    #[test]
+    fn missing_apostrophe() {
+        let e = engine_from(&["don't", "done"]);
+        assert_eq!(top(&e, "dont"), "don't");
+    }
+
+    #[test]
+    fn held_key_absorbs_neighbors() {
+        // «мастер» typed as «атер»: the finger stayed on «а» and rolled over м and с.
+        let cfg = Config::default().with_profile(Profile::Phone);
+        let e = engine_with(&[("мастер", 0), ("тер", 0), ("мотор", 0)], cfg);
+        assert_eq!(top(&e, "атер"), "тер");
+        let held = Hint {
+            held: true,
+            ..Hint::default()
+        };
+        let hints = [held, Hint::default(), Hint::default(), Hint::default()];
+        let (got, _) = e.suggest_hinted("атер", &hints);
+        assert_eq!(got.first().map(|c| c.word.as_str()), Some("мастер"));
+    }
+
+    #[test]
+    fn kept_letters_are_not_rewritten() {
+        let e = engine_vals(&[("умчались", 5000), ("мучились", 3000)]);
+        let kept = |n: usize| -> Vec<Hint> {
+            (0..8)
+                .map(|i| Hint {
+                    kept: if i < n { 1000.0 } else { 0.0 },
+                    ..Hint::default()
+                })
+                .collect()
+        };
+        let words = |h: &[Hint]| -> Vec<String> {
+            e.suggest_hinted("мучались", h)
+                .0
+                .into_iter()
+                .map(|c| c.word)
+                .collect()
+        };
+        assert!(words(&[]).contains(&"умчались".to_string()));
+        // «муч» kept: the swap at the start is out, the tail may change.
+        assert_eq!(words(&kept(3)), vec!["мучились".to_string()]);
+        // «муча» kept: neither word starts that way.
+        assert!(words(&kept(4)).is_empty());
+    }
+
+    #[test]
+    fn kept_e_may_still_be_yo() {
+        let e = engine_vals(&[("ещё", 1000)]);
+        let hints = vec![
+            Hint {
+                kept: 1000.0,
+                ..Hint::default()
+            };
+            3
+        ];
+        let (got, _) = e.suggest_hinted("еще", &hints);
+        assert_eq!(got.first().map(|c| c.word.as_str()), Some("ещё"));
+    }
+
+    #[test]
+    fn touch_points_override_key_geometry() {
+        // «с» typed, but the tap was on the border with «м»: «мама» becomes cheap.
+        let e = engine_from(&["мама", "сама"]);
+        let cost = |spatial: Vec<(char, f32)>| {
+            let hint = Hint {
+                spatial,
+                ..Hint::default()
+            };
+            let (got, _) = e.suggest_hinted(
+                "сама",
+                &[hint, Hint::default(), Hint::default(), Hint::default()],
+            );
+            got.iter()
+                .find(|c| c.word == "мама")
+                .map(|c| c.cost)
+                .unwrap_or(f32::INFINITY)
+        };
+        assert!(cost(vec![('м', 0.6)]) + 1.0 < cost(vec![]));
+        assert!(
+            cost(vec![('м', 6.0)]) > cost(vec![]),
+            "a dead-center tap makes the neighbor dearer"
+        );
+    }
+
+    #[test]
+    fn cross_hand_transpositions_are_cheaper() {
+        // Desktop fingers: н (right index) ↔ а (left index) cross hands;
+        // а ↔ п are both left index.
+        let e = engine_from(&["напечатать"]);
+        let cost = |typed: &str, hints: &[Hint]| e.suggest_hinted(typed, hints).0[0].cost;
+        let cross = cost("анпечатать", &[]);
+        let same = cost("нпаечатать", &[]);
+        assert!(cross < same, "{cross} vs {same}");
+        let mut hints = vec![Hint::default(); 10];
+        hints[1].rollover = true;
+        assert!(cost("анпечатать", &hints) < cross);
+    }
+
+    #[test]
+    fn mangled_input_still_gets_suggestions() {
+        let e = engine_from(&["проверяемый", "мир"]);
+        assert!(!e.suggest("пркврчнмвф").is_empty());
+    }
+
+    fn bigram_map(pairs: &[(&str, &str, u64)]) -> Map<Vec<u8>> {
+        let mut kv: Vec<(Vec<u8>, u64)> = pairs
+            .iter()
+            .map(|(a, b, v)| {
+                let mut k = remap(a).unwrap();
+                k.push(BIGRAM_SEP);
+                k.extend(remap(b).unwrap());
+                (k, *v)
+            })
+            .collect();
+        kv.sort();
+        Map::from_iter(kv.iter().map(|(k, v)| (k.as_slice(), *v))).unwrap()
+    }
+
+    #[test]
+    fn context_decides_between_close_candidates() {
+        // «как де»: «де» and «же» are equally plausible alone; after «как»,
+        // «же» is far more likely.
+        let e = engine_with(
+            &[("де", 9000), ("же", 9200)],
+            Config::default().with_profile(Profile::Phone),
+        )
+        .with_bigrams(bigram_map(&[("как", "же", 1500)]));
+        let mut got = e.suggest("де");
+        e.rerank("как", &mut got);
+        assert_eq!(got[0].word, "же", "{got:?}");
+    }
+
+    #[test]
+    fn predicts_likeliest_next_words() {
+        let e = engine_from(&["как", "дела", "же", "раз"]).with_bigrams(bigram_map(&[
+            ("как", "дела", 900),
+            ("как", "же", 1200),
+            ("как", "раз", 2500),
+            ("раз", "два", 300),
+        ]));
+        let words: Vec<String> = e.predict("как", 2).into_iter().map(|c| c.word).collect();
+        assert_eq!(words, vec!["дела", "же"]);
+        assert!(e.predict("нет", 3).is_empty());
+    }
+
+    #[test]
+    fn context_completes_the_typed_prefix() {
+        let e = engine_vals(&[("быть", 3000), ("был", 1000), ("бы", 900), ("может", 2000)])
+            .with_bigrams(bigram_map(&[("может", "быть", 500), ("может", "бы", 4000)]));
+        let words: Vec<String> = e
+            .complete_after("может", "б", 5)
+            .into_iter()
+            .map(|c| c.word)
+            .collect();
+        assert_eq!(words, vec!["быть".to_string(), "бы".to_string()]);
+        assert!(e
+            .complete_after("может", "бы", 5)
+            .iter()
+            .all(|c| c.word != "бы"));
+    }
+
+    #[test]
+    fn endings_agree_without_the_word_pair() {
+        let cfg = Config::default().with_profile(Profile::Phone);
+        let e = engine_with(
+            &[("дорожка", 2000), ("дорожках", 4000), ("неведомых", 9000)],
+            cfg,
+        );
+        let mut kv: Vec<(Vec<u8>, u64)> =
+            vec![(ending_key("неведомых", "дорожках").unwrap(), 12_000)];
+        kv.push((ending_key("неведомых", "дорожка").unwrap(), 8_000));
+        kv.sort();
+        let e = e.with_bigrams(Map::from_iter(kv).unwrap());
+        let plain = e.suggest("дорожкдж");
+        let mut ctx = plain.clone();
+        e.rerank("неведомых", &mut ctx);
+        let gap = |c: &[Candidate]| {
+            let cost = |w: &str| c.iter().find(|x| x.word == w).map(|x| x.cost).unwrap();
+            cost("дорожках") - cost("дорожка")
+        };
+        assert!(gap(&ctx) < gap(&plain) - 0.5, "{plain:?} {ctx:?}");
+        assert_eq!(
+            ctx[0].word, "дорожках",
+            "after «неведомых»: the agreeing form"
+        );
+    }
+
+    #[test]
+    fn user_words_are_words() {
+        let mut e = engine_vals(&[("кринж", 3000), ("кружок", 4000)]);
+        assert!(!e.contains("кринжово"));
+        e.set_user_words(&["кринжово"]);
+        assert!(e.contains("Кринжово"));
+        assert_eq!(top(&e, "кринжлво"), "кринжово");
+        assert!(e.is_prefix("кринжо"));
+        assert!(e.complete("кринжо").iter().any(|c| c.word == "кринжово"));
+        e.set_user_words::<&str>(&[]);
+        assert!(!e.contains("кринжово"));
+    }
+
+    #[test]
+    fn grammar_agreement_without_the_word_pair() {
+        // «пользовательский ввод / вод»: the same swipe path; «вод» is the
+        // likelier word, but it's genitive plural after a nominative adjective.
+        let e = engine_vals(&[("ввод", 5000), ("вод", 4300), ("пользовательский", 9000)]);
+        let id = |w: &str| -> Vec<u8> {
+            w.chars()
+                .map(|c| alphabet::char_to_id(c).unwrap())
+                .collect()
+        };
+        let class = |w: &str, c: u64| ([vec![0, 3], id(w)].concat(), c);
+        let mut kv = vec![
+            class("пользовательский", 1),
+            class("ввод", 2),
+            class("вод", 3),
+            (vec![0, 5, 0, 1], 1),      // class 1: tag 1 (adj masc sg nom)
+            (vec![0, 5, 0, 2], 2),      // class 2: tag 2 (noun masc sg nom)
+            (vec![0, 5, 0, 3], 3),      // class 3: tag 3 (noun femn pl gen)
+            (vec![0, 4, 1, 2], 11_000), // adj → masc noun: likely
+            (vec![0, 4, 1, 3], 5_000),  // adj → gen. plural: unlikely
+        ];
+        kv.sort();
+        let e = e.with_bigrams(Map::from_iter(kv).unwrap());
+        let cost = |w: &str| {
+            let mut c = vec![Candidate {
+                word: w.into(),
+                cost: e.word_cost(w).unwrap(),
+                edit: 0.0,
+            }];
+            e.rerank("пользовательский", &mut c);
+            c[0].cost
+        };
+        assert!(e.word_cost("вод").unwrap() < e.word_cost("ввод").unwrap());
+        assert!(cost("ввод") < cost("вод"));
+    }
+
+    #[test]
+    fn the_phrase_grammar_reads_every_reading() {
+        // «с таким опытом»: «таким» is mostly plural dative, but also the
+        // masculine instrumental — which «опытом» agrees with.
+        let e = engine_vals(&[
+            ("с", 3000),
+            ("таким", 6000),
+            ("опытом", 6000),
+            ("опытам", 5500),
+        ]);
+        let id = |w: &str| -> Vec<u8> {
+            w.chars()
+                .map(|c| alphabet::char_to_id(c).unwrap())
+                .collect()
+        };
+        let parse = crate::gram::parse;
+        // Class 1 (low bits) for all; reading sets 1–4 above.
+        let word = |w: &str, set: u64| ([vec![0, 3], id(w)].concat(), 1 | set << 16);
+        let mut kv = vec![
+            word("с", 1),
+            word("таким", 2),
+            word("опытом", 3),
+            word("опытам", 4),
+            (vec![0, 9, 0, 1, 0], parse("PREP")),
+            (vec![0, 9, 0, 2, 0], parse("ADJF,plur,datv")),
+            (vec![0, 9, 0, 2, 1], parse("ADJF,masc,sing,ablt")),
+            (vec![0, 9, 0, 3, 0], parse("NOUN,masc,sing,ablt")),
+            (vec![0, 9, 0, 4, 0], parse("NOUN,masc,plur,datv")),
+        ];
+        kv.sort();
+        let e = e.with_bigrams(Map::from_iter(kv).unwrap());
+        assert_eq!(e.readings("таким").len(), 2);
+        let mut cands: Vec<Candidate> = ["опытам", "опытом"]
+            .iter()
+            .map(|w| Candidate {
+                word: w.to_string(),
+                cost: e.word_cost(w).unwrap(),
+                edit: 0.0,
+            })
+            .collect();
+        cands.sort_by(|a, b| a.cost.total_cmp(&b.cost));
+        assert_eq!(cands[0].word, "опытам");
+        e.rerank_phrase(&["с".into(), "таким".into()], &mut cands);
+        assert_eq!(cands[0].word, "опытом", "{cands:?}");
+    }
+
+    #[test]
+    fn the_grammar_can_live_in_the_dictionary() {
+        // Priors in steps of 50, grammar ids in 2 bits; id 1 is (class 7,
+        // reading set 3).
+        let format = DictFormat {
+            quantum: 50,
+            shift: 2,
+        };
+        let id = |w: &str| -> Vec<u8> {
+            w.chars()
+                .map(|c| alphabet::char_to_id(c).unwrap())
+                .collect()
+        };
+        let mut words = vec![
+            (id("дом"), format.value(4_000, 1)),
+            (id("дым"), format.value(6_000, 0)),
+        ];
+        words.sort();
+        let mut b = fst::raw::Builder::new_type(Vec::new(), format.fst_type()).unwrap();
+        for (k, v) in &words {
+            b.insert(k, *v).unwrap();
+        }
+        let dict = Map::new(b.into_inner().unwrap()).unwrap();
+        let mut kv = vec![
+            (vec![0, 10, 0, 1], 7 | 3 << 16),
+            (
+                vec![0, 9, 0, 3, 0],
+                crate::gram::parse("NOUN,masc,sing,nomn"),
+            ),
+        ];
+        kv.sort();
+        let e = Engine::new(dict, Config::default()).with_bigrams(Map::from_iter(kv).unwrap());
+        assert_eq!(e.format, format);
+        assert_eq!(e.word_class("дом"), Some(7));
+        assert_eq!(e.readings("дом").len(), 1);
+        assert_eq!(e.word_class("дым"), None);
+        let prior = e.config().prior_scale * e.config().w_lm;
+        assert!((e.word_cost("дом").unwrap() - 4_000.0 * prior).abs() < 1e-3);
+        assert_eq!(top(&e, "дрм"), "дом");
+    }
+
+    #[test]
+    fn the_sentence_says_what_it_is_about() {
+        let e = engine_vals(&[("кошка", 7_000), ("крошка", 6_500), ("корм", 7_000)]);
+        let id = |w: &str| -> Vec<u8> {
+            w.chars()
+                .map(|c| alphabet::char_to_id(c).unwrap())
+                .collect()
+        };
+        // Sense classes: 1 pets, 2 bread; pets go with pets (+1.5 nats), not
+        // with bread (-0.5).
+        let byte = |x: f32| ((x / 0.05).round() + 128.0) as u64;
+        let mut kv = vec![
+            ([vec![0, 13], id("кошка")].concat(), 1),
+            ([vec![0, 13], id("крошка")].concat(), 2),
+            ([vec![0, 13], id("корм")].concat(), 1),
+            (vec![0, 14, 0, 1, 0, 1], byte(1.5)),
+            (vec![0, 14, 0, 1, 0, 2], byte(-0.5)),
+        ];
+        kv.sort();
+        let e = e.with_bigrams(Map::from_iter(kv).unwrap());
+        let mut cands: Vec<Candidate> = ["крошка", "кошка"]
+            .iter()
+            .map(|w| Candidate {
+                word: w.to_string(),
+                cost: e.word_cost(w).unwrap(),
+                edit: 0.0,
+            })
+            .collect();
+        assert_eq!(cands[0].word, "крошка");
+        e.rerank_topic(&["корм".into(), "для".into()], &mut cands);
+        assert_eq!(cands[0].word, "кошка", "{cands:?}");
+    }
+
+    #[test]
+    fn commas_by_the_words_around() {
+        let e = engine_vals(&[("знаю", 5000), ("что", 3000), ("потому", 5000)]);
+        let id = |w: &str| -> Vec<u8> {
+            w.chars()
+                .map(|c| alphabet::char_to_id(c).unwrap())
+                .collect()
+        };
+        let byte = |x: f32| ((x / 0.05).round() + 128.0) as u64;
+        let mut kv = vec![
+            (vec![0, 15, 0], byte(-2.3)),
+            ([vec![0, 15, 1], id("что")].concat(), byte(1.5)),
+            (
+                [vec![0, 15, 3], id("потому"), vec![0], id("что")].concat(),
+                byte(-4.0),
+            ),
+        ];
+        kv.sort();
+        let e = e.with_bigrams(Map::from_iter(kv).unwrap());
+        assert!((e.comma_odds("знаю", "что").unwrap() - 1.5).abs() < 0.03);
+        // «потому что» has its own: no comma between.
+        assert!(e.comma_odds("потому", "что").unwrap() < -3.0);
+    }
+
+    #[test]
+    fn rules_on_the_next_word() {
+        let e = engine_vals(&[("в", 3000), ("а", 3000), ("принципе", 8000)]);
+        let id = |w: &str| -> Vec<u8> {
+            w.chars()
+                .map(|c| alphabet::char_to_id(c).unwrap())
+                .collect()
+        };
+        let mut kv = vec![
+            ([vec![0, 7], id("в"), vec![0], id("а")].concat(), 2), // pair 0, «в» first
+            ([vec![0, 7], id("а"), vec![0], id("в")].concat(), 3),
+            ([vec![0, 6, 0, 0, 0], b"w+1=\xd0\xbf".to_vec()].concat(), 1), // unrelated
+            (
+                [vec![0, 6, 0, 0, 0], "w+1=принципе".as_bytes().to_vec()].concat(),
+                6_000,
+            ), // for «в»
+        ];
+        kv.sort();
+        let e = e.with_bigrams(Map::from_iter(kv).unwrap());
+        assert_eq!(e.next_evidence("а", "в", "принципе"), 6.0);
+        assert_eq!(e.next_evidence("в", "а", "принципе"), -6.0);
+        assert_eq!(e.next_evidence("а", "в", "доме"), 0.0);
+    }
+
+    #[test]
+    fn slid_keys_may_be_missing() {
+        // The finger landed on «к», slid to «о» and lifted: «кот» typed as «от».
+        let e = engine_from(&["кот", "от", "код"]);
+        let cost = |hints: &[Hint]| {
+            let (got, _) = e.suggest_hinted("от", hints);
+            got.iter()
+                .find(|c| c.word == "кот")
+                .map(|c| c.cost)
+                .unwrap()
+        };
+        let slide = Hint {
+            slid: vec!['к'],
+            ..Hint::default()
+        };
+        assert!(
+            cost(&[slide, Hint::default()]) + 2.0 < cost(&[]),
+            "a slid-over letter is cheap to miss"
+        );
+    }
+
+    #[test]
+    fn one_row_keyboard_reads_columns() {
+        // «мастер» on a one-row ЙЦУКЕН: each tap is a column, typed here as the
+        // column's home-row letter (м→п, с→а, т→о, е→п).
+        let cfg = Config {
+            one_row_input: true,
+            ..Config::default().with_profile(Profile::Phone)
+        };
+        let e = engine_with(&[("мастер", 2000), ("пастер", 6000), ("ссора", 2000)], cfg);
+        assert_eq!(top(&e, "пааопр"), "мастер");
+    }
+
+    #[test]
+    fn home_row_typing() {
+        // каракатица typed without leaving the home row (фыва олдж): every key
+        // stands for its finger's column.
+        let e = engine_from(&["каракатица", "карта", "кошка", "автомат"]);
+        assert_eq!(top(&e, "ааоаааоаыа"), "каракатица");
+    }
+
+    #[test]
+    fn completion_returns_only_prefixed() {
+        let e = engine_from(&["app", "apple", "apply", "banana"]);
+        let words: Vec<String> = e.complete("app").into_iter().map(|c| c.word).collect();
+        assert!(words.contains(&"app".to_string()));
+        assert!(words.contains(&"apple".to_string()));
+        assert!(words.contains(&"apply".to_string()));
+        assert!(!words.contains(&"banana".to_string()));
+    }
+
+    #[test]
+    fn completion_pays_for_untyped_chars() {
+        // A frequent long word no longer beats a slightly rarer short one.
+        let e = engine_vals(&[("ди", 9000), ("дитя", 8000), ("директор", 7500)]);
+        let words: Vec<String> = e.complete("ди").into_iter().map(|c| c.word).collect();
+        assert_eq!(words, vec!["ди", "дитя", "директор"]);
+    }
+
+    #[test]
+    fn completion_frequency_order() {
+        // Lower stored value = more frequent = ranked first (here strongly
+        // enough to outweigh the untyped-char cost).
+        let e = engine_vals(&[("app", 9000), ("apple", 1000), ("apply", 3000)]);
+        let words: Vec<String> = e.complete("app").into_iter().map(|c| c.word).collect();
+        assert_eq!(words, vec!["apple", "apply", "app"]);
+    }
+}

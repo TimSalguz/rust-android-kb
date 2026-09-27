@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/index-builder", "crates/cli", "crates/android"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+kbcore = { path = "crates/core" }
+fst = "0.4.7"
+memmap2 = "0.9.4"
+crossterm = "0.28.1"
+jni = { version = "0.21", default-features = false }
+
+# Speed-optimized: opt-level 3 is ~1.7x faster than "z" on the search for
+# ~60 KB more binary.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+# Unwinding stays on: the Android JNI layer catches panics so a bug can't
+# take the whole keyboard process down.

@@ -1,0 +1,175 @@
+# Hand-curated for Brazilian Portuguese: chat abbreviations, interjections and
+# loanwords as people type them — so autocorrect leaves them alone and suggests
+# them (words the dictionary already has — tá, pra, né, mano — are not repeated
+# here). `word<TAB>count[<TAB>model]`: with a model (a verb of the VERO
+# dictionary conjugated the same way) tools/lang/pt.sh adds every form
+# (printar like falar: printei, printou, printando).
+# chat abbreviations
+vc	5000
+vcs	1000
+tbm	1500
+pq	3000
+oq	800
+blz	1000
+flw	800
+vlw	1000
+obg	800
+obgd	300
+pfv	500
+pfvr	300
+plmdds	200
+mds	800
+tmj	500
+sdds	500
+msg	800
+msgs	300
+cmg	500
+ctg	300
+hj	1500
+amn	500
+dps	800
+td	800
+tds	500
+nd	500
+ngm	500
+mto	800
+mta	500
+mts	300
+qnd	500
+qdo	300
+qq	300
+qlq	300
+bj	500
+bjs	1000
+bjo	300
+bjos	300
+abs	500
+fds	500
+vdd	800
+sla	800
+pdc	300
+tlgd	300
+cvs	200
+kd	300
+# laughter and interjections
+kk	800
+kkk	1500
+kkkk	1500
+kkkkk	800
+kkkkkk	300
+rsrs	800
+rsrsrs	300
+haha	1000
+hahaha	800
+hahahaha	300
+aham	1000
+uhum	800
+hmm	500
+vish	500
+vixe	500
+oxe	500
+oxi	300
+oxente	300
+uai	500
+pô	1000
+putz	800
+eba	800
+aff	500
+affs	300
+eta	500
+toc	300
+tic	200
+tac	200
+sextou	300
+# everyday slang
+véi	500
+véio	300
+vei	300
+mermão	200
+parça	300
+brother	500
+bro	500
+zuera	300
+daora	800
+dahora	300
+mó	500
+trampo	500
+trampar	300	falar
+busão	300
+sussa	300
+migo	300
+miga	300
+amg	300
+crush	800
+# internet and loanwords
+ok	5000
+okay	1000
+emoji	500
+emojis	300
+wifi	500
+wi-fi	300
+meme	800
+memes	500
+zap	800
+zapzap	300
+whatsapp	1500
+whats	300
+insta	800
+instagram	1000
+facebook	800
+youtube	800
+youtuber	300
+tiktok	500
+story	500
+stories	500
+feed	300
+app	1500
+apps	500
+selfie	500
+selfies	200
+spoiler	300
+spoilers	200
+fake	500
+fakes	200
+hater	200
+haters	200
+podcast	300
+streaming	300
+gamer	200
+smartphone	300
+delivery	300
+bike	500
+bikes	200
+pet	300
+led	300
+pix	1000
+uber	500
+like	800
+likes	300
+bug	500
+bugs	200
+email	1000
+emails	300
+e-mail	500
+e-mails	200
+covid	500
+lockdown	200
+home	300
+office	200
+printar	500	falar
+print	500
+prints	300
+stalkear	300	passear
+shippar	300	falar
+bugar	300	chegar
+hackear	300	passear
+trollar	200	falar
+flopar	200	falar
+mitar	200	falar
+lacrar	300
+upar	200
+logar	300
+deslogar	200	chegar
+tuitar	200
+tweet	200
+dropar	200	falar

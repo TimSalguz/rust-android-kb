@@ -1,0 +1,36 @@
+The Spanish word forms in data/es/lexicon.tsv (and dict.fst built from it)
+are derived from the RLA-ES Spanish spelling dictionary, version 2.9
+(es.dic / es.aff, "español general"):
+
+  Recursos Lingüísticos Abiertos del español (RLA-ES)
+  Santiago Bosio and contributors
+  https://github.com/sbosio/rla-es
+  https://github.com/sbosio/rla-es/releases/download/v2.9/es.oxt
+
+RLA-ES is distributed under three alternative licenses, at the user's choice:
+GNU GPL version 3 or later, GNU LGPL version 3 or later, or the Mozilla Public
+License version 1.1 or later. This project uses it under the Mozilla Public
+License 2.0 (as "MPL 1.1 or later" permits) and, alternatively, the GNU LGPL
+version 3 or later — not the GPL.
+
+  This Source Code Form is subject to the terms of the Mozilla Public
+  License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  You can obtain one at https://mozilla.org/MPL/2.0/.
+
+  LGPL 3.0: https://www.gnu.org/licenses/lgpl-3.0.html
+
+The Source Code Form of the word list is the RLA-ES dictionary above;
+tools/lang/es.sh regenerates the derived files from it (it expands every
+affix of es.dic / es.aff, keeps verb forms with enclitic pronouns only where
+the corpora attest them, adds attested diminutives, superlatives and -mente
+adverbs and frequent subtitle words, and drops one-letter symbols).
+
+Original license statement (LICENSE.md of RLA-ES):
+
+  El proyecto y los diccionarios se distribuyen bajo un triple esquema de
+  licencias disjuntas: GNU GPL versión 3 o posterior, GNU LGPL versión 3 o
+  posterior o MPL versión 1.1 o posterior. Puede seleccionar libremente bajo
+  cuál de estas licencias realizará el uso.
+
+The word counts come from hermitdave/FrequencyWords (2018, OpenSubtitles),
+CC BY-SA 4.0: https://github.com/hermitdave/FrequencyWords

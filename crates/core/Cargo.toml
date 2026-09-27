@@ -1,0 +1,10 @@
+[package]
+name = "kbcore"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Offline, mmap-backed, keyboard-geometry-weighted autocorrect engine (Russian, English, German, French, Spanish, Portuguese)."
+
+[dependencies]
+fst = { workspace = true }
+memmap2 = { workspace = true }

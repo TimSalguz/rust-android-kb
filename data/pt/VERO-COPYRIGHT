@@ -1,0 +1,21 @@
+The Portuguese word forms in data/pt/lexicon.tsv (and the FSTs built from it)
+are derived from VERO — Verificador Ortográfico do LibreOffice, the LibreOffice
+pt_BR Hunspell dictionary, version 3.2 (pt_BR.dic / pt_BR.aff from
+https://github.com/LibreOffice/dictionaries/tree/master/pt_BR):
+
+  Copyright (C) 2006 - 2013 por/by Raimundo Santos Moura <raimundo.smoura@gmail.com>
+  and the contributors of Projeto VERO
+  (http://pt-br.libreoffice.org/projetos/projeto-vero-verificador-ortografico/).
+
+  This dictionary is licensed under the terms of the GNU Lesser General
+  Public License version 3 (LGPLv3), as published by the Free Software
+  Foundation, and the Mozilla Public License, as published by the Mozilla
+  Foundation.
+
+  Este dicionário está licenciado sob os termos da Licença Pública Geral
+  Menor versão 3 (LGPLv3), como publicado pela Free Software Foundation, e
+  pela Mozilla Public License, como publicado pela Mozilla Foundation.
+
+The dictionary was expanded into word forms and filtered by tools/lang/pt.sh;
+the unmodified source is available at the URL above. The license texts:
+https://www.gnu.org/licenses/lgpl-3.0.html, https://www.mozilla.org/MPL/.

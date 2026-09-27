@@ -1,0 +1,64 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --release
+
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+      - run: rustup target add aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - name: Android SDK packages
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-35" "build-tools;35.0.0" > /dev/null
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            data/lexicon.tsv
+            data/proper.tsv
+            data/bigrams.tsv
+            data/endings.tsv
+            data/classes.tsv
+            data/class_tags.tsv
+            data/tag_pairs.tsv
+            data/confusions.tsv
+            data/rules.tsv
+          key: lexicon-${{ hashFiles('tools/fetch_sources.sh', 'tools/build_lexicon.sh', 'tools/make_lexicon.py', 'tools/opencorpora_forms.py', 'tools/proper_nouns.py', 'tools/build_bigrams.py', 'tools/build_classes.py', 'tools/confusion_sets.py', 'tools/export_observations.py', 'tools/decision_lists.py', 'data/slang.tsv') }}
+      - name: Dictionary
+        run: |
+          if [ ! -s data/lexicon.tsv ] || [ ! -s data/bigrams.tsv ]; then
+            pip install -q pymorphy3 pymorphy3-dicts-ru
+            sudo apt-get install -y -qq hunspell-tools hunspell-ru > /dev/null
+            LEIPZIG=1 tools/fetch_sources.sh
+            tools/build_lexicon.sh
+          fi
+      - name: Build APK
+        env:
+          VERSION_CODE: ${{ github.run_number }}
+        run: ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME" android/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rust-kb-apk
+          path: target/apk/rust-kb.apk

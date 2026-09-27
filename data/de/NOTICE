@@ -1,0 +1,34 @@
+German language pack (data/de) — attributions
+
+The German word list (lexicon.tsv → dict.fst), the capitalization list
+(proper.tsv → casing.fst) and the context model (bigrams.tsv, endings.tsv,
+confusions.tsv, rules.tsv → bigrams.fst) are derived from the works below.
+The derived word lists are distributed under CC BY-SA 4.0
+(https://creativecommons.org/licenses/by-sa/4.0/). Changes: forms extracted,
+lowercased, merged, filtered and weighted by tools/lang/de.sh.
+
+- german-pos-dict 1.2.4 (LanguageTool), © Daniel Naber and contributors;
+  original source: export from Morphy (Wolfgang Lezius,
+  http://morphy.wolfganglezius.de/), extended by korrekturen.de
+  (https://www.korrekturen.de/flexion/). CC BY-SA 4.0.
+  https://github.com/languagetool-org/german-pos-dict
+
+- Wiktionary (English edition), German entries, © Wiktionary contributors,
+  CC BY-SA 4.0 and GFDL; machine-readable extraction by kaikki.org
+  (Tatu Ylonen, wiktextract). https://kaikki.org/dictionary/German/
+
+- FrequencyWords 2018 (de_full.txt), © Hermit Dave, built from OpenSubtitles
+  (http://www.opensubtitles.org/). CC BY-SA 4.0.
+  https://github.com/hermitdave/FrequencyWords
+
+- Tatoeba sentences (deu), © tatoeba.org contributors. CC BY 2.0 FR.
+  https://tatoeba.org
+
+- Leipzig Corpora Collection, deu-de_web-public_2019_1M,
+  © Universität Leipzig / Sächsische Akademie der Wissenschaften / InfAI. CC BY.
+  D. Goldhahn, T. Eckart, U. Quasthoff: Building Large Monolingual
+  Dictionaries at the Leipzig Corpora Collection: From 100 to 200 Languages.
+  LREC 2012. https://wortschatz.uni-leipzig.de
+
+- SCOWL 2020.12.07, © Kevin Atkinson (see data/SCOWL-COPYRIGHT) — used only
+  to recognize English words and names, none of its words are copied.

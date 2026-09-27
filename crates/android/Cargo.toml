@@ -1,0 +1,16 @@
+[package]
+name = "kbime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Android input method on top of kbcore: keyboard logic in Rust, a thin JNI surface for the Java shim."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+kbcore = { workspace = true }
+jni = { workspace = true }
+
+[dev-dependencies]
+fst = { workspace = true }

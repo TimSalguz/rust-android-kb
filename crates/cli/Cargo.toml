@@ -1,0 +1,14 @@
+[package]
+name = "cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Terminal demo/harness for the kbcore autocorrect engine."
+
+[[bin]]
+name = "kbdemo"
+path = "src/main.rs"
+
+[dependencies]
+kbcore = { workspace = true }
+crossterm = { workspace = true }

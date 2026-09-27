@@ -1,0 +1,18 @@
+The French word forms of this keyboard (data/fr/lexicon.tsv, data/fr/proper.tsv
+and the dict.fst / casing.fst built from them) are derived from:
+
+  Lexique des formes fléchies du français — Grammalecte, version 7.7
+  Olivier R. and the Dicollecte contributors — https://grammalecte.net/
+  Source form: https://grammalecte.net/dic/lexique-grammalecte-fr-v7.7.zip
+
+  This Source Code Form is subject to the terms of the Mozilla Public
+  License, v. 2.0. If a copy of the MPL was not distributed with this
+  file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+Changes made here (tools/lang/fr.sh, tools/lang/fr_prep.py): the forms are
+lowercased and NFC-normalized, ’ is written ', the spellings only the 1990
+reform uses, the doubtful and error entries, symbols, roman numerals and most
+single letters are left out, and each form gets a frequency from the
+OpenSubtitles counts of hermitdave/FrequencyWords (CC BY-SA 4.0). The derived
+files are distributed under the MPL 2.0 (the Grammalecte word forms) and
+CC BY-SA 4.0 (the frequencies).

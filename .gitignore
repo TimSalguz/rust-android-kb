@@ -1,0 +1,42 @@
+/target
+# Built dictionaries and other outputs (android/build.sh makes them).
+/*.fst
+*.apk
+__pycache__/
+*.pyc
+*.log
+# Release signing keys never go in (the committed debug key is public).
+*.jks
+release*.keystore
+# Local tools.
+.direnv/
+result*
+.idea/
+.vscode/
+.claude/
+CLAUDE.md
+/data/*
+!/data/slang.tsv
+!/data/README.md
+!/data/SCOWL-COPYRIGHT
+!/data/HUNSPELL-RU-COPYRIGHT
+!/data/es/
+/data/es/*
+!/data/es/README.md
+!/data/es/slang.tsv
+!/data/es/RLA-ES-COPYRIGHT
+!/data/pt/
+/data/pt/*
+!/data/pt/README.md
+!/data/pt/slang.tsv
+!/data/pt/VERO-COPYRIGHT
+!/data/de/
+/data/de/*
+!/data/de/README.md
+!/data/de/slang.tsv
+!/data/de/NOTICE
+!/data/fr/
+/data/fr/*
+!/data/fr/README.md
+!/data/fr/slang.tsv
+!/data/fr/GRAMMALECTE-NOTICE
