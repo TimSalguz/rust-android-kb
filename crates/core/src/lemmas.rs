@@ -110,14 +110,31 @@ impl<D: AsRef<[u8]>> Lemmas<D> {
     /// the previous word's lemma predicts, whatever words it was seen with.
     pub fn top(&self, c: u32, n: usize) -> Vec<(u32, f32)> {
         let b = self.data.as_ref();
+        let (c, d, v) = ((c as usize).min(self.v + 1), self.d, self.v);
+        let u = &b[self.ctx_vec + c * d..][..d];
+        let (su, lz) = (
+            f32_at(b, self.ctx_scale + 4 * c),
+            f32_at(b, self.ctx_logz + 4 * c),
+        );
+        let f32s = |at: usize| b[at..at + 4 * v].chunks_exact(4);
+        let rows = b[self.tgt_vec..self.tgt_vec + v * d]
+            .chunks_exact(d)
+            .zip(f32s(self.tgt_scale))
+            .zip(f32s(self.tgt_bias).zip(f32s(self.tgt_logp)));
         let mut best: Vec<(u32, f32)> = Vec::with_capacity(n + 1);
-        for l in 0..self.v as u32 {
-            let lp = self.pmi(c, l) + f32_at(b, self.tgt_logp + 4 * l as usize);
-            if best.len() == n && best[n - 1].1 >= lp {
+        for (l, ((w, sw), (bias, logp))) in rows.enumerate() {
+            let dot: i32 = u
+                .iter()
+                .zip(w)
+                .map(|(&x, &y)| x as i8 as i32 * y as i8 as i32)
+                .sum();
+            let f = |x: &[u8]| f32::from_le_bytes(x.try_into().unwrap());
+            let lp = dot as f32 * su * f(sw) + f(bias) + f(logp) - lz;
+            if n == 0 || (best.len() == n && best[n - 1].1 >= lp) {
                 continue;
             }
             let at = best.partition_point(|x| x.1 >= lp);
-            best.insert(at, (l, lp));
+            best.insert(at, (l as u32, lp));
             best.truncate(n);
         }
         best

@@ -13,6 +13,8 @@ use crate::gram::{self, AttrWeights, Frame, Walk};
 const FIT_CLAMP: f32 = 4.0;
 /// …and the sense classes, their mean PMI.
 const TOPIC_CLAMP: f32 = 1.5;
+/// Words looked through under a lemma's stem for its forms.
+const LEMMA_SCAN: usize = 256;
 
 /// What the text before the cursor says about the next word
 /// ([`Engine::context`]): the word right before it (the word pairs), the
@@ -270,8 +272,15 @@ impl<D: AsRef<[u8]>> Engine<D> {
                 *last += 1;
             }
             let mut of_lemma: Vec<(f32, String)> = Vec::new();
+            // A short stem («в», «бы») lies over many words: its own forms
+            // come first, the rest is not looked through.
             let mut stream = bigrams.range().ge(&lo).lt(&hi).into_stream();
+            let mut seen = 0;
             while let Some((key, id)) = stream.next() {
+                seen += 1;
+                if seen > LEMMA_SCAN {
+                    break;
+                }
                 if id as u32 != l {
                     continue;
                 }
