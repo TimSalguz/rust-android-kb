@@ -15,7 +15,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
 use crossterm::{cursor, execute, terminal};
 
-use kbcore::{Config, Engine, Profile};
+use kbcore::{Config, Engine, Evidence, Profile};
 
 /// Restores the terminal on drop, even if we panic mid-session.
 struct TermGuard;
@@ -52,9 +52,11 @@ fn main() -> io::Result<()> {
         let engine = open()?;
         for w in &args[1..] {
             let phrase: Vec<String> = w.split_whitespace().map(str::to_lowercase).collect();
+            let ctx = engine.context(phrase.last().map(String::as_str), &phrase, &phrase);
             let next: Vec<String> = engine
-                .predict_in(&phrase, 8)
+                .decode(&ctx, Evidence::Nothing)
                 .into_iter()
+                .take(8)
                 .map(|c| format!("{} {:.2}", c.word, c.cost))
                 .collect();
             println!("{w:?} → {}", next.join(", "));
@@ -71,23 +73,18 @@ fn main() -> io::Result<()> {
                 None => (Vec::new(), q.as_str()),
             };
             let t0 = Instant::now();
-            let (mut cands, stats) = engine.suggest_with_stats(q);
-            if let Some(p) = before.last() {
-                engine.rerank(p, &mut cands);
-            }
-            engine.rerank_phrase(&before, &mut cands);
-            engine.rerank_topic(&before, &mut cands);
+            let ctx = engine.context(before.last().map(String::as_str), &before, &before);
+            let cands = engine.decode(&ctx, Evidence::Taps(q, &[]));
             let t1 = Instant::now();
-            let comps = engine.complete(q);
+            let comps = engine.decode(&ctx, Evidence::Begun(q));
             let t2 = Instant::now();
             let (sug, com) = (
                 t1.duration_since(t0).as_micros(),
                 t2.duration_since(t1).as_micros(),
             );
             println!(
-                "\n{q:?}  (suggest {:.2} ms, {} nodes + complete {:.2} ms)",
+                "\n{q:?}  (suggest {:.2} ms + complete {:.2} ms, in context)",
                 sug as f64 / 1000.0,
-                stats.nodes,
                 com as f64 / 1000.0
             );
             println!("  corrections:");

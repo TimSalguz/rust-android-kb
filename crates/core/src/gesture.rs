@@ -18,11 +18,11 @@
 //!    with none there pays), where it flew past a key in a straight line
 //!    likely not (a letter placed there pays a little).
 
-use fst::raw::{Fst, Node};
+use fst::raw::{CompiledAddr, Fst, Node};
 
 use crate::alphabet;
 use crate::dict::DictFormat;
-use crate::engine::{Candidate, Engine};
+use crate::engine::{Candidate, Context, Engine};
 use crate::keyboard::N;
 
 /// Points a path is resampled to.
@@ -353,8 +353,9 @@ impl Walk {
 
 impl<D: AsRef<[u8]>> Engine<D> {
     /// The words a walk of the dictionary (and the user's words) finds along
-    /// the gesture: (ids, prior, pace cost, location, shape).
-    fn fits(&self, g: &Gesture) -> Vec<(Vec<u8>, u64, f32, f32, f32)> {
+    /// the gesture, the likeliest at the place `ctx` was read for: (ids,
+    /// prior, pace cost, location, shape).
+    fn fits(&self, ctx: &Context, g: &Gesture) -> Vec<(Vec<u8>, u64, f32, f32, f32)> {
         let cfg = &self.cfg;
         let mut w = Walk {
             k: KEEP,
@@ -367,35 +368,20 @@ impl<D: AsRef<[u8]>> Engine<D> {
         };
         let mut ids = Vec::with_capacity(24);
         let fst = self.map.as_fst();
-        walk(
-            g,
-            fst,
-            fst.root(),
-            0,
-            0,
-            0,
-            g.pts[0],
-            0,
-            (0.0, 0.0),
-            &mut ids,
-            &mut w,
-        );
+        let at = Trace {
+            depth: 0,
+            j: 0,
+            last: 0,
+            from: g.pts[0],
+            acc: 0,
+            pairs: ctx.pairs,
+            cost: (0.0, 0.0),
+        };
+        self.trace(ctx, g, fst, fst.root(), at, &mut ids, &mut w);
         if let Some(user) = &self.user {
             let fst = user.as_fst();
             w.format = DictFormat::PLAIN;
-            walk(
-                g,
-                fst,
-                fst.root(),
-                0,
-                0,
-                0,
-                g.pts[0],
-                0,
-                (0.0, 0.0),
-                &mut ids,
-                &mut w,
-            );
+            self.trace(ctx, g, fst, fst.root(), at, &mut ids, &mut w);
         }
         w.best
             .into_iter()
@@ -423,13 +409,33 @@ impl<D: AsRef<[u8]>> Engine<D> {
         keys: &[(char, f32, f32)],
         key_w: f32,
     ) -> Vec<Candidate> {
+        self.gesture_at(&Context::default(), path, times, keys, key_w)
+    }
+
+    /// [`Engine::gesture_timed`] at a place: the walk looks for the words
+    /// likeliest there, and all it finds are weighed by it
+    /// ([`Engine::weigh`]) before the best are kept.
+    pub(crate) fn gesture_at(
+        &self,
+        ctx: &Context,
+        path: &[Pt],
+        times: Option<&[f32]>,
+        keys: &[(char, f32, f32)],
+        key_w: f32,
+    ) -> Vec<Candidate> {
         if path.len() < 2 || key_w <= 0.0 {
             return Vec::new();
         }
+        let silent = Context::default();
+        let ctx = if ctx.speaks() && self.bigrams.is_some() {
+            ctx
+        } else {
+            &silent
+        };
         let cfg = &self.cfg;
         let times = times.filter(|_| cfg.gesture_pace > 0.0);
         let g = Gesture::new(path, times, keys, key_w, NEAR);
-        let mut fits = self.fits(&g);
+        let mut fits = self.fits(ctx, &g);
         // A word the counts never saw (or barely), for this dictionary.
         let unseen = |prior: u64| self.format.unseen(prior, UNSEEN_SPAN);
         // Nothing fits well — or only such rare words: the corners strayed
@@ -442,7 +448,7 @@ impl<D: AsRef<[u8]>> Engine<D> {
             .fold(f32::INFINITY, f32::min);
         if best_known > RETRY_BEYOND {
             let wide = Gesture::new(path, times, keys, key_w, NEAR_WIDE);
-            for f in self.fits(&wide) {
+            for f in self.fits(ctx, &wide) {
                 if !fits.iter().any(|x| x.0 == f.0) {
                     fits.push(f);
                 }
@@ -475,16 +481,35 @@ impl<D: AsRef<[u8]>> Engine<D> {
                 }
             })
             .collect();
+        if ctx.speaks() {
+            self.weigh(ctx, &mut out);
+        }
         out.sort_by(|a, b| a.cost.total_cmp(&b.cost).then_with(|| a.word.cmp(&b.word)));
         out.truncate(cfg.top_k);
         out
     }
 }
 
+/// Where the walk is: the letters taken (`depth`), the path point of the
+/// last one (`j`), its id and key (`from`), the FST outputs so far (`acc`, a
+/// lower bound of the prior below), the previous word's pairs down the
+/// same letters (the context model's node and outputs), and the geometric
+/// and pace costs so far (both only grow, so the bound holds).
+#[derive(Clone, Copy)]
+struct Trace {
+    depth: usize,
+    j: usize,
+    last: u8,
+    from: Pt,
+    acc: u64,
+    pairs: Option<(CompiledAddr, u64)>,
+    cost: (f32, f32),
+}
+
 /// A letter the walk may take next: its (geometric, pace) cost so far, its
 /// point, id, the letter the next one comes after (itself, or the one before
 /// a hyphen) and its key, the FST outputs so far and its node.
-type Kid = ((f32, f32), usize, u8, u8, Pt, u64, fst::raw::CompiledAddr);
+type Kid = ((f32, f32), usize, u8, u8, Pt, u64, CompiledAddr);
 
 /// A character with no key of its own that a word may have inside (a hyphen,
 /// an apostrophe): not drawn.
@@ -504,110 +529,157 @@ fn seg_dist(p: Pt, a: Pt, b: Pt) -> f32 {
     (p.0 - a.0 - t * dx).hypot(p.1 - a.1 - t * dy)
 }
 
-/// Branch and bound over the words whose letters lie along the path in order
-/// (see the module docs). Each letter sits at the path point nearest its key
-/// (after the previous letter's); its cost is that distance², plus how far
-/// the path strays from the straight line on the way there (a skipped
-/// corner is a missing letter), all in key widths. `j`, `last`, `from`: the
-/// previous letter's point, id and key; `acc`: FST outputs so far (a lower
-/// bound of the prior below); `cost`: the geometric and the pace cost so
-/// far (both only grow, so the bound holds).
-#[allow(clippy::too_many_arguments)]
-fn walk<F: AsRef<[u8]>>(
-    g: &Gesture,
-    fst: &Fst<F>,
-    node: Node,
-    depth: usize,
-    j: usize,
-    last: u8,
-    from: Pt,
-    acc: u64,
-    cost: (f32, f32),
-    ids: &mut Vec<u8>,
-    w: &mut Walk,
-) {
-    if w.nodes >= MAX_NODES {
-        return;
-    }
-    w.nodes += 1;
-    let d = |p: Pt, q: Pt| (p.0 - q.0).hypot(p.1 - q.1) / g.key_w;
-    let mut kids: Vec<Kid> = Vec::new();
-    for t in node.transitions() {
-        let c = t.inp;
-        let Some(key) = g.pos[c as usize] else {
-            // A hyphen or apostrophe isn't drawn (как-то, don't): the way
-            // goes on from the letter before it.
-            if depth > 0 && silent(c) {
-                kids.push((cost, j, c, last, from, acc + t.out.value(), t.addr));
+impl<D: AsRef<[u8]>> Engine<D> {
+    /// Branch and bound over the words whose letters lie along the path in
+    /// order (see the module docs). Each letter sits at the path point
+    /// nearest its key (after the previous letter's); its cost is that
+    /// distance², plus how far the path strays from the straight line on the
+    /// way there (a skipped corner is a missing letter), all in key widths —
+    /// and a word's prior is what it may cost at the place `ctx` was read
+    /// for ([`Engine::prior_floor`] down the way, the exact cost at a word).
+    #[allow(clippy::too_many_arguments)]
+    fn trace<F: AsRef<[u8]>>(
+        &self,
+        ctx: &Context,
+        g: &Gesture,
+        fst: &Fst<F>,
+        node: Node,
+        at: Trace,
+        ids: &mut Vec<u8>,
+        w: &mut Walk,
+    ) {
+        if w.nodes >= MAX_NODES {
+            return;
+        }
+        w.nodes += 1;
+        let Trace {
+            depth,
+            j,
+            last,
+            from,
+            acc,
+            pairs,
+            cost,
+        } = at;
+        let scale = self.cfg.prior_scale;
+        let pair_fst = self.bigrams.as_ref().map(|b| b.as_fst());
+        let speaks = ctx.speaks();
+        // The least a word below costs by its prior at the place.
+        let floor = |acc: u64, pairs: Option<(CompiledAddr, u64)>| {
+            if speaks {
+                let pair = pairs.map(|(_, a)| a as f32 * scale);
+                self.prior_floor(ctx, w.format.prior(acc) as f32 * scale, pair)
+            } else {
+                w.w_prior * w.format.prior(acc) as f32
             }
-            continue;
         };
-        let (at, step, paced) = if depth > 0 && c == last {
-            (j, 0.0, 0.0) // a doubled letter: the finger doesn't move
-        } else {
-            let Some(mut at) = g.near_from(c, if depth == 0 { 0 } else { j }) else {
+        let down = |pairs: Option<(CompiledAddr, u64)>, c: u8| {
+            pairs.zip(pair_fst).and_then(|((a, acc), f)| {
+                let n = f.node(a);
+                let t = n.transition(n.find_input(c)?);
+                Some((t.addr, acc + t.out.value()))
+            })
+        };
+        let d = |p: Pt, q: Pt| (p.0 - q.0).hypot(p.1 - q.1) / g.key_w;
+        let mut kids: Vec<(Kid, Option<(CompiledAddr, u64)>)> = Vec::new();
+        for t in node.transitions() {
+            let c = t.inp;
+            let Some(key) = g.pos[c as usize] else {
+                // A hyphen or apostrophe isn't drawn (как-то, don't): the way
+                // goes on from the letter before it.
+                if depth > 0 && silent(c) {
+                    kids.push((
+                        (cost, j, c, last, from, acc + t.out.value(), t.addr),
+                        down(pairs, c),
+                    ));
+                }
                 continue;
             };
-            if depth == 0 && at > g.slack {
-                continue; // the word must start where the gesture starts
-            }
-            while at + 1 < M && d(g.pts[at + 1], key) < d(g.pts[at], key) {
-                at += 1;
-            }
-            let lo = if depth == 0 { 0 } else { j };
-            let stray = (lo..at)
-                .map(|k| {
-                    if depth == 0 {
-                        d(g.pts[k], key)
-                    } else {
-                        seg_dist(g.pts[k], from, key) / g.key_w
-                    }
-                })
-                .fold(0.0f32, f32::max);
-            let near = d(g.pts[at], key);
-            let paced = match &g.pace {
-                Some(p) if depth > 0 => p.cost(j, at),
-                _ => 0.0,
+            let (at, step, paced) = if depth > 0 && c == last {
+                (j, 0.0, 0.0) // a doubled letter: the finger doesn't move
+            } else {
+                let Some(mut at) = g.near_from(c, if depth == 0 { 0 } else { j }) else {
+                    continue;
+                };
+                if depth == 0 && at > g.slack {
+                    continue; // the word must start where the gesture starts
+                }
+                while at + 1 < M && d(g.pts[at + 1], key) < d(g.pts[at], key) {
+                    at += 1;
+                }
+                let lo = if depth == 0 { 0 } else { j };
+                let stray = (lo..at)
+                    .map(|k| {
+                        if depth == 0 {
+                            d(g.pts[k], key)
+                        } else {
+                            seg_dist(g.pts[k], from, key) / g.key_w
+                        }
+                    })
+                    .fold(0.0f32, f32::max);
+                let near = d(g.pts[at], key);
+                let paced = match &g.pace {
+                    Some(p) if depth > 0 => p.cost(j, at),
+                    _ => 0.0,
+                };
+                (at, near * near + stray * stray, paced)
             };
-            (at, near * near + stray * stray, paced)
-        };
-        let acc = acc + t.out.value();
-        let c_cost = (cost.0 + step, cost.1 + paced);
-        let bound = w.w_prior * w.format.prior(acc) as f32;
-        if w.w_walk * c_cost.0 + w.w_pace * c_cost.1 + bound >= w.bound() {
-            continue;
+            let acc = acc + t.out.value();
+            let pairs = down(pairs, c);
+            let c_cost = (cost.0 + step, cost.1 + paced);
+            if w.w_walk * c_cost.0 + w.w_pace * c_cost.1 + floor(acc, pairs) >= w.bound() {
+                continue;
+            }
+            kids.push(((c_cost, at, c, c, key, acc, t.addr), pairs));
         }
-        kids.push((c_cost, at, c, c, key, acc, t.addr));
-    }
-    kids.sort_by(|a, b| {
-        (w.w_walk * a.0 .0 + w.w_pace * a.0 .1).total_cmp(&(w.w_walk * b.0 .0 + w.w_pace * b.0 .1))
-    });
-    for (c_cost, at, c, next_last, key, acc, addr) in kids {
-        ids.push(c);
-        let child = fst.node(addr);
-        if child.is_final() && depth >= 1 && at + g.slack >= M - 1 {
-            // The path after the last letter should stay on its key.
-            let tail = (at..M).map(|k| d(g.pts[k], key)).fold(0.0f32, f32::max);
-            let prior = w.format.prior(acc + child.final_output().value());
-            let total = w.w_walk * (c_cost.0 + tail * tail)
-                + w.w_pace * c_cost.1
-                + w.w_prior * prior as f32;
-            w.offer(total, ids, prior, c_cost.1);
+        kids.sort_by(|a, b| {
+            let (a, b) = (a.0 .0, b.0 .0);
+            (w.w_walk * a.0 + w.w_pace * a.1).total_cmp(&(w.w_walk * b.0 + w.w_pace * b.1))
+        });
+        for ((c_cost, at, c, next_last, key, acc, addr), pairs) in kids {
+            ids.push(c);
+            let child = fst.node(addr);
+            if child.is_final() && depth >= 1 && at + g.slack >= M - 1 {
+                // The path after the last letter should stay on its key.
+                let tail = (at..M).map(|k| d(g.pts[k], key)).fold(0.0f32, f32::max);
+                let prior = w.format.prior(acc + child.final_output().value());
+                let geo = w.w_walk * (c_cost.0 + tail * tail) + w.w_pace * c_cost.1;
+                let own = w.w_prior * prior as f32;
+                let total = if speaks {
+                    // The exact cost at the place, if it may make the best.
+                    let pair = pairs.zip(pair_fst).and_then(|((a, pa), f)| {
+                        let n = f.node(a);
+                        n.is_final()
+                            .then(|| (pa + n.final_output().value()) as f32 * scale)
+                    });
+                    let least = geo + self.prior_floor(ctx, prior as f32 * scale, pair);
+                    if least >= w.bound() {
+                        least
+                    } else {
+                        let c = Candidate {
+                            word: alphabet::ids_to_string(ids),
+                            cost: own,
+                            edit: 0.0,
+                        };
+                        geo + own + self.shift(ctx, &c)
+                    }
+                } else {
+                    geo + own
+                };
+                w.offer(total, ids, prior, c_cost.1);
+            }
+            let next = Trace {
+                depth: depth + 1,
+                j: at,
+                last: next_last,
+                from: key,
+                acc,
+                pairs,
+                cost: c_cost,
+            };
+            self.trace(ctx, g, fst, child, next, ids, w);
+            ids.pop();
         }
-        walk(
-            g,
-            fst,
-            child,
-            depth + 1,
-            at,
-            next_last,
-            key,
-            acc,
-            c_cost,
-            ids,
-            w,
-        );
-        ids.pop();
     }
 }
 

@@ -157,11 +157,14 @@ pub struct Config {
     /// Weight of the context rules on the next word (docs/rules-format.md):
     /// their log likelihood ratio, in nats, times `w_lm`.
     pub w_rules: f32,
-    /// Weight of the phrase grammar ([`crate::gram::misfit`]): a word in a
+    /// Weight of the phrase grammar ([`crate::gram::phrase_score`]): a word in a
     /// case its preposition doesn't govern, or that doesn't agree with the
     /// words before it, costs this much more (nats).
     pub w_phrase: f32,
-    /// Weight of the sense classes ([`crate::Engine::rerank_topic`]): how
+    /// Weight of a predicate's agreement with its subject («девочка быстро
+    /// побежала»), learned log ratios against chance.
+    pub w_subject: f32,
+    /// Weight of the sense classes ([`crate::Engine::weigh`]): how
     /// well a word's class goes with those of the sentence so far (nats).
     pub w_topic: f32,
     /// Gesture typing: weights of the full comparison with a word's path —
@@ -265,7 +268,8 @@ impl Config {
             w_classes: 1.5,
             w_rules: 1.0,
             w_phrase: 0.5,
-            w_topic: 0.5,
+            w_subject: 1.0,
+            w_topic: 0.25,
             gesture_location: 7.0,
             gesture_shape: 6.0,
             gesture_walk: 8.0,
@@ -333,7 +337,7 @@ impl Config {
         fields!(
             f32: sigma, base_sub, cross_alphabet_penalty, max_sub, c_phonetic, c_yo, c_yo_reverse,
                 c_hard_soft, c_accent, c_accent_reverse, c_del, c_del_double, c_del_sign, c_del_punct, c_del_held, c_ins, c_ins_repeat,
-                c_ins_neighbor, c_ins_sign, c_trans, c_trans_cross, c_trans_rollover, layout_switch, layout_max_cost, home_row_penalty, home_row_trigger, c_home_finger, c_complete_char, ctx_lambda, w_endings, w_classes, w_rules, w_phrase, w_topic, gesture_location, gesture_shape, gesture_walk, gesture_trust, gesture_rare, gesture_pace,
+                c_ins_neighbor, c_ins_sign, c_trans, c_trans_cross, c_trans_rollover, layout_switch, layout_max_cost, home_row_penalty, home_row_trigger, c_home_finger, c_complete_char, ctx_lambda, w_endings, w_classes, w_rules, w_phrase, w_subject, w_topic, gesture_location, gesture_shape, gesture_walk, gesture_trust, gesture_rare, gesture_pace,
                 w_lm, w_ch, prior_scale, max_cost, widen_step, max_cost_ceiling, rescue_cost;
             usize: min_results, max_nodes, max_input_len, top_k
         );

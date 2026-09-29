@@ -116,6 +116,9 @@ for kb_set in [] if args.predict_only else args.set:
     print(f"{kb_set:>14}: jitter {args.jitter} — {100 * right / total / n:.2f}% words right, "
           f"{100 * hit / marked / n:.2f}% of the constrained; careful taps changed {changed} "
           f"({100 * changed / total:.2f}%)")
+    for l, o in zip(lines, careful):
+        if l.split() != o:
+            print(f"{'':>16}careful: {l} → {' '.join(o)}")
 
 # Next-word prediction after each word (the grammar only where it speaks);
 # not with --swipe: it doesn't change with how the words are typed.

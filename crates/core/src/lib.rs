@@ -16,7 +16,7 @@ pub mod keyboard;
 
 pub use config::{Config, Latin, Profile};
 pub use dict::DictFormat;
-pub use engine::{Candidate, Casing, Engine, Hint, Stats};
+pub use engine::{Candidate, Casing, Context, Engine, Evidence, Hint, Stats};
 pub use keyboard::{Keyboard, Layout};
 
 /// Re-exported so downstream crates can name the mmap-backed engine type

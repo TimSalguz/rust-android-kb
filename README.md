@@ -42,11 +42,18 @@ memory-mapped files. See [`docs/DESIGN.md`](docs/DESIGN.md)
   the next one is typed (`а принципе` → `в принципе`).
 - **Phrase grammar (Russian):** every reading of every word (OpenCorpora, the
   rare ones too: `такой` is also masculine) checks the case a preposition
-  governs, agreement with the adjectives after it and a verb with its pronoun
-  (`в большом дрме` → `доме`, `с некоторым опвтом` → `опытом`, `она сказал` →
-  `сказала`); the next-word guesses keep only forms that fit (`к большим` →
-  `деньгам`, not `успехом`). It only rules out, never pushes: all 3.19 M forms
-  with their grammar take 3.6 MB — `kbcore::gram`, `tools/eval_phrase.py`.
+  governs, agreement with the adjectives after it and a predicate with its
+  subject, past adverbs (`в большом дрме` → `доме`, `с некоторым опвтом` →
+  `опытом`, `девочка быстро побежал` → `побежала`, `Эстелла и я идём` stays);
+  the next-word guesses keep only forms that fit (`к большим` → `деньгам`, not
+  `успехом`). Weights learned from text; all 3.19 M forms with their grammar
+  take 3.6 MB — `kbcore::gram`, `tools/eval_phrase.py`.
+- **One path:** the text before a word is read once (`Context`: the previous
+  word, the phrase, the sentence) and every reading of a word — typed, begun,
+  drawn, predicted, re-read later — goes through one `decode(context,
+  evidence)`, the context inside the dictionary search itself (a word the
+  place makes likely isn't cut off for being rare). Words in the text keep
+  what the finger gave (a drawn word, its way); key zones follow the text.
 - **Languages:** each its own dictionary, context model and capitals (German
   nouns), installed when the language is switched on; a left-out accent costs
   next to nothing (`nao`→`não`, `fur`→`für`), accents also sit on a long press.

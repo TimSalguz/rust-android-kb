@@ -63,6 +63,9 @@ pub mod bit {
     pub const NOMINAL: u64 = NOUN | ADJF | PRTF | NPRO | NUMR;
     /// Words that agree with the noun they go with.
     pub const ATTRIBUTE: u64 = ADJF | PRTF;
+    /// Words that agree with their subject: a verb, a short adjective or
+    /// participle («она рада», «они ранены»).
+    pub const PREDICATE: u64 = VERB | ADJS | PRTS;
 }
 
 use bit::*;
@@ -227,6 +230,31 @@ fn subject_noun(readings: &[u64]) -> Option<u64> {
     Some(PER3 | number | gender)
 }
 
+/// The subject standing at `i` in the phrase: a personal pronoun or a noun
+/// only in the nominative — and with another joined to it by «и»/«или»
+/// («Эстелла и я»), the two together: plural, of the lesser person («мы»).
+/// None when that other one can't be told (a name the dictionary doesn't
+/// know, or the phrase starting at «и»).
+fn subject_at<S: AsRef<str>>(phrase: &[(S, Vec<u64>)], i: usize) -> Option<u64> {
+    let (w, r) = &phrase[i];
+    let s = subject(w.as_ref()).or_else(|| subject_noun(r))?;
+    let joined = i >= 1 && matches!(phrase[i - 1].0.as_ref(), "и" | "или");
+    if !joined {
+        return Some(s);
+    }
+    let (w, r) = phrase.get(i.checked_sub(2)?)?;
+    let nominative = r
+        .iter()
+        .any(|&x| x & (NOUN | NPRO) != 0 && cases(x) & NOMN != 0);
+    let other = subject(w.as_ref()).or_else(|| nominative.then_some(PER3))?;
+    let persons = (s | other) & PERSON;
+    let person = [PER1, PER2, PER3]
+        .into_iter()
+        .find(|&p| persons & p != 0)
+        .unwrap_or(PER3);
+    Some(person | PLUR)
+}
+
 /// Two readings agree (an attribute and what it goes with): a case, the
 /// number and, in the singular, the gender in common — in the accusative,
 /// the animacy too («такого исход» doesn't: «такого» is accusative only with
@@ -245,21 +273,43 @@ fn agree(a: u64, b: u64) -> bool {
     !singular || ga == 0 || gb == 0 || ga & gb != 0 || (ga | gb) & MSF != 0
 }
 
-/// A verb reading fits its subject: past tense by number (and gender in the
-/// singular of the third person), present and future by person and number,
-/// the imperative (no tense) only «ты» and «вы».
-fn fits_subject(verb: u64, subj: u64) -> bool {
-    if verb & subj & NUMBER == 0 {
+/// A predicate reading fits its subject: the past tense, a short adjective
+/// or participle by number (and gender in the singular of the third
+/// person), the present and future by person and number, the imperative (no
+/// tense) only «ты» and «вы».
+fn fits_subject(pred: u64, subj: u64) -> bool {
+    if pred & subj & NUMBER == 0 {
         return false;
     }
-    if verb & (PAST | PRES | FUTR) == 0 {
+    let g = subj & GENDER;
+    let gender = pred & SING == 0 || g == 0 || g & MSF != 0 || pred & g != 0;
+    if pred & (ADJS | PRTS) != 0 {
+        return gender;
+    }
+    if pred & (PAST | PRES | FUTR) == 0 {
         return subj & PER2 != 0;
     }
-    if verb & PAST != 0 {
-        let g = subj & GENDER;
-        return verb & SING == 0 || g == 0 || verb & g != 0;
+    if pred & PAST != 0 {
+        return gender;
     }
-    verb & PERSON == 0 || verb & subj & PERSON != 0
+    pred & PERSON == 0 || pred & subj & PERSON != 0
+}
+
+/// Whether a word (its readings) fits its subject: None when it may be
+/// anything but a predicate («мыла» is a noun too).
+fn fits(word: &[u64], subj: u64) -> Option<bool> {
+    let predicate = !word.is_empty() && word.iter().all(|r| r & PREDICATE != 0);
+    predicate.then(|| word.iter().any(|&r| fits_subject(r, subj)))
+}
+
+/// A word between a subject and its verb: an adverb or a particle — maybe a
+/// short adjective too («быстро»), nothing else.
+fn adverbial(readings: &[u64]) -> bool {
+    !readings.is_empty()
+        && readings.iter().any(|r| r & (ADVB | PRCL) != 0)
+        && readings
+            .iter()
+            .all(|r| r & (ADVB | PRCL | ADJS | COMP | PRED) != 0)
 }
 
 /// Whether `word` (its readings) can't stand after the phrase before it —
@@ -271,7 +321,7 @@ fn fits_subject(verb: u64, subj: u64) -> bool {
 /// («один из», «могу я взять»); and only a word all of whose readings are
 /// ruled out (every reading is kept, the rare ones too: «из» is also an
 /// abbreviated noun).
-pub fn misfit(phrase: &[(&str, Vec<u64>)], word: &[u64]) -> bool {
+pub fn misfit<S: AsRef<str>>(phrase: &[(S, Vec<u64>)], word: &[u64]) -> bool {
     if word.is_empty() {
         return false;
     }
@@ -282,6 +332,7 @@ pub fn misfit(phrase: &[(&str, Vec<u64>)], word: &[u64]) -> bool {
     let mut attributes: Vec<&Vec<u64>> = Vec::new();
     let mut subj: Option<u64> = None;
     for (i, (w, readings)) in phrase.iter().rev().take(5).enumerate() {
+        let w = w.as_ref();
         if let Some(c) = governs(w) {
             governed = Some(c);
             break;
@@ -300,25 +351,24 @@ pub fn misfit(phrase: &[(&str, Vec<u64>)], word: &[u64]) -> bool {
             attributes.push(readings);
             continue;
         }
-        if !attributes.is_empty() && matches!(*w, "и" | "или") {
+        if !attributes.is_empty() && matches!(w, "и" | "или") {
             attributes.push(readings);
             continue;
         }
         if attributes.is_empty() {
-            if let Some(s) = subject(w).or_else(|| subject_noun(readings)) {
-                subj = Some(s);
+            if subject(w).or_else(|| subject_noun(readings)).is_some() {
+                subj = subject_at(phrase, phrase.len() - 1 - i);
                 break;
             }
-            if readings.iter().all(|r| r & (ADVB | PRCL) != 0) && !readings.is_empty() {
+            if adverbial(readings) {
                 continue;
             }
         }
         break;
     }
-    // A verb and its subject.
+    // A predicate and its subject.
     if let Some(s) = subj {
-        let verbs: Vec<u64> = word.iter().copied().filter(|r| r & VERB != 0).collect();
-        return verbs.len() == word.len() && !verbs.iter().any(|&v| fits_subject(v, s));
+        return fits(word, s) == Some(false);
     }
     // Only a word that can't be anything but an attribute asks for
     // agreement: «это», «его», «все» may be pronouns or a particle («это моя
@@ -413,29 +463,65 @@ pub struct AttrWeights {
     pub base_other: f32,
     /// …and `ln P(infinitive)`.
     pub base_infn: f32,
+    /// After a subject, a predicate that fits it and one that doesn't: how
+    /// much likelier than a predicate drawn from anywhere would be.
+    pub subject_fits: f32,
+    pub subject_misfits: f32,
 }
 
 /// The phrase before the next word, read back from its end (as [`misfit`]
 /// reads it): the word governing it, the adjectives between, or a subject
 /// pronoun right before.
-#[derive(Debug, Default)]
-pub struct Walk<'a> {
+#[derive(Clone, Debug, Default)]
+pub struct Walk {
     /// The governing word's index in the phrase: a preposition, a verb, a
     /// noun — the first word back that isn't an adjective, «и»/«или» between
     /// them, or (with no adjective yet) an adverb or particle.
     pub governor: Option<usize>,
     /// The adjectives the next word agrees with (words that can't be
     /// anything else).
-    pub attributes: Vec<&'a Vec<u64>>,
+    pub attributes: Vec<Vec<u64>>,
     pub subject: Option<u64>,
+    /// When the governor is a noun or pronoun: the verb whose clause its
+    /// phrase stands in, back over noun phrases and adverbs («дал книгу»,
+    /// «помог ему») — what else it takes comes next.
+    pub clause: Option<usize>,
 }
 
-pub fn walk<'a>(phrase: &'a [(&str, Vec<u64>)]) -> Walk<'a> {
+/// The verb whose clause the noun phrase ending at `g` stands in (see
+/// [`Walk::clause`]); not past a preposition.
+fn clause<S: AsRef<str>>(phrase: &[(S, Vec<u64>)], g: usize) -> Option<usize> {
+    let r = &phrase[g].1;
+    let noun = !r.is_empty() && r.iter().all(|&x| x & (NOUN | NPRO) != 0 && x & CASE != 0);
+    if !noun {
+        return None;
+    }
+    for k in (g.saturating_sub(4)..g).rev() {
+        let rk = &phrase[k].1;
+        if rk.is_empty() {
+            return None;
+        }
+        if rk.iter().all(|&x| x & (VERB | INFN | GRND) != 0) {
+            return Some(k);
+        }
+        let nominal = rk.iter().all(|&x| x & NOMINAL != 0 && x & CASE != 0);
+        if !nominal && !adverbial(rk) {
+            return None;
+        }
+    }
+    None
+}
+
+pub fn walk<S: AsRef<str>>(phrase: &[(S, Vec<u64>)]) -> Walk {
     let attributive = |r: &Vec<u64>| r.iter().any(|x| x & ATTRIBUTE != 0 && x & CASE != 0);
     let strict = |r: &Vec<u64>| !r.is_empty() && r.iter().all(|x| x & ATTRIBUTE != 0);
     let mut out = Walk::default();
     let mut collected = 0;
+    // Words collected that are only adverbs or particles: a subject may
+    // stand before them («девочка быстро побежала», «я не знаю»).
+    let mut adverbs = 0;
     for (i, (w, readings)) in phrase.iter().enumerate().rev().take(5) {
+        let w = w.as_ref();
         if w.starts_with("котор") {
             return out;
         }
@@ -452,26 +538,28 @@ pub fn walk<'a>(phrase: &'a [(&str, Vec<u64>)]) -> Walk<'a> {
                 return out;
             }
             if strict(readings) {
-                out.attributes.push(readings);
+                out.attributes.push(readings.clone());
             }
             collected += 1;
             continue;
         }
-        if collected > 0 && matches!(*w, "и" | "или") {
+        if collected > 0 && matches!(w, "и" | "или") {
             collected += 1;
             continue;
         }
-        if collected == 0 {
-            if let Some(s) = subject(w).or_else(|| subject_noun(readings)) {
-                out.subject = Some(s);
+        if collected == adverbs {
+            if subject(w).or_else(|| subject_noun(readings)).is_some() {
+                out.subject = subject_at(phrase, i);
                 return out;
             }
-            if !readings.is_empty() && readings.iter().all(|r| r & (ADVB | PRCL) != 0) {
+            if adverbial(readings) {
                 collected += 1;
+                adverbs += 1;
                 continue;
             }
         }
         out.governor = Some(i);
+        out.clause = clause(phrase, i);
         return out;
     }
     out
@@ -493,17 +581,21 @@ pub fn governing(readings: &[u64]) -> bool {
 /// governor, the context model weighs a word itself), and then only for a
 /// noun phrase (its `other` is what comes right after the governor: «в тот
 /// же день»); a verb against its subject pronoun.
-pub fn phrase_score(walk: &Walk, frame: Option<&Frame>, attr: &AttrWeights, word: &[u64]) -> f32 {
+pub fn phrase_score(
+    walk: &Walk,
+    frame: Option<&Frame>,
+    clause: Option<&Frame>,
+    attr: &AttrWeights,
+    word: &[u64],
+) -> f32 {
     if word.is_empty() {
         return 0.0;
     }
     if let Some(s) = walk.subject {
-        let verbs = word.iter().filter(|&&r| r & VERB != 0).count();
-        let fits = word.iter().any(|&r| r & VERB != 0 && fits_subject(r, s));
-        return if verbs == word.len() && !fits {
-            -1.0
-        } else {
-            0.0
+        return match fits(word, s) {
+            Some(true) => attr.subject_fits,
+            Some(false) => attr.subject_misfits,
+            None => 0.0,
         };
     }
     let nominal: Vec<u64> = word
@@ -538,10 +630,7 @@ pub fn phrase_score(walk: &Walk, frame: Option<&Frame>, attr: &AttrWeights, word
     // найти», «о том же».
     let frame = frame.filter(|_| !walk.attributes.is_empty());
     if let Some(f) = frame.filter(|_| !nominal.is_empty()) {
-        let (b_other, b_infn) = (attr.base_other.exp(), attr.base_infn.exp());
-        let base = (b_other + b_infn).min(0.99);
-        let here = (b_other * f.other.exp() + b_infn * f.infn.exp()).min(0.99);
-        let nominal_share = ((1.0 - here) / (1.0 - base)).ln();
+        let nominal_share = nominal_share(f, attr);
         let readings = if agreeing.is_empty() {
             &nominal
         } else {
@@ -549,7 +638,47 @@ pub fn phrase_score(walk: &Walk, frame: Option<&Frame>, attr: &AttrWeights, word
         };
         score += f.next(readings) - nominal_share;
     }
+    // The clause's verb, two or more words back: what else it takes.
+    if let Some(c) = clause.filter(|_| walk.clause.is_some()) {
+        score += c.next(word);
+    }
     score
+}
+
+/// How much likelier than anywhere a noun phrase comes after the governor
+/// at all (log ratio): what its frame's cases are measured against.
+fn nominal_share(f: &Frame, attr: &AttrWeights) -> f32 {
+    let (b_other, b_infn) = (attr.base_other.exp(), attr.base_infn.exp());
+    let base = (b_other + b_infn).min(0.99);
+    let here = (b_other * f.other.exp() + b_infn * f.infn.exp()).min(0.99);
+    ((1.0 - here) / (1.0 - base)).ln()
+}
+
+/// The most [`phrase_score`] gives any word after this phrase (nats): a
+/// search may skip what can't win even with it.
+pub fn phrase_score_max(
+    walk: &Walk,
+    frame: Option<&Frame>,
+    clause: Option<&Frame>,
+    attr: &AttrWeights,
+) -> f32 {
+    if walk.subject.is_some() {
+        return attr.subject_fits.max(0.0);
+    }
+    let across = frame
+        .filter(|_| !walk.attributes.is_empty())
+        .map_or(0.0, |f| {
+            let best = f.cases.iter().copied().fold(f32::MIN, f32::max);
+            (best - nominal_share(f, attr)).max(0.0)
+        });
+    let verb = clause.filter(|_| walk.clause.is_some()).map_or(0.0, |c| {
+        c.cases
+            .iter()
+            .copied()
+            .chain([c.other, c.infn])
+            .fold(0.0, f32::max)
+    });
+    across + verb
 }
 
 #[cfg(test)]
@@ -723,6 +852,8 @@ mod tests {
             disagree: -2.7,
             base_other: 0.4f32.ln(),
             base_infn: 0.1f32.ln(),
+            subject_fits: 0.6,
+            subject_misfits: -2.0,
         };
         (iz, attr)
     }
@@ -751,7 +882,7 @@ mod tests {
         ]);
         let dom = r(&["NOUN,masc,sing,nomn", "NOUN,masc,sing,accs"]);
         let dome = r(&["NOUN,masc,sing,loct"]);
-        let s = |word: &[u64]| phrase_score(&w, Some(&iz), &attr, word);
+        let s = |word: &[u64]| phrase_score(&w, Some(&iz), None, &attr, word);
         // из старого дома: the genitive; дом agrees (accusative) but «из»
         // hardly takes it; доме doesn't agree at all.
         assert!(s(&doma) > s(&dom), "{} {}", s(&doma), s(&dom));
@@ -799,6 +930,75 @@ mod tests {
             r(&["NOUN,inan,masc,sing,nomn", "NOUN,inan,masc,sing,accs"]),
         )];
         assert!(!misfit(&house, &r(&["VERB,femn,sing,past"])));
+        // Past adverbs (one a short adjective too) and «не»: «девочка
+        // быстро не побежал» — «побежал» a short adjective as well
+        // («побежалый»), and that one doesn't agree either.
+        let (_, attr) = learned();
+        let phrase = [
+            ("девочка", r(&["NOUN,anim,femn,sing,nomn"])),
+            ("быстро", r(&["ADJS,neut,sing", "ADVB"])),
+            ("не", r(&["PRCL"])),
+        ];
+        let pobezhal = r(&["ADJS,masc,sing", "VERB,masc,sing,past"]);
+        let w = walk(&phrase);
+        assert!(w.subject.is_some());
+        assert_eq!(
+            phrase_score(&w, None, None, &attr, &pobezhal),
+            attr.subject_misfits
+        );
+        assert!(misfit(&phrase, &pobezhal));
+        // Two joined: «Эстелла и я идём» — «мы»; a name the dictionary
+        // doesn't know: nothing said.
+        let we = [
+            ("мама", r(&["NOUN,anim,femn,sing,nomn"])),
+            ("и", r(&["CONJ"])),
+            ("я", r(&["NPRO,sing,nomn"])),
+        ];
+        assert!(!misfit(&we, &r(&["VERB,plur,1per,pres"])));
+        assert!(misfit(&we, &r(&["VERB,sing,1per,pres"])));
+        assert!(misfit(&we, &r(&["VERB,femn,sing,past"])));
+        let estella = [
+            ("эстелла", Vec::new()),
+            ("и", r(&["CONJ"])),
+            ("я", r(&["NPRO,sing,nomn"])),
+        ];
+        assert!(walk(&estella).subject.is_none());
+        assert!(!misfit(&estella, &r(&["VERB,plur,1per,pres"])));
+        // A short adjective agrees: «девочка рада», not «рад».
+        let girl = [("девочка", r(&["NOUN,anim,femn,sing,nomn"]))];
+        assert!(misfit(&girl, &r(&["ADJS,masc,sing"])));
+        assert!(!misfit(&girl, &r(&["ADJS,femn,sing"])));
+        // Common gender: «сирота пришёл», «сирота пришла».
+        let orphan = [("сирота", r(&["NOUN,anim,ms-f,sing,nomn"]))];
+        assert!(!misfit(&orphan, &r(&["VERB,masc,sing,past"])));
+        assert!(!misfit(&orphan, &r(&["VERB,femn,sing,past"])));
+    }
+
+    #[test]
+    fn the_verb_of_the_clause_expects_what_else_it_takes() {
+        // «дал книгу [другу]»: the governor is «книгу», the clause's verb
+        // «дал» — after a noun phrase, the dative likelier.
+        let (_, attr) = learned();
+        let dal = Frame {
+            other: -0.6,
+            cases: [0.9, -0.6, 0.6, 0.8, -0.9, -0.4],
+            infn: 0.5,
+        };
+        let phrase = [
+            ("дал", r(&["VERB,masc,sing,past"])),
+            ("книгу", r(&["NOUN,inan,femn,sing,accs"])),
+        ];
+        let w = walk(&phrase);
+        assert_eq!((w.governor, w.clause), (Some(1), Some(0)));
+        let s = |word: &[u64]| phrase_score(&w, None, Some(&dal), &attr, word);
+        assert!(s(&r(&["NOUN,anim,masc,sing,datv"])) > s(&r(&["NOUN,anim,masc,sing,ablt"])));
+        // Not past a preposition: «дал в руки» — the phrase isn't the verb's.
+        let phrase = [
+            ("дал", r(&["VERB,masc,sing,past"])),
+            ("в", r(&["PREP"])),
+            ("руки", r(&["NOUN,inan,femn,plur,accs"])),
+        ];
+        assert_eq!(walk(&phrase).clause, None);
     }
 
     #[test]
@@ -821,11 +1021,22 @@ mod tests {
         assert!(w.subject.is_some() && w.governor.is_none());
         let (_, attr) = learned();
         assert_eq!(
-            phrase_score(&w, None, &attr, &r(&["VERB,masc,sing,past"])),
-            -1.0
+            phrase_score(&w, None, None, &attr, &r(&["VERB,masc,sing,past"])),
+            attr.subject_misfits
         );
         assert_eq!(
-            phrase_score(&w, None, &attr, &r(&["VERB,femn,sing,past"])),
+            phrase_score(&w, None, None, &attr, &r(&["VERB,femn,sing,past"])),
+            attr.subject_fits
+        );
+        // Not only a predicate: nothing said.
+        assert_eq!(
+            phrase_score(
+                &w,
+                None,
+                None,
+                &attr,
+                &r(&["VERB,masc,sing,past", "NOUN,inan,neut,sing,gent"])
+            ),
             0.0
         );
     }

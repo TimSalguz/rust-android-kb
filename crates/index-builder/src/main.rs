@@ -26,8 +26,10 @@
 //!                `0, 3, word` value above the class; each set's readings'
 //!                grammemes (kbcore::gram) under `0, 9, set (2 bytes), index`
 //!   --frames     FRAMES.tsv (tools/build_frames.py): each governing word's
-//!                frame under `0, 11, word`, the weights after adjectives under
-//!                `0, 12` — log ratios, a byte each (0.05 nat steps around 128)
+//!                frame under `0, 11, word`, the weights after adjectives and
+//!                a subject under `0, 12`, a verb's clause frame (after a noun
+//!                phrase) under `0, 16, verb` — log ratios, a byte each (0.05
+//!                nat steps around 128)
 //!   --topics     TOPIC_WORDS.tsv (tools/build_topics.py): each word's sense
 //!                class under `0, 13, word`
 //!   --topic-pairs  TOPIC_PAIRS.tsv (tools/build_topics.py): how much likelier
@@ -491,6 +493,8 @@ fn build_bigrams(
                 });
             let key = if w == "@attr" {
                 Some(vec![0, 12])
+            } else if let Some(verb) = w.strip_prefix('%') {
+                remap(verb).map(|k| [vec![0, 16], k].concat())
             } else {
                 remap(w).map(|k| [vec![0, 11], k].concat())
             };

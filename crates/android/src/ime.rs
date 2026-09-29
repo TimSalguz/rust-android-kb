@@ -5,7 +5,7 @@
 
 use std::collections::VecDeque;
 
-use kbcore::{Candidate, Casing, Engine, Hint};
+use kbcore::{Candidate, Casing, Context, Engine, Evidence, Hint};
 
 use crate::grip::{phrase_for, Calibration, Grip, Grips, Sense, Step};
 
@@ -52,6 +52,17 @@ const WINDOW_ALTS: usize = 5;
 /// 1 / 2 / 2 words of 2225 typed carefully, and get 95.2 / 95.6 / 96.0 % of
 /// words right from sloppy taps.
 const KNOWN_SLIP: f32 = 1.6;
+/// …unless the grammar speaks against it and for another form of it, as far
+/// as a missing or an extra letter at its end (девочка быстро побежал →
+/// побежала, могут выдержат → выдержать): by this many nats (log ratios:
+/// after a subject a predicate that doesn't agree is 110 times rarer than
+/// one that does), and the other form still clearly likelier in context.
+const GRAMMAR_SLIP: f32 = 3.5;
+const GRAMMAR_GAP: f32 = 2.5;
+/// A tap this close to the border with a neighbor (its touch cost at most
+/// this over the key's own, in the engine's units) may be read as the
+/// neighbor when no word goes on with the key's own letter.
+const ZONE_NEAR: f32 = 0.25;
 /// A missing space inside the typed word (`приветкак`).
 const MISSING_SPACE: f32 = 3.0;
 /// A letter just above the space bar typed instead of the space (`приветькак`).
@@ -302,8 +313,9 @@ struct Pointer {
 /// The word before the last space, as it was typed — so a space that was
 /// meant to be a letter can be undone once the next word shows it.
 struct PrevWord {
+    /// As it stood while composed (its case).
     typed: String,
-    hints: Vec<Hint>,
+    input: Input,
     /// What went into the text (maybe autocorrected).
     committed: String,
     /// Cost of the best reading of `typed` on its own.
@@ -336,11 +348,39 @@ struct Undo {
     pairs: Vec<String>,
 }
 
-/// A word as it went into the text: lowercase, and as typed with its touches.
+/// What the finger gave for a word: letters tapped (lowercase) with their
+/// touches, or a way drawn across the keys with the time of each point (ms).
+/// Every reading of the word — as it is typed, again later in context, its
+/// variants — comes from it ([`Ime::decode_input`]).
+#[derive(Clone, Debug)]
+enum Input {
+    Typed {
+        letters: String,
+        hints: Vec<Hint>,
+    },
+    Drawn {
+        trail: Vec<(f32, f32)>,
+        ms: Vec<i64>,
+    },
+}
+
+impl Input {
+    fn typed(letters: &str, hints: &[Hint]) -> Self {
+        Input::Typed {
+            letters: letters.to_lowercase(),
+            hints: hints.to_vec(),
+        }
+    }
+}
+
+/// A way drawn across the keys: its points, and the time of each (ms).
+type Way = (Vec<(f32, f32)>, Vec<i64>);
+
+/// A word as it went into the text (lowercase), and what the finger gave
+/// for it.
 struct Written {
     text: String,
-    typed: String,
-    hints: Vec<Hint>,
+    input: Input,
 }
 
 /// How many of the field's words keep their touches.
@@ -478,9 +518,10 @@ pub struct Ime<D: AsRef<[u8]>> {
     chosen: Option<String>,
     /// A held key's alternatives on show: the finger picks one and lifts.
     popup: Option<Popup>,
-    /// The word being typed was drawn as a gesture and not edited since: ⌫
-    /// takes it whole, punctuation after it brings a space.
-    gesture_word: bool,
+    /// The way the word being typed was drawn along, if it was and it
+    /// wasn't edited since: ⌫ takes it whole, punctuation after it brings a
+    /// space, and it goes into the text with it.
+    drawn: Option<Way>,
     /// The app's own test field has focus.
     own_field: bool,
     /// The calibration / reset stamps last seen in the settings (None before
@@ -631,7 +672,7 @@ fn unit(was: &str, committed: &str, variants: &[String]) -> PrevWord {
     let variant = all.iter().position(|v| v == committed).unwrap_or(0);
     PrevWord {
         typed: was.to_string(),
-        hints: Vec::new(),
+        input: Input::typed(was, &[]),
         committed: committed.to_string(),
         alone: f32::INFINITY,
         letters: Vec::new(),
@@ -663,6 +704,14 @@ fn jstr(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+/// Two forms of one word, as far as the typed one tells: they part within
+/// their last two letters («побежал», «побежала»; «дом», «доме»).
+fn same_stem(a: &str, b: &str) -> bool {
+    let common = a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count();
+    let longer = a.chars().count().max(b.chars().count());
+    common >= 2 && common + 2 >= longer
 }
 
 /// One letter repeated (аа, ммм) or any letter three times in a row (аааа).
@@ -789,7 +838,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
             dict_actions: [None, None, None],
             alternatives: Vec::new(),
             chosen: None,
-            gesture_word: false,
+            drawn: None,
             popup: None,
             own_field: false,
             seen_stamps: None,
@@ -1733,25 +1782,21 @@ impl<D: AsRef<[u8]>> Ime<D> {
             return;
         }
         let lower = word.to_lowercase();
-        let (typed, hints) = self
+        let input = self
             .written
             .iter()
             .rev()
             .find(|w| w.text == lower)
-            .map_or((lower.clone(), Vec::new()), |w| {
-                (w.typed.to_lowercase(), w.hints.clone())
-            });
-        let mut cands = self.engine.suggest_hinted(&typed, &hints).0;
-        cands.retain(|c| !self.blocked(&c.word, &typed));
+            .map_or_else(|| Input::typed(&lower, &[]), |w| w.input.clone());
+        // What the finger gave, as letters (a drawn word: the word read).
+        let typed = match &input {
+            Input::Typed { letters, .. } => letters.clone(),
+            Input::Drawn { .. } => lower.clone(),
+        };
         let head = self.before.chars().count() - left.chars().count();
         let prefix: String = self.before.chars().take(head).collect();
-        if let Some(prev) = self.word_before(&prefix) {
-            self.engine.rerank(&prev, &mut cands);
-        }
-        self.engine
-            .rerank_phrase(&Self::phrase_of(&prefix), &mut cands);
-        self.engine
-            .rerank_topic(&Self::sentence_of(&prefix), &mut cands);
+        let mut cands = self.decode_input(&self.context_at(&prefix), &input);
+        cands.retain(|c| !self.blocked(&c.word, &typed));
         let mut options: Vec<String> = Vec::new();
         for w in cands
             .into_iter()
@@ -2833,11 +2878,16 @@ impl<D: AsRef<[u8]>> Ime<D> {
                     h.kept = h.kept.max(kept);
                 }
             }
+            let (mut hint, ms) = self.pending.take().unwrap_or_default();
+            let c = if self.editing || self.erased > 0 {
+                c // typed again after ⌫: meant as typed
+            } else {
+                self.zone_letter(c, &mut hint)
+            };
             self.editing = false;
             self.erased = 0;
             self.chosen = None;
-            self.gesture_word = false;
-            let (hint, ms) = self.pending.take().unwrap_or_default();
+            self.drawn = None;
             self.word.push(c);
             self.hints.push(hint);
             self.durs.push(ms);
@@ -2846,7 +2896,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
             return;
         }
         self.prev_word = None;
-        if self.gesture_word && ",.!?;:".contains(c) {
+        if self.drawn.is_some() && ",.!?;:".contains(c) {
             // A drawn word, then punctuation: the mark and a space (the next
             // word is drawn — no space bar in between).
             self.commit_word(false);
@@ -2859,7 +2909,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
             // Sentence punctuation after a word also triggers autocorrect.
             let correct = matches!(c, ',' | '.' | '!' | '?' | ';' | ':');
             let typed = self.word.clone();
-            let hints = self.hints.clone();
+            let input = self.composing_input();
             let settled = self.settled();
             let corrected = self.commit_word(correct);
             // A comma or period hit instead of a letter above it: joined back
@@ -2872,7 +2922,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
             {
                 let committed = corrected.map_or_else(|| typed.clone(), |(_, f)| f);
                 self.commit(c.to_string());
-                self.note_slip(typed, hints, committed, tap, c, settled);
+                self.note_slip(typed, input, committed, tap, c, settled);
                 return;
             }
         }
@@ -2924,7 +2974,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
 
     /// The cursor leaves the word: what editing it showed no longer applies.
     fn leave_word(&mut self) {
-        self.gesture_word = false;
+        self.drawn = None;
         self.pair_undo = None;
         self.rejected.clear();
         self.erased = 0;
@@ -2938,6 +2988,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
             return None;
         }
         let typed = std::mem::take(&mut self.word);
+        let drawn = self.drawn.take();
         // While editing, what is shown is what gets committed; a trailing
         // hyphen (кто-, из-) is a word in the making.
         let lower = typed.to_lowercase();
@@ -2992,10 +3043,16 @@ impl<D: AsRef<[u8]>> Ime<D> {
         if self.written.len() >= WRITTEN {
             self.written.remove(0);
         }
+        let input = match drawn {
+            Some((trail, ms)) => Input::Drawn { trail, ms },
+            None => Input::Typed {
+                letters: typed.to_lowercase(),
+                hints,
+            },
+        };
         self.written.push(Written {
             text: fixed.to_lowercase(),
-            typed: typed.clone(),
-            hints,
+            input,
         });
         self.commit(fixed.clone());
         (fixed != typed).then_some((typed, fixed))
@@ -3030,24 +3087,28 @@ impl<D: AsRef<[u8]>> Ime<D> {
             }
         }
         let typed = self.word.clone();
-        let hints = self.hints.clone();
+        let input = self.composing_input();
         let settled = self.settled();
         // A drawn word's other readings come from its way, not from typos;
         // a typed one's are what the strip offered.
-        let drawn = self.gesture_word.then(|| self.alternatives.clone());
+        let drawn = self.drawn.is_some().then(|| self.alternatives.clone());
         let offered: Vec<String> = self.last_cands.iter().map(|(w, _)| w.clone()).collect();
         let one_row = self.settings.one_row;
         let corrected = self.commit_word(true);
         let committed = corrected.as_ref().map_or(typed.clone(), |c| c.1.clone());
         self.commit(" ".into());
+        let hints = match &input {
+            Input::Typed { hints, .. } => hints.clone(),
+            Input::Drawn { .. } => Vec::new(),
+        };
         self.undo = corrected.map(|(t, f)| Undo {
             typed: t,
             fixed: f,
-            hints: hints.clone(),
+            hints,
             restore: None,
             pairs: Vec::new(),
         });
-        self.note_slip(typed.clone(), hints, committed.clone(), tap, ' ', settled);
+        self.note_slip(typed.clone(), input, committed.clone(), tap, ' ', settled);
         self.put_comma(&committed);
         if let Some(p) = self.prev_word.as_mut() {
             let from_way = drawn.is_some();
@@ -3062,9 +3123,6 @@ impl<D: AsRef<[u8]>> Ime<D> {
             if variants.len() > 1 {
                 p.variants = variants;
                 p.variant = 0;
-            }
-            if from_way {
-                p.alts.clear();
             }
         }
     }
@@ -3140,7 +3198,10 @@ impl<D: AsRef<[u8]>> Ime<D> {
     /// back, or typed again after an undo): it stays as it is.
     fn settled(&self) -> bool {
         let lower = self.word.to_lowercase();
-        !self.clean || self.editing || self.rejected.iter().any(|(t, _)| *t == lower)
+        // A drawn word isn't typed clean (no rhythm to show): only editing
+        // settles it.
+        let touched = !self.clean && self.drawn.is_none();
+        touched || self.editing || self.rejected.iter().any(|(t, _)| *t == lower)
     }
 
     /// `typed` went into the text as `committed`, then `sep` (a space, comma
@@ -3150,7 +3211,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
     fn note_slip(
         &mut self,
         typed: String,
-        hints: Vec<Hint>,
+        input: Input,
         committed: String,
         tap: Option<(f32, f32)>,
         sep: char,
@@ -3160,9 +3221,13 @@ impl<D: AsRef<[u8]>> Ime<D> {
         if typed.is_empty() || !self.suggest || self.settings.one_row {
             return;
         }
-        let letters = tap.map_or_else(Vec::new, |(x, y)| self.slip_letters(x, y));
+        // A drawn word's space isn't a tap that missed a letter.
+        let letters = match input {
+            Input::Typed { .. } => tap.map_or_else(Vec::new, |(x, y)| self.slip_letters(x, y)),
+            Input::Drawn { .. } => Vec::new(),
+        };
         let lower = typed.to_lowercase();
-        let mut readings = self.engine.suggest_hinted(&lower, &hints).0;
+        let mut readings = self.decode_input(&Context::default(), &input);
         readings.retain(|c| !self.blocked(&c.word, &lower));
         let alone = readings.first().map_or(f32::INFINITY, |c| c.cost);
         let mut alts = Vec::new();
@@ -3173,18 +3238,17 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 .strip_suffix(sep)
                 .and_then(|b| b.strip_suffix(committed.as_str()))
                 .unwrap_or("");
-            if let Some(w) = self.word_before(rest) {
-                self.engine.rerank(&w, &mut readings);
-            }
+            self.engine.weigh(&self.context_at(rest), &mut readings);
             readings.truncate(WINDOW_ALTS);
             alts = readings;
         }
-        if letters.is_empty() && alts.is_empty() {
+        // (A drawn word is kept anyway: its way gives the swipe up's variants.)
+        if letters.is_empty() && alts.is_empty() && matches!(input, Input::Typed { .. }) {
             return;
         }
         self.prev_word = Some(PrevWord {
             typed,
-            hints,
+            input,
             committed,
             alone,
             letters,
@@ -3223,12 +3287,17 @@ impl<D: AsRef<[u8]>> Ime<D> {
     /// the current word clearly likelier than two separate words?
     fn find_merge(&self, lower: &str, alone_now: f32) -> Option<Merge> {
         let prev = self.prev_here()?;
-        let head = prev.typed.to_lowercase();
+        let Input::Typed {
+            letters: head,
+            hints: head_hints,
+        } = &prev.input
+        else {
+            return None;
+        };
         let mut best: Option<(f32, String)> = None;
         for &(letter, slip) in &prev.letters {
             let joined = format!("{head}{letter}{lower}");
-            let hints: Vec<Hint> = prev
-                .hints
+            let hints: Vec<Hint> = head_hints
                 .iter()
                 .cloned()
                 .chain([Hint::default()])
@@ -3236,8 +3305,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 .collect();
             if let Some(c) = self
                 .engine
-                .suggest_hinted(&joined, &hints)
-                .0
+                .read(Evidence::Taps(&joined, &hints))
                 .into_iter()
                 .next()
             {
@@ -3271,17 +3339,27 @@ impl<D: AsRef<[u8]>> Ime<D> {
         let prev = self.prev_here()?;
         let committed = prev.committed.to_lowercase();
         let base_prev = prev.alts.iter().find(|a| a.word == committed)?.cost;
-        // This word's likeliest readings after `p`, with their costs.
+        // The text before the previous word.
+        let rest = self
+            .before
+            .strip_suffix(prev.sep)
+            .and_then(|b| b.strip_suffix(prev.committed.as_str()))
+            .unwrap_or("");
+        // This word's likeliest readings after `p` there, with their costs.
         let after = |p: &str| -> Vec<(f32, String)> {
             let mut cur = plain.to_vec();
-            self.engine.rerank(p, &mut cur);
+            self.engine
+                .weigh(&self.context_at(&format!("{rest}{p} ")), &mut cur);
             cur.into_iter().take(3).map(|c| (c.cost, c.word)).collect()
         };
         let base = base_prev + after(&committed).first()?.0;
         // Typed as a real word: only a slip of the finger may change it —
         // a bigger one when the next word speaks up strongly for the other
         // (а принципе: «принципе» almost always follows «в»).
-        let typed_word = prev.typed.to_lowercase() == committed && self.engine.contains(&committed);
+        // (A drawn word was read, not typed: its readings' costs decide.)
+        let typed_word = matches!(prev.input, Input::Typed { .. })
+            && prev.typed.to_lowercase() == committed
+            && self.engine.contains(&committed);
         let w_rules = self.engine.config().w_rules * self.engine.config().w_lm;
         // Every reading of the pair: the previous word re-read (only a slip
         // of the finger for a word typed as a real word) or as it stands.
@@ -3391,9 +3469,9 @@ impl<D: AsRef<[u8]>> Ime<D> {
         let left: String = typed[..left_end].iter().collect();
         let right: String = chars[right_start..].iter().collect();
         let left_cased = self.cased(&left, &left.to_lowercase());
-        let mut alts = self.engine.suggest_hinted(&right, &[]).0;
+        let ctx = self.context_at(&format!("{}{} ", self.before, left.to_lowercase()));
+        let mut alts = self.engine.decode(&ctx, Evidence::Taps(&right, &[]));
         alts.retain(|c| !self.blocked(&c.word, &right));
-        self.engine.rerank(&left.to_lowercase(), &mut alts);
         let mut variants = vec![format!("{left_cased} {}", self.cased(&right, &right))];
         for c in alts.iter().take(4) {
             let v = format!("{left_cased} {}", self.cased(&right, &c.word));
@@ -3506,7 +3584,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 ("undo", self.undo.is_some().to_string()),
             ],
         );
-        if !self.word.is_empty() && std::mem::take(&mut self.gesture_word) {
+        if !self.word.is_empty() && self.drawn.take().is_some() {
             // A word drawn across the keys goes as a whole: it was read, not typed.
             self.word.clear();
             self.hints.clear();
@@ -3640,38 +3718,130 @@ impl<D: AsRef<[u8]>> Ime<D> {
             .collect()
     }
 
-    /// Read a drawn word: its readings, cheapest first — with the times of
-    /// the way when the pace setting is on.
-    fn read_gesture(&self, trail: &[(f32, f32)], ms: &[i64]) -> Vec<Candidate> {
+    /// The letter a tap on `c`'s key means, `hint` its touch: on the border
+    /// with a neighbor, when no word goes on with `c` but some do with the
+    /// neighbor, the neighbor — the likeliest at the place if several (the
+    /// key's zones follow the text; nothing is learned). The hint is turned
+    /// round to the letter taken. Only a dead end: a letter that some word
+    /// goes on with stays — the word's own correction weighs it later with
+    /// all its letters (choosing here by the best word the letters so far
+    /// begin, a short frequent one — «с», «в» — would win every border).
+    fn zone_letter(&self, c: char, hint: &mut Hint) -> char {
+        if !self.suggest || !self.settings.autocorrect || self.settings.one_row {
+            return c;
+        }
+        let lower = c.to_lowercase().next().unwrap_or(c);
+        let base = self.engine.config().base_sub;
+        let near: Vec<(char, f32)> = hint
+            .spatial
+            .iter()
+            .copied()
+            .filter(|&(x, cost)| x != lower && cost <= base + ZONE_NEAR)
+            .collect();
+        if near.is_empty() {
+            return c;
+        }
+        let ctx = self.context_at(&self.before);
+        let w_ch = self.engine.config().w_ch;
+        let so_far = self.word.to_lowercase();
+        let begun = |x: char, touch: f32| {
+            let prefix = format!("{so_far}{x}");
+            self.engine
+                .decode(&ctx, Evidence::Begun(&prefix))
+                .first()
+                .map_or(f32::INFINITY, |b| b.cost + w_ch * touch)
+        };
+        if begun(lower, 0.0).is_finite() {
+            return c;
+        }
+        let Some((best, cost, at)) = near
+            .iter()
+            .map(|&(x, t)| (x, t, begun(x, t - base)))
+            .min_by(|a, b| a.2.total_cmp(&b.2))
+        else {
+            return c;
+        };
+        if !at.is_finite() {
+            return c;
+        }
+        // The touch from the letter taken: the pressed key now its
+        // neighbor on the border.
+        hint.spatial.retain(|&(x, _)| x != best);
+        hint.spatial.push((lower, cost));
+        if c.is_uppercase() {
+            best.to_uppercase().next().unwrap_or(best)
+        } else {
+            best
+        }
+    }
+
+    /// What the finger gave for the word being composed.
+    fn composing_input(&self) -> Input {
+        match &self.drawn {
+            Some((trail, ms)) => Input::Drawn {
+                trail: trail.clone(),
+                ms: ms.clone(),
+            },
+            None => Input::typed(&self.word, &self.hints),
+        }
+    }
+
+    /// The readings of a word the finger gave `input` for, at the place
+    /// `ctx` was read for, best first.
+    fn decode_input(&self, ctx: &Context, input: &Input) -> Vec<Candidate> {
+        match input {
+            Input::Typed { letters, hints } => {
+                self.engine.decode(ctx, Evidence::Taps(letters, hints))
+            }
+            Input::Drawn { trail, ms } => self.decode_drawn(ctx, trail, ms),
+        }
+    }
+
+    /// Read a drawn word at the place `ctx` was read for: its readings, best
+    /// first — with the times of the way when the pace setting is on.
+    fn decode_drawn(&self, ctx: &Context, trail: &[(f32, f32)], ms: &[i64]) -> Vec<Candidate> {
         let keys = self.gesture_keys();
         let t0 = ms.first().copied().unwrap_or(0);
         let times: Vec<f32> = ms.iter().map(|&t| (t - t0) as f32).collect();
         let times =
             (self.settings.gesture_pace && times.len() == trail.len()).then_some(&times[..]);
-        let mut cands = self
-            .engine
-            .gesture_timed(trail, times, &keys, self.letter_width());
+        let drawn = Evidence::Drawn {
+            points: trail,
+            times,
+            keys: &keys,
+            key_w: self.letter_width(),
+        };
+        let mut cands = self.engine.decode(ctx, drawn);
         cands.retain(|c| !stretched(&c.word) && !self.blocked(&c.word, ""));
         cands
+    }
+
+    /// The text a drawn word will follow: a word being typed goes in first,
+    /// and a word comes after a word or punctuation with a space (the word
+    /// being typed as it stands — space may yet correct it).
+    fn gesture_place(&self) -> String {
+        if !self.word.is_empty() {
+            format!("{}{} ", self.before, self.word)
+        } else if self.needs_space_before_gesture() {
+            format!("{} ", self.before)
+        } else {
+            self.before.clone()
+        }
+    }
+
+    /// A word or punctuation right before the cursor: a drawn word goes
+    /// after a space.
+    fn needs_space_before_gesture(&self) -> bool {
+        self.before
+            .chars()
+            .last()
+            .is_some_and(|c| c.is_alphanumeric() || ",.!?;:".contains(c) || CLOSING.contains(c))
     }
 
     /// While a word is drawn: what the way so far reads as, in the strip's
     /// center (nothing reaches the text until the finger lifts).
     fn gesture_preview(&mut self, trail: &[(f32, f32)], ms: &[i64]) {
-        let mut cands = self.read_gesture(trail, ms);
-        // A word being typed goes in first, with a space.
-        let (context, phrase) = if self.word.is_empty() {
-            (self.previous_word(), self.phrase())
-        } else {
-            let before = format!("{}{} ", self.before, self.word);
-            (Some(self.word.to_lowercase()), Self::phrase_of(&before))
-        };
-        if let Some(prev) = context {
-            self.engine.rerank(&prev, &mut cands);
-        }
-        self.engine.rerank_phrase(&phrase, &mut cands);
-        self.engine
-            .rerank_topic(&Self::sentence_of(&self.before), &mut cands);
+        let cands = self.decode_drawn(&self.context_at(&self.gesture_place()), trail, ms);
         let Some(best) = cands.first() else {
             return;
         };
@@ -3688,7 +3858,8 @@ impl<D: AsRef<[u8]>> Ime<D> {
     }
 
     fn type_gesture(&mut self, trail: &[(f32, f32)], ms: &[i64]) {
-        let mut cands = self.read_gesture(trail, ms);
+        let place = self.gesture_place();
+        let mut cands = self.decode_drawn(&self.context_at(&place), trail, ms);
         self.log_event(
             "gesture",
             &[
@@ -3714,21 +3885,16 @@ impl<D: AsRef<[u8]>> Ime<D> {
         // before the cursor — a gesture word comes with its space.
         if !self.word.is_empty() {
             self.space();
-        } else if self
-            .before
-            .chars()
-            .last()
-            .is_some_and(|c| c.is_alphanumeric() || ",.!?;:".contains(c) || CLOSING.contains(c))
-        {
+        } else if self.needs_space_before_gesture() {
             self.commit(" ".into());
         }
-        if let Some(prev) = self.previous_word() {
-            self.engine.rerank(&prev, &mut cands);
+        // Space corrected the word before: read the way again after it.
+        if self.before != place {
+            let again = self.decode_drawn(&self.context_at(&self.before), trail, ms);
+            if !again.is_empty() {
+                cands = again;
+            }
         }
-        let phrase = self.phrase();
-        self.engine.rerank_phrase(&phrase, &mut cands);
-        self.engine
-            .rerank_topic(&Self::sentence_of(&self.before), &mut cands);
         let best = cands[0].word.clone();
         let word = match self.shift {
             Shift::Caps => best.to_uppercase(),
@@ -3755,7 +3921,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
             .take(5)
             .map(|c| c.word.clone())
             .collect();
-        self.gesture_word = true;
+        self.drawn = Some((trail.to_vec(), ms.to_vec()));
         self.shown = word.clone();
         self.out.push(Op::Composing(word.clone()));
         self.gesture_strip();
@@ -3838,12 +4004,12 @@ impl<D: AsRef<[u8]>> Ime<D> {
             // What the space would put, the strip's readings and the next
             // likeliest — and what was typed, unless it is the one-row
             // layout's column letters.
-            let offered: Vec<String> = if self.gesture_word {
+            let offered: Vec<String> = if self.drawn.is_some() {
                 self.alternatives.clone()
             } else {
                 self.last_cands.iter().map(|(w, _)| w.clone()).collect()
             };
-            let typed = (!self.settings.one_row || self.gesture_word).then(|| lower.clone());
+            let typed = (!self.settings.one_row || self.drawn.is_some()).then(|| lower.clone());
             for w in self
                 .autocorrect
                 .iter()
@@ -3878,7 +4044,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 self.shown = next.clone();
                 self.out.push(Op::Composing(next));
             }
-            if self.gesture_word {
+            if self.drawn.is_some() {
                 self.gesture_strip();
             }
             return;
@@ -3886,22 +4052,36 @@ impl<D: AsRef<[u8]>> Ime<D> {
         let Some(prev) = self.prev_here().filter(|p| p.sep == ' ') else {
             return;
         };
-        let (typed, committed, hints) = (
+        let (typed, committed, input) = (
             prev.typed.clone(),
             prev.committed.clone(),
-            prev.hints.clone(),
+            prev.input.clone(),
         );
         let mut variants = prev.variants.clone();
         if variants.is_empty() {
             let lower = typed.to_lowercase();
-            let alts: Vec<String> = if prev.alts.is_empty() {
-                let mut c = self.engine.suggest_hinted(&lower, &hints).0;
+            let rest = self
+                .before
+                .strip_suffix(' ')
+                .and_then(|b| b.strip_suffix(committed.as_str()))
+                .unwrap_or("");
+            let ctx = self.context_at(rest);
+            let read = |input: &Input| -> Vec<String> {
+                let mut c = self.decode_input(&ctx, input);
                 c.retain(|c| !self.blocked(&c.word, &lower));
                 c.truncate(WINDOW_ALTS);
                 c.into_iter().map(|c| c.word).collect()
+            };
+            let mut alts: Vec<String> = if prev.alts.is_empty() {
+                read(&input)
             } else {
                 prev.alts.iter().map(|c| c.word.clone()).collect()
             };
+            // A way that reads as the word alone: the words its letters
+            // might be, as if typed.
+            if alts.iter().all(|w| *w == lower) && matches!(input, Input::Drawn { .. }) {
+                alts = read(&Input::typed(&lower, &[]));
+            }
             variants.push(committed.to_lowercase());
             for w in alts.into_iter().chain(std::iter::once(lower)) {
                 if !variants.contains(&w) {
@@ -4126,12 +4306,6 @@ impl<D: AsRef<[u8]>> Ime<D> {
         };
     }
 
-    /// The word right before the cursor (separated by spaces only), lowercase
-    /// — the context for the word being typed. None across punctuation.
-    fn previous_word(&self) -> Option<String> {
-        self.word_before(&self.before)
-    }
-
     /// The word ending `text` before its trailing spaces, lowercase; None
     /// across punctuation.
     fn word_before(&self, text: &str) -> Option<String> {
@@ -4177,9 +4351,15 @@ impl<D: AsRef<[u8]>> Ime<D> {
         words
     }
 
-    /// The phrase before the word being typed.
-    fn phrase(&self) -> Vec<String> {
-        Self::phrase_of(&self.before)
+    /// What `text` says about the word after it — the word before, the
+    /// phrase, the sentence ([`kbcore::Context`]): every reading of a word,
+    /// typed, completed, drawn or predicted, is weighed by it.
+    fn context_at(&self, text: &str) -> Context {
+        self.engine.context(
+            self.word_before(text).as_deref(),
+            &Self::phrase_of(text),
+            &Self::sentence_of(text),
+        )
     }
 
     /// The words of `text` back to the end of the sentence before (at most
@@ -4218,17 +4398,10 @@ impl<D: AsRef<[u8]>> Ime<D> {
         if self.settings.strip == Strip::Off || !self.suggest || self.settings.one_row {
             return;
         }
-        let Some(prev) = self.previous_word() else {
-            return;
-        };
-        // The phrase before it too: the case a preposition governs, agreement.
-        let mut phrase = self.phrase();
-        if phrase.last() != Some(&prev) {
-            phrase = vec![prev];
-        }
+        let ctx = self.context_at(&self.before);
         self.predicted = self
             .engine
-            .predict_in(&phrase, 6)
+            .decode(&ctx, Evidence::Nothing)
             .into_iter()
             .map(|c| c.word)
             .filter(|w| !self.blocked(w, ""))
@@ -4256,7 +4429,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
             return;
         }
         let lower = self.word.to_lowercase();
-        let mut corrections = self.engine.suggest_hinted(&lower, &self.hints).0;
+        let mut corrections = self.engine.read(Evidence::Taps(&lower, &self.hints));
         corrections.retain(|c| !self.blocked(&c.word, &lower));
         // Stretched interjections (ааа, ммм, эээ) are words when typed on
         // purpose, but never what a slip was meant to be.
@@ -4273,14 +4446,12 @@ impl<D: AsRef<[u8]>> Ime<D> {
             }
         }
         let plain = corrections.clone();
-        let context = self.previous_word();
-        if let Some(prev) = &context {
-            self.engine.rerank(prev, &mut corrections);
-        }
-        let phrase = self.phrase();
-        self.engine.rerank_phrase(&phrase, &mut corrections);
-        let sentence = Self::sentence_of(&self.before);
-        self.engine.rerank_topic(&sentence, &mut corrections);
+        let ctx = self.context_at(&self.before);
+        let mut corrections = self
+            .engine
+            .decode(&ctx, Evidence::Taps(&lower, &self.hints));
+        corrections.retain(|c| !self.blocked(&c.word, &lower));
+        corrections.retain(|c| c.word == lower || !stretched(&c.word));
         self.last_cands = corrections
             .iter()
             .take(VARIANTS)
@@ -4307,22 +4478,8 @@ impl<D: AsRef<[u8]>> Ime<D> {
             }
             return;
         }
-        let mut completions = self.engine.complete(&lower);
-        // Words the context expects that start with what is typed, however
-        // rare on their own.
-        if let Some(prev) = &context {
-            for c in self.engine.complete_after(prev, &lower, 8) {
-                if !completions.iter().any(|x| x.word == c.word) {
-                    completions.push(c);
-                }
-            }
-        }
+        let mut completions = self.engine.decode(&ctx, Evidence::Begun(&lower));
         completions.retain(|c| !stretched(&c.word) && !self.blocked(&c.word, &lower));
-        if let Some(prev) = &context {
-            self.engine.rerank(prev, &mut completions);
-        }
-        self.engine.rerank_phrase(&phrase, &mut completions);
-        self.engine.rerank_topic(&sentence, &mut completions);
         // Abbreviations are left alone: several capitals (ГОСТ, iPhone) or a
         // short vowel-less token (тс, хз, спс, lmk).
         // Known abbreviations live in the dictionary (slang list); an unknown
@@ -4346,7 +4503,19 @@ impl<D: AsRef<[u8]>> Ime<D> {
         if self.settings.autocorrect && !shaped && !insisted && n >= 2 {
             let (per_letter, lead, known_margin) = self.settings.strength.limits();
             let known = self.engine.contains(&lower);
-            let typed_cost = corrections.iter().find(|c| c.word == lower).map(|c| c.cost);
+            // What the typed word costs here: the search at the place may have
+            // left it out, crowded by likelier words — its reading on its own,
+            // weighed by the place, is the same number.
+            let typed_cost = corrections
+                .iter()
+                .find(|c| c.word == lower)
+                .map(|c| c.cost)
+                .or_else(|| {
+                    let mut own: Vec<Candidate> =
+                        plain.iter().filter(|c| c.word == lower).cloned().collect();
+                    self.engine.weigh(&ctx, &mut own);
+                    own.first().map(|c| c.cost)
+                });
             // An undone fix stays on offer in the strip (a tap puts it back)
             // but space never applies it again here. A word not yet finished
             // competes with its completions too, as they stand in context:
@@ -4375,15 +4544,24 @@ impl<D: AsRef<[u8]>> Ime<D> {
             let mut others = pool.into_iter();
             let best = others.next();
             let runner_up = others.next().map_or(f32::INFINITY, |c| c.cost);
+            let typed_fit = known.then(|| self.engine.grammar_fit(&ctx, &lower));
+            let other_form = |c: &Candidate| {
+                typed_fit.is_some_and(|t| {
+                    c.edit <= GRAMMAR_SLIP
+                        && same_stem(&lower, &c.word)
+                        && self.engine.grammar_fit(&ctx, &c.word) - t >= GRAMMAR_GAP
+                })
+            };
             self.autocorrect = best
                 .filter(|c| c.edit <= per_letter * n.max(3) as f32)
                 .filter(|c| runner_up - c.cost >= lead)
-                // A real word typed: only a cheap slip, clearly likelier (the
-                // context is already in the costs — a missing word pair only
-                // means the previous word doesn't change its odds).
+                // A real word typed: only a cheap slip, or another form of
+                // it the grammar asks for, clearly likelier (the context is
+                // already in the costs — a missing word pair only means the
+                // previous word doesn't change its odds).
                 .filter(|c| {
                     !known
-                        || c.edit <= self.known_slip
+                        || (c.edit <= self.known_slip || other_form(c))
                             && typed_cost.is_some_and(|t| c.cost + known_margin < t)
                 })
                 .map(|c| c.word.clone());
@@ -5510,6 +5688,115 @@ mod tests {
     }
 
     #[test]
+    fn a_real_word_the_grammar_rules_out_gives_way_to_its_form() {
+        let id = |w: &str| -> Vec<u8> {
+            w.chars()
+                .map(|c| kbcore::alphabet::char_to_id(c).unwrap())
+                .collect()
+        };
+        let words = [
+            ("девочка", 5000u64),
+            ("мальчик", 5000),
+            ("быстро", 5000),
+            ("побежал", 5000),
+            ("побежала", 5000),
+        ];
+        let dict = Map::from_iter(
+            words
+                .iter()
+                .map(|(w, v)| (id(w), *v))
+                .collect::<std::collections::BTreeMap<_, _>>(),
+        )
+        .unwrap();
+        let parse = kbcore::gram::parse;
+        let byte = |x: f32| ((x / 0.05).round() + 128.0) as u64;
+        let word = |w: &str, set: u64| ([vec![0, 3], id(w)].concat(), 1 | set << 16);
+        let mut kv = vec![
+            word("девочка", 1),
+            word("мальчик", 2),
+            word("быстро", 3),
+            word("побежал", 4),
+            word("побежала", 5),
+            (vec![0, 9, 0, 1, 0], parse("NOUN,anim,femn,sing,nomn")),
+            (vec![0, 9, 0, 2, 0], parse("NOUN,anim,masc,sing,nomn")),
+            (vec![0, 9, 0, 3, 0], parse("ADJS,neut,sing")),
+            (vec![0, 9, 0, 3, 1], parse("ADVB")),
+            (vec![0, 9, 0, 4, 0], parse("ADJS,masc,sing")),
+            (vec![0, 9, 0, 4, 1], parse("VERB,masc,sing,past")),
+            (vec![0, 9, 0, 5, 0], parse("VERB,femn,sing,past")),
+            // After a subject: a predicate that agrees +1.0, not -4.7.
+            (
+                vec![0, 12],
+                byte(-1.1)
+                    | byte(0.5) << 8
+                    | byte(-2.7) << 16
+                    | byte(-0.8) << 24
+                    | byte(-3.2) << 32
+                    | byte(1.0) << 40
+                    | byte(-4.7) << 48,
+            ),
+        ];
+        kv.sort();
+        let bigrams = Map::from_iter(kv).unwrap();
+        let cfg = Config::balanced().with_profile(Profile::Phone);
+        let mut k = Ime::new(Engine::new(dict, cfg).with_bigrams(bigrams), 2.625);
+        k.measure(1080);
+        k.start_input("", 1);
+        type_str(&mut k, "девочка быстро побежал ");
+        assert_eq!(k.before, "девочка быстро побежала ");
+        // The form that agrees stays.
+        k.start_input("", 1);
+        type_str(&mut k, "мальчик быстро побежал ");
+        assert_eq!(k.before, "мальчик быстро побежал ");
+    }
+
+    #[test]
+    fn a_tap_on_a_border_goes_with_the_text() {
+        let id = |w: &str| -> Vec<u8> {
+            w.chars()
+                .map(|c| kbcore::alphabet::char_to_id(c).unwrap())
+                .collect()
+        };
+        let words = [("рыжий", 5000u64), ("кот", 9000), ("ком", 4000)];
+        let dict = Map::from_iter(
+            words
+                .iter()
+                .map(|(w, v)| (id(w), *v))
+                .collect::<std::collections::BTreeMap<_, _>>(),
+        )
+        .unwrap();
+        let kv = vec![([id("рыжий"), vec![0], id("кот")].concat(), 100u64)];
+        let bigrams = Map::from_iter(kv).unwrap();
+        let cfg = Config::balanced().with_profile(Profile::Phone);
+        let mut k = Ime::new(Engine::new(dict, cfg).with_bigrams(bigrams), 2.625);
+        k.measure(1080);
+        // A tap just on «е»'s side of its border with «к».
+        let (kx, ky) = k.key_center(Action::Char('к')).unwrap();
+        let (ex, _) = k.key_center(Action::Char('е')).unwrap();
+        let x = (kx + ex) / 2.0 + (ex - kx) * 0.02;
+        let tap = |k: &mut Ime<Vec<u8>>| {
+            let t = now();
+            k.touch(DOWN, 0, x, ky, t);
+            k.touch(UP, 0, x, ky, t + 60);
+        };
+        // No word begins with «е»: «к».
+        k.start_input("", 1);
+        tap(&mut k);
+        assert_eq!(k.word.to_lowercase(), "к");
+        // A letter some word goes on with stays as tapped: «к|о» on the «о»
+        // side of its border with «л» — «ко…» goes on.
+        k.start_input("", 1);
+        type_str(&mut k, "рыжий к");
+        let (ox, oy) = k.key_center(Action::Char('о')).unwrap();
+        let (lx, _) = k.key_center(Action::Char('л')).unwrap();
+        let x = (ox + lx) / 2.0 - (lx - ox) * 0.02;
+        let t = now();
+        k.touch(DOWN, 0, x, oy, t);
+        k.touch(UP, 0, x, oy, t + 60);
+        assert_eq!(k.word, "ко");
+    }
+
+    #[test]
     fn names_take_their_capitals() {
         let mut k = ime(&[("москва", 3000), ("сша", 2000), ("вера", 2000), ("в", 9000)]);
         let casing = Map::from_iter(
@@ -6025,6 +6312,26 @@ mod tests {
     }
 
     #[test]
+    fn a_drawn_word_keeps_its_way() {
+        let mut k = ime(&[("привет", 3000), ("как", 2500), ("приват", 9000)]);
+        swipe(&mut k, "привет");
+        swipe(&mut k, "как");
+        // In the text it is read again from the way it was drawn, not as if
+        // its letters were typed.
+        let w = k.written.last().unwrap();
+        assert_eq!(w.text, "привет");
+        assert!(matches!(w.input, Input::Drawn { .. }));
+        let prev = k.prev_word.as_ref().expect("the window keeps it");
+        assert!(matches!(prev.input, Input::Drawn { .. }));
+        assert!(prev.letters.is_empty(), "its space was no tap");
+        assert!(
+            prev.alts.iter().any(|c| c.word == "приват"),
+            "{:?}",
+            prev.alts
+        );
+    }
+
+    #[test]
     fn a_word_erased_whole_brings_the_capital_back() {
         let mut k = ime(&[("привет", 3000), ("как", 2500)]);
         // A drawn word at the start of the field, erased: the next one starts
@@ -6276,7 +6583,7 @@ mod tests {
         k.type_char('l');
         k.type_char('\'');
         assert_eq!((k.before.as_str(), k.word.as_str()), ("l'", ""));
-        assert_eq!(k.previous_word().as_deref(), Some("l'"));
+        assert_eq!(k.context_at(&k.before).prev(), Some("l'"));
         type_str(&mut k, "homme ");
         assert_eq!(k.before, "l'homme ");
         // Inside a word the apostrophe stays: aujourd'hui.

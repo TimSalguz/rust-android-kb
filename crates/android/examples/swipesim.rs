@@ -12,7 +12,7 @@
 use std::io::{BufRead, BufReader};
 use std::time::Instant;
 
-use kbcore::{Config, Engine, Profile};
+use kbcore::{Config, Engine, Evidence, Profile};
 use kbime::ime::Ime;
 use kbime::layout::Action;
 
@@ -109,14 +109,16 @@ fn main() {
                 else {
                     continue;
                 };
-                let mut cands = decoder.gesture_timed(&pts, times.as_deref(), &keys, key_w);
                 let before: Vec<String> = words[..i].iter().map(|w| w.to_string()).collect();
-                if let Some(prev) = before.last() {
-                    decoder.rerank(prev, &mut cands);
-                }
                 let phrase: Vec<String> = before.iter().rev().take(5).rev().cloned().collect();
-                decoder.rerank_phrase(&phrase, &mut cands);
-                decoder.rerank_topic(&before, &mut cands);
+                let ctx = decoder.context(before.last().map(String::as_str), &phrase, &before);
+                let drawn = Evidence::Drawn {
+                    points: &pts,
+                    times: times.as_deref(),
+                    keys: &keys,
+                    key_w,
+                };
+                let cands = decoder.decode(&ctx, drawn);
                 n += 1;
                 let rank = cands.iter().position(|c| c.word == *word);
                 ranks[match rank {
