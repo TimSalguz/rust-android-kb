@@ -29,6 +29,11 @@ use crate::keyboard::N;
 const M: usize = 40;
 /// A letter's key "is on the path" within this many key widths of a point.
 const NEAR: f32 = 1.1;
+/// A gesture no word fits within this (mean distance, key widths) is read
+/// again with keys this far from the path still on it: sloppy corners
+/// (0.4 key off) 85.0 → 87.5% right, careful ones untouched.
+const RETRY_BEYOND: f32 = 0.6;
+const NEAR_WIDE: f32 = 1.5;
 /// The first letter must be near one of the first points, the last near one
 /// of the last points…
 const END_SLACK: usize = 4;
@@ -229,7 +234,13 @@ struct Gesture {
 }
 
 impl Gesture {
-    fn new(path: &[Pt], times: Option<&[f32]>, keys: &[(char, f32, f32)], key_w: f32) -> Self {
+    fn new(
+        path: &[Pt],
+        times: Option<&[f32]>,
+        keys: &[(char, f32, f32)],
+        key_w: f32,
+        near: f32,
+    ) -> Self {
         let pts = resample(path, M);
         let mut pos = [None; N];
         for &(c, x, y) in keys {
@@ -238,7 +249,7 @@ impl Gesture {
             }
         }
         let mut next = vec![M as u8; N * (M + 1)];
-        let r = NEAR * key_w;
+        let r = near * key_w;
         for (c, p) in pos.iter().enumerate() {
             let Some(&(kx, ky)) = p.as_ref() else {
                 continue;
@@ -290,11 +301,13 @@ impl Gesture {
     /// How far the drawn path is from the word's: location (squared mean
     /// distance in key widths) and shape (in units of the gesture's size),
     /// weighted.
-    fn distance(&self, ids: &[u8], w_location: f32, w_shape: f32) -> Option<f32> {
+    /// How far the drawn path is from the word's: location (mean distance,
+    /// key widths) and shape (in units of the gesture's size).
+    fn distance(&self, ids: &[u8]) -> Option<(f32, f32)> {
         let ideal = self.ideal(ids)?;
         let loc = mean_dist(&self.pts, &ideal) / self.key_w;
         let shape = mean_dist(&self.shape, &normalized(&ideal));
-        Some(w_location * loc * loc + w_shape * shape * shape)
+        Some((loc, shape))
     }
 }
 
@@ -331,6 +344,60 @@ impl Walk {
 }
 
 impl<D: AsRef<[u8]>> Engine<D> {
+    /// The words a walk of the dictionary (and the user's words) finds along
+    /// the gesture: (ids, prior, pace cost, location, shape).
+    fn fits(&self, g: &Gesture) -> Vec<(Vec<u8>, u64, f32, f32, f32)> {
+        let cfg = &self.cfg;
+        let mut w = Walk {
+            k: KEEP,
+            best: Vec::with_capacity(KEEP + 1),
+            nodes: 0,
+            w_walk: cfg.gesture_walk,
+            w_prior: cfg.w_lm * cfg.prior_scale,
+            w_pace: cfg.gesture_pace,
+            format: self.format,
+        };
+        let mut ids = Vec::with_capacity(24);
+        let fst = self.map.as_fst();
+        walk(
+            g,
+            fst,
+            fst.root(),
+            0,
+            0,
+            0,
+            g.pts[0],
+            0,
+            (0.0, 0.0),
+            &mut ids,
+            &mut w,
+        );
+        if let Some(user) = &self.user {
+            let fst = user.as_fst();
+            w.format = DictFormat::PLAIN;
+            walk(
+                g,
+                fst,
+                fst.root(),
+                0,
+                0,
+                0,
+                g.pts[0],
+                0,
+                (0.0, 0.0),
+                &mut ids,
+                &mut w,
+            );
+        }
+        w.best
+            .into_iter()
+            .filter_map(|(_, ids, prior, pace)| {
+                let (loc, shape) = g.distance(&ids)?;
+                Some((ids, prior, pace, loc, shape))
+            })
+            .collect()
+    }
+
     /// Decode a gesture: `path` is where the finger went (any units),
     /// `keys` each letter's key center in the same units, `key_w` a key's
     /// width in them. Candidates cheapest first (at most `top_k`); `edit` is
@@ -353,59 +420,42 @@ impl<D: AsRef<[u8]>> Engine<D> {
         }
         let cfg = &self.cfg;
         let times = times.filter(|_| cfg.gesture_pace > 0.0);
-        let g = Gesture::new(path, times, keys, key_w);
-        let mut w = Walk {
-            k: KEEP,
-            best: Vec::with_capacity(KEEP + 1),
-            nodes: 0,
-            w_walk: cfg.gesture_walk,
-            w_prior: cfg.w_lm * cfg.prior_scale,
-            w_pace: cfg.gesture_pace,
-            format: self.format,
-        };
-        let mut ids = Vec::with_capacity(24);
-        let fst = self.map.as_fst();
-        walk(
-            &g,
-            fst,
-            fst.root(),
-            0,
-            0,
-            0,
-            g.pts[0],
-            0,
-            (0.0, 0.0),
-            &mut ids,
-            &mut w,
-        );
-        if let Some(user) = &self.user {
-            let fst = user.as_fst();
-            w.format = DictFormat::PLAIN;
-            walk(
-                &g,
-                fst,
-                fst.root(),
-                0,
-                0,
-                0,
-                g.pts[0],
-                0,
-                (0.0, 0.0),
-                &mut ids,
-                &mut w,
-            );
+        let g = Gesture::new(path, times, keys, key_w, NEAR);
+        let mut fits = self.fits(&g);
+        // Nothing fits well: the corners strayed past the keys' reach — a
+        // wider one, once, for words the first walk couldn't reach.
+        let best = fits.iter().map(|f| f.3).fold(f32::INFINITY, f32::min);
+        if best > RETRY_BEYOND {
+            let wide = Gesture::new(path, times, keys, key_w, NEAR_WIDE);
+            for f in self.fits(&wide) {
+                if !fits.iter().any(|x| x.0 == f.0) {
+                    fits.push(f);
+                }
+            }
         }
-        let mut out: Vec<Candidate> = w
-            .best
-            .iter()
-            .filter_map(|(_, ids, prior, pace)| {
-                let geo = g.distance(ids, cfg.gesture_location, cfg.gesture_shape)?
+        // How carefully this gesture was drawn: even its best-fitting word
+        // lies this far from it. A sloppy one tells less by its geometry —
+        // the prior and the context weigh more (each gesture on its own,
+        // nothing is kept).
+        let s0 = cfg.gesture_trust;
+        let best = fits.iter().map(|f| f.3).fold(f32::INFINITY, f32::min);
+        let trust = if s0 > 0.0 && best.is_finite() {
+            (s0 / best.max(s0)).powi(2)
+        } else {
+            1.0
+        };
+        let mut out: Vec<Candidate> = fits
+            .into_iter()
+            .map(|(ids, prior, pace, loc, shape)| {
+                let ids = &ids;
+                let geo = trust
+                    * (cfg.gesture_location * loc * loc + cfg.gesture_shape * shape * shape)
                     + cfg.gesture_pace * pace;
-                Some(Candidate {
+                Candidate {
                     word: alphabet::ids_to_string(ids),
-                    cost: geo + cfg.w_lm * *prior as f32 * cfg.prior_scale,
+                    cost: geo + cfg.w_lm * prior as f32 * cfg.prior_scale,
                     edit: geo,
-                })
+                }
             })
             .collect();
         out.sort_by(|a, b| a.cost.total_cmp(&b.cost).then_with(|| a.word.cmp(&b.word)));

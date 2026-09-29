@@ -170,6 +170,11 @@ pub struct Config {
     pub gesture_location: f32,
     pub gesture_shape: f32,
     pub gesture_walk: f32,
+    /// A gesture whose best-fitting word is farther than this from it (mean
+    /// distance, key widths) was drawn sloppily: its geometry counts that
+    /// much less, squared (0: always fully). Swiped sentences, corners off
+    /// by 0.4 key: 83.5 → 85.0% right; by 0.2: the same 97.4%.
+    pub gesture_trust: f32,
     /// Weight of the finger's pace along a gesture (a stop no letter
     /// explains, a letter flown past), when the path comes with its times;
     /// 0: the path alone.
@@ -259,7 +264,8 @@ impl Config {
             w_topic: 0.5,
             gesture_location: 7.0,
             gesture_shape: 6.0,
-            gesture_walk: 4.0,
+            gesture_walk: 8.0,
+            gesture_trust: 0.3,
             gesture_pace: 1.0,
             w_lm: 0.4,
             w_ch: 1.0,
@@ -322,7 +328,7 @@ impl Config {
         fields!(
             f32: sigma, base_sub, cross_alphabet_penalty, max_sub, c_phonetic, c_yo, c_yo_reverse,
                 c_hard_soft, c_accent, c_accent_reverse, c_del, c_del_double, c_del_sign, c_del_punct, c_del_held, c_ins, c_ins_repeat,
-                c_ins_neighbor, c_ins_sign, c_trans, c_trans_cross, c_trans_rollover, layout_switch, layout_max_cost, home_row_penalty, home_row_trigger, c_home_finger, c_complete_char, ctx_lambda, w_endings, w_classes, w_rules, w_phrase, w_topic, gesture_location, gesture_shape, gesture_walk, gesture_pace,
+                c_ins_neighbor, c_ins_sign, c_trans, c_trans_cross, c_trans_rollover, layout_switch, layout_max_cost, home_row_penalty, home_row_trigger, c_home_finger, c_complete_char, ctx_lambda, w_endings, w_classes, w_rules, w_phrase, w_topic, gesture_location, gesture_shape, gesture_walk, gesture_trust, gesture_pace,
                 w_lm, w_ch, prior_scale, max_cost, widen_step, max_cost_ceiling, rescue_cost;
             usize: min_results, max_nodes, max_input_len, top_k
         );

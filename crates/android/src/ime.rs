@@ -122,8 +122,8 @@ const ABBREVIATIONS: &[&str] = &[
     "руб", "коп", "напр", "англ", "etc", "vs", "approx",
 ];
 /// While a word is drawn, it is read again every this many trail points
-/// (≈ every 50–100 ms) to show what it makes so far.
-const GESTURE_PREVIEW_POINTS: usize = 6;
+/// (≈ every 30–60 ms) to show what it makes so far.
+const GESTURE_PREVIEW_POINTS: usize = 4;
 /// How many readings a swipe up on the space bar goes round (the strip's
 /// and the next likeliest).
 const VARIANTS: usize = 8;

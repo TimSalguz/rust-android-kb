@@ -66,7 +66,101 @@ fn main() {
             }
         }
     }
-    let decoder = Engine::open(dict, cfg).unwrap();
+    let decoder = match std::env::var("BIGRAMS") {
+        Ok(b) => Engine::open_with_bigrams(dict, b, cfg).unwrap(),
+        Err(_) => Engine::open(dict, cfg).unwrap(),
+    };
+
+    // SENTENCES=file BIGRAMS=bigrams.fst SIGMA=0.3: every word of each line
+    // long enough to draw, drawn (landing on its first key) and read with
+    // the words before it as the keyboard reads them — where the meant word
+    // ranks, and what beat it.
+    if let Ok(path) = std::env::var("SENTENCES") {
+        let sigma: f32 = std::env::var("SIGMA")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.3);
+        let mut rng = Rng(7);
+        let (mut n, mut ranks) = (0usize, [0usize; 5]); // 1, 2–3, 4–10, later, absent
+        let mut shown = 0;
+        for line in BufReader::new(std::fs::File::open(path).unwrap())
+            .lines()
+            .map_while(Result::ok)
+        {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            for (i, word) in words.iter().enumerate() {
+                let centers: Vec<(f32, f32)> = word
+                    .chars()
+                    .filter_map(|c| keys.iter().find(|k| k.0 == c).map(|k| (k.1, k.2)))
+                    .collect();
+                let way: f32 = centers
+                    .windows(2)
+                    .map(|w| (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1))
+                    .sum();
+                if centers.len() != word.chars().count() || way < 2.6 * key_w {
+                    continue;
+                }
+                let first = word.chars().next().map(Action::Char);
+                let Some((pts, times)) = (0..30)
+                    .filter_map(|_| {
+                        common::draw(word, &keys, key_w, sigma, Pace::Corners, &mut rng)
+                    })
+                    .find(|(p, _)| ime.action_at(p[0].0, p[0].1) == first)
+                else {
+                    continue;
+                };
+                let mut cands = decoder.gesture_timed(&pts, times.as_deref(), &keys, key_w);
+                let before: Vec<String> = words[..i].iter().map(|w| w.to_string()).collect();
+                if let Some(prev) = before.last() {
+                    decoder.rerank(prev, &mut cands);
+                }
+                let phrase: Vec<String> = before.iter().rev().take(5).rev().cloned().collect();
+                decoder.rerank_phrase(&phrase, &mut cands);
+                decoder.rerank_topic(&before, &mut cands);
+                n += 1;
+                let rank = cands.iter().position(|c| c.word == *word);
+                ranks[match rank {
+                    Some(0) => 0,
+                    Some(1..=2) => 1,
+                    Some(3..=9) => 2,
+                    Some(_) => 3,
+                    None => 4,
+                }] += 1;
+                if rank != Some(0) && shown < 40 {
+                    shown += 1;
+                    let top: Vec<String> = cands
+                        .iter()
+                        .take(3)
+                        .map(|c| format!("{} {:.2}/{:.2}", c.word, c.edit, c.cost - c.edit))
+                        .collect();
+                    let mine = rank.map(|r| {
+                        format!(
+                            "{} {:.2}/{:.2}",
+                            r + 1,
+                            cands[r].edit,
+                            cands[r].cost - cands[r].edit
+                        )
+                    });
+                    println!(
+                        "  {word} [{}]: {} | meant: {}",
+                        before.last().map_or("", |w| w),
+                        top.join(" · "),
+                        mine.unwrap_or("—".into())
+                    );
+                }
+            }
+        }
+        let pct = |k: usize| 100.0 * k as f32 / n.max(1) as f32;
+        println!(
+            "{n} words drawn: first {:.1}%, 2–3 {:.1}%, 4–10 {:.1}%, later {:.1}%, not found {:.1}%",
+            pct(ranks[0]),
+            pct(ranks[1]),
+            pct(ranks[2]),
+            pct(ranks[3]),
+            pct(ranks[4])
+        );
+        return;
+    }
 
     // WORDS="мне,три" SIGMA=0.3: each drawn 200 times, what it reads as —
     // and, where it goes wrong, the leaders with their geometry and prior.
