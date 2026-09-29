@@ -254,6 +254,10 @@ fn run(
         Some(p) => numbered(p)?,
         None => HashMap::new(),
     };
+    // The prior of a word the counts never saw: the floor the rarest stand on.
+    if !freqs.is_empty() {
+        format.floor = (((total.ln() - 0.5f64.ln()) * 10.0).round() as u32).min(0xFFFF);
+    }
     let ids = match &grammar {
         Some((c, s)) => {
             let (ids, table) = grammar_ids(c, s)?;

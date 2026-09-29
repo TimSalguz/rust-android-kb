@@ -31,7 +31,7 @@ for level in 10 20 35 40 50 55 60 70; do
 done
 
 # Slang inflected by analogy with a model word (needs pymorphy3).
-${PYTHON:-python3} tools/expand_slang.py data/slang.tsv > data/slang_forms.tsv
+${PYTHON:-python3} tools/expand_slang.py data/slang.tsv --freq "$FREQ_DIR/ru_full.txt" > data/slang_forms.tsv
 
 python3 tools/make_lexicon.py "$FREQ_DIR/ru_full.txt" "$FREQ_DIR/en_full.txt" \
     --words data/opencorpora_forms.tsv --cyrillic-words-only --latin-lists-only \

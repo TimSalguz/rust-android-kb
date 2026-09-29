@@ -657,21 +657,25 @@ impl<D: AsRef<[u8]>> Engine<D> {
     /// The learned frame of a governing word (`0, 11, word`).
     fn frame(&self, word: &str) -> Option<crate::gram::Frame> {
         let key = [vec![BIGRAM_SEP, 11], remap(word)?].concat();
-        let v: [f32; 7] = Self::log_ratios(self.bigrams.as_ref()?.get(key)?);
+        let v: [f32; 8] = Self::log_ratios(self.bigrams.as_ref()?.get(key)?);
         Some(crate::gram::Frame {
             other: v[0],
             cases: [v[1], v[2], v[3], v[4], v[5], v[6]],
+            // (0 in a model from before the infinitive was told apart: a
+            // byte of 0 reads as -6.4.)
+            infn: if v[7] < -6.3 { v[0] } else { v[7] },
         })
     }
 
     /// The learned weights after adjectives (`0, 12`); None in an older model.
     fn attr_weights(&self) -> Option<crate::gram::AttrWeights> {
-        let v: [f32; 4] = Self::log_ratios(self.bigrams.as_ref()?.get([BIGRAM_SEP, 12])?);
+        let v: [f32; 5] = Self::log_ratios(self.bigrams.as_ref()?.get([BIGRAM_SEP, 12])?);
         Some(crate::gram::AttrWeights {
             other: v[0],
             agree: v[1],
             disagree: v[2],
             base_other: v[3],
+            base_infn: v[4],
         })
     }
 
@@ -1867,6 +1871,7 @@ mod tests {
         let format = DictFormat {
             quantum: 50,
             shift: 2,
+            floor: 0,
         };
         let id = |w: &str| -> Vec<u8> {
             w.chars()

@@ -30,6 +30,9 @@ pub struct DictFormat {
     pub quantum: u32,
     /// Bits of grammar id below the prior (0: none).
     pub shift: u32,
+    /// The prior of a word never seen in the counts, tenths of a nat (0:
+    /// not told) — the floor the rarest words stand on.
+    pub floor: u32,
 }
 
 /// Marks a type field that holds a [`DictFormat`].
@@ -40,6 +43,7 @@ impl DictFormat {
     pub const PLAIN: DictFormat = DictFormat {
         quantum: 1,
         shift: 0,
+        floor: 0,
     };
 
     pub fn from_type(ty: u64) -> DictFormat {
@@ -49,6 +53,7 @@ impl DictFormat {
         DictFormat {
             quantum: ((ty & 0xFFFF) as u32).max(1),
             shift: ((ty >> 16) & 0x3F) as u32,
+            floor: (ty >> 48) as u32,
         }
     }
 
@@ -56,7 +61,7 @@ impl DictFormat {
         if self == Self::PLAIN {
             return 0;
         }
-        MARK | (self.shift as u64) << 16 | self.quantum as u64
+        (self.floor as u64) << 48 | MARK | (self.shift as u64) << 16 | self.quantum as u64
     }
 
     /// The value of a word: its prior (thousandths of a nat) and grammar id.
@@ -69,6 +74,12 @@ impl DictFormat {
     /// gathered on the way to a node, a lower bound of its words' priors.
     pub fn prior(self, v: u64) -> u64 {
         (v >> self.shift) * self.quantum as u64
+    }
+
+    /// Whether a prior (thousandths of a nat) is at the floor: a word never
+    /// seen in the counts (or barely: within `span` thousandths).
+    pub fn unseen(self, prior: u64, span: u64) -> bool {
+        self.floor > 0 && prior + span >= self.floor as u64 * 100
     }
 
     /// The grammar id of a value (0: none).
@@ -90,6 +101,7 @@ mod tests {
         let f = DictFormat {
             quantum: 50,
             shift: 12,
+            floor: 212,
         };
         assert_eq!(DictFormat::from_type(f.fst_type()), f);
         assert_eq!(DictFormat::from_type(0), DictFormat::PLAIN);
@@ -102,5 +114,7 @@ mod tests {
         assert!(f.prior(a.min(b)) <= 9_000);
         assert_eq!(DictFormat::PLAIN.prior(8_000), 8_000);
         assert_eq!(DictFormat::PLAIN.grammar(8_000), 0);
+        assert!(f.unseen(21_200, 800) && f.unseen(20_500, 800) && !f.unseen(19_000, 800));
+        assert!(!DictFormat::PLAIN.unseen(99_999, 800));
     }
 }

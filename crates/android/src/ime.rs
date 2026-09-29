@@ -253,6 +253,12 @@ enum Target {
     Panel(Hit),
 }
 
+/// Space may finish a word not yet whole — of at least this many letters —
+/// with a completion at most this many letters longer, when that is what
+/// it most likely is («такого исхо» → «исхода»; not «мас» → «мастер»).
+const COMPLETE_FROM: usize = 4;
+const COMPLETE_ON_SPACE: usize = 2;
+
 /// A comma goes in by itself when the model's log odds are at least this
 /// (0.9: on held-out sentences 98–99% of such commas are right, and they
 /// are 40% of all commas).
@@ -2355,12 +2361,44 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 }
                 // The space bar doesn't retarget: a swipe up on it offers the
                 // next likeliest word, a horizontal one switches the language.
-                if matches!(p.origin, Some(Target::Key(k)) if keys[k].action == Action::Space) {
+                if let Some(Target::Key(k)) = p
+                    .origin
+                    .filter(|&o| matches!(o, Target::Key(k) if keys[k].action == Action::Space))
+                {
                     let (dx, up) = (x - p.start_x, p.start_y - y);
                     if up > swipe && up > 2.0 * dx.abs() {
                         p.done = true;
                         self.next_variant();
                         return REDRAW | OUTPUT | HAPTIC;
+                    }
+                    // Up into the letters, aslant: a word drawn from just below
+                    // its first letter — not a language swipe.
+                    let letter = gestures
+                        .then(|| {
+                            keys.iter()
+                                .enumerate()
+                                .filter(|(_, key)| {
+                                    matches!(key.action, Action::Char(c) if c.is_alphabetic())
+                                })
+                                .min_by(|a, b| {
+                                    a.1.dist2(p.start_x, p.start_y)
+                                        .total_cmp(&b.1.dist2(p.start_x, p.start_y))
+                                })
+                                .map(|(i, _)| i)
+                        })
+                        .flatten()
+                        .filter(|_| y < keys[k].y - 0.15 * row_h);
+                    if let Some(first) = letter {
+                        p.origin = Some(Target::Key(first));
+                        p.target = Some(Target::Key(first));
+                        p.path = vec![first];
+                        p.travel = ((x - p.start_x) / key_w).hypot((y - p.start_y) / row_h);
+                        p.trail.push((x, y));
+                        p.trail_ms.push(time_ms);
+                        if self.timer == Timer::LongPress(id) {
+                            self.timer = Timer::None;
+                        }
+                        return REDRAW;
                     }
                     // Down: the previous reading.
                     if -up > swipe && -up > 2.0 * dx.abs() {
@@ -3478,6 +3516,8 @@ impl<D: AsRef<[u8]>> Ime<D> {
             self.autocorrect = None;
             self.shown.clear();
             self.out.push(Op::Composing(String::new()));
+            // Nothing typed here now: a sentence's start takes a capital again.
+            self.update_shift();
             self.update_slots();
             return;
         }
@@ -3490,9 +3530,11 @@ impl<D: AsRef<[u8]>> Ime<D> {
             self.editing = true;
             self.erased += 1;
             if self.word.is_empty() {
-                // All of it: the next letters start a new word.
+                // All of it: the next letters start a new word (with a
+                // capital at a sentence's start).
                 self.erased = 0;
                 self.restored = false;
+                self.update_shift();
             }
             self.update_slots();
             self.show();
@@ -4306,10 +4348,31 @@ impl<D: AsRef<[u8]>> Ime<D> {
             let known = self.engine.contains(&lower);
             let typed_cost = corrections.iter().find(|c| c.word == lower).map(|c| c.cost);
             // An undone fix stays on offer in the strip (a tap puts it back)
-            // but space never applies it again here.
-            let mut others = corrections
+            // but space never applies it again here. A word not yet finished
+            // competes with its completions too, as they stand in context:
+            // «такого исх» offered «исхода», «такого исхо» must not jump to
+            // «исход» because that one is a letter closer.
+            let mut pool: Vec<&Candidate> = corrections
                 .iter()
-                .filter(|c| c.word != lower && !rejected(&c.word));
+                .filter(|c| c.word != lower && !rejected(&c.word))
+                .collect();
+            if !known && n >= COMPLETE_FROM {
+                for c in &completions {
+                    let extra = c.word.chars().count().saturating_sub(n);
+                    if !(1..=COMPLETE_ON_SPACE).contains(&extra) || rejected(&c.word) {
+                        continue;
+                    }
+                    // A word both a correction and a completion: at its
+                    // better cost.
+                    match pool.iter_mut().find(|p| p.word == c.word) {
+                        Some(p) if c.cost < p.cost => *p = c,
+                        Some(_) => {}
+                        None => pool.push(c),
+                    }
+                }
+                pool.sort_by(|a, b| a.cost.total_cmp(&b.cost));
+            }
+            let mut others = pool.into_iter();
             let best = others.next();
             let runner_up = others.next().map_or(f32::INFINITY, |c| c.cost);
             self.autocorrect = best
@@ -5388,6 +5451,65 @@ mod tests {
     }
 
     #[test]
+    fn space_finishes_the_word_the_strip_offered() {
+        let id = |w: &str| -> Vec<u8> {
+            w.chars()
+                .map(|c| kbcore::alphabet::char_to_id(c).unwrap())
+                .collect()
+        };
+        let words = [("такого", 5000u64), ("исход", 6000), ("исхода", 5000)];
+        let dict = Map::from_iter(
+            words
+                .iter()
+                .map(|(w, v)| (id(w), *v))
+                .collect::<std::collections::BTreeMap<_, _>>(),
+        )
+        .unwrap();
+        // The grammar only: «такого» is the genitive, or the accusative with
+        // an animate noun; «исход» is inanimate, «исхода» the genitive.
+        let parse = kbcore::gram::parse;
+        let byte = |x: f32| ((x / 0.05).round() + 128.0) as u64;
+        let word = |w: &str, set: u64| ([vec![0, 3], id(w)].concat(), 1 | set << 16);
+        let mut kv = vec![
+            word("такого", 1),
+            word("исход", 2),
+            word("исхода", 3),
+            (vec![0, 9, 0, 1, 0], parse("ADJF,anim,masc,sing,accs")),
+            (vec![0, 9, 0, 1, 1], parse("ADJF,masc,sing,gent")),
+            (vec![0, 9, 0, 2, 0], parse("NOUN,inan,masc,sing,nomn")),
+            (vec![0, 9, 0, 2, 1], parse("NOUN,inan,masc,sing,accs")),
+            (vec![0, 9, 0, 3, 0], parse("NOUN,inan,masc,sing,gent")),
+            // After adjectives: other -1.1, agree +0.5, disagree -2.7.
+            (
+                vec![0, 12],
+                byte(-1.1)
+                    | byte(0.5) << 8
+                    | byte(-2.7) << 16
+                    | byte(-0.8) << 24
+                    | byte(-3.2) << 32,
+            ),
+        ];
+        kv.sort();
+        let bigrams = Map::from_iter(kv).unwrap();
+        let cfg = Config::balanced().with_profile(Profile::Phone);
+        let mut k = Ime::new(Engine::new(dict, cfg).with_bigrams(bigrams), 2.625);
+        k.measure(1080);
+        k.start_input("", 1);
+        type_str(&mut k, "такого исх");
+        let offered = k.slots.clone();
+        type_str(&mut k, "о");
+        // What was offered stays offered, and space puts it in.
+        assert_eq!(
+            k.slots[1].as_deref(),
+            Some("исхода"),
+            "{offered:?} → {:?}",
+            k.slots
+        );
+        type_str(&mut k, " ");
+        assert_eq!(k.before, "такого исхода ");
+    }
+
+    #[test]
     fn names_take_their_capitals() {
         let mut k = ime(&[("москва", 3000), ("сша", 2000), ("вера", 2000), ("в", 9000)]);
         let casing = Map::from_iter(
@@ -5900,6 +6022,22 @@ mod tests {
         assert_eq!(k.word, "как");
         type_str(&mut k, " ");
         assert_eq!(k.before, "Привет как ");
+    }
+
+    #[test]
+    fn a_word_erased_whole_brings_the_capital_back() {
+        let mut k = ime(&[("привет", 3000), ("как", 2500)]);
+        // A drawn word at the start of the field, erased: the next one starts
+        // with a capital at once, not after another ⌫.
+        swipe(&mut k, "привет");
+        assert_eq!(k.shift, Shift::Off);
+        type_str(&mut k, "⌫");
+        assert!(k.word.is_empty());
+        assert_eq!(k.shift, Shift::Once);
+        // The same for typed letters erased one by one.
+        type_str(&mut k, "как⌫⌫⌫");
+        assert!(k.word.is_empty());
+        assert_eq!(k.shift, Shift::Once);
     }
 
     #[test]

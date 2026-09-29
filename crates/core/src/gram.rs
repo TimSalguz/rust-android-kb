@@ -49,6 +49,11 @@ pub mod bit {
     pub const PAST: u64 = 1 << 44;
     pub const PRES: u64 = 1 << 45;
     pub const FUTR: u64 = 1 << 46;
+    /// Animate, inanimate: in the accusative an adjective takes the
+    /// genitive's form with an animate noun («такого друга»), the
+    /// nominative's with an inanimate one («такой исход»).
+    pub const ANIM: u64 = 1 << 48;
+    pub const INAN: u64 = 1 << 49;
 
     pub const GENDER: u64 = MASC | FEMN | NEUT | MSF;
     pub const NUMBER: u64 = SING | PLUR;
@@ -106,6 +111,8 @@ pub fn parse(tag: &str) -> u64 {
             "past" => PAST,
             "pres" => PRES,
             "futr" => FUTR,
+            "anim" => ANIM,
+            "inan" => INAN,
             _ => 0,
         })
         .fold(0, |a, b| a | b)
@@ -202,10 +209,35 @@ fn subject(word: &str) -> Option<u64> {
     })
 }
 
+/// A noun that can only be in the nominative («девочка», «мальчики»; not
+/// «дом», which may be the accusative too) as a subject: third person, its
+/// number and gender.
+fn subject_noun(readings: &[u64]) -> Option<u64> {
+    let only_nominative =
+        !readings.is_empty() && readings.iter().all(|&r| r & NOUN != 0 && cases(r) == NOMN);
+    if !only_nominative {
+        return None;
+    }
+    let number = readings.iter().fold(0, |a, &r| a | (r & NUMBER));
+    if number.count_ones() != 1 {
+        return None;
+    }
+    let gender = readings.iter().fold(0, |a, &r| a | (r & GENDER));
+    let gender = if gender.count_ones() == 1 { gender } else { 0 };
+    Some(PER3 | number | gender)
+}
+
 /// Two readings agree (an attribute and what it goes with): a case, the
-/// number and, in the singular, the gender in common.
+/// number and, in the singular, the gender in common — in the accusative,
+/// the animacy too («такого исход» doesn't: «такого» is accusative only with
+/// an animate noun).
 fn agree(a: u64, b: u64) -> bool {
     if cases(a) & cases(b) == 0 || a & b & NUMBER == 0 {
+        return false;
+    }
+    let animacy = |r: u64| r & (ANIM | INAN);
+    if cases(a) & cases(b) == ACCS && animacy(a) != 0 && animacy(b) != 0 && animacy(a) != animacy(b)
+    {
         return false;
     }
     let singular = a & b & SING != 0;
@@ -273,7 +305,7 @@ pub fn misfit(phrase: &[(&str, Vec<u64>)], word: &[u64]) -> bool {
             continue;
         }
         if attributes.is_empty() {
-            if let Some(s) = subject(w) {
+            if let Some(s) = subject(w).or_else(|| subject_noun(readings)) {
                 subj = Some(s);
                 break;
             }
@@ -331,6 +363,8 @@ pub struct Frame {
     pub other: f32,
     /// Nominative, genitive, dative, accusative, instrumental, locative.
     pub cases: [f32; 6],
+    /// An infinitive («могут выдержать», «хочу понравиться»).
+    pub infn: f32,
 }
 
 const FRAME_CASES: [u64; 6] = [NOMN, GENT, DATV, ACCS, ABLT, LOCT];
@@ -353,11 +387,13 @@ impl Frame {
     pub fn next(&self, word: &[u64]) -> f32 {
         let nominal = word.iter().filter(|&&r| r & NOMINAL != 0 && r & CASE != 0);
         let case = nominal.filter_map(|&r| self.case(r)).reduce(f32::max);
+        let infn = word.iter().any(|&r| r & INFN != 0).then_some(self.infn);
         let other = word
             .iter()
-            .any(|&r| r & NOMINAL == 0 || r & CASE == 0)
+            .any(|&r| r & INFN == 0 && (r & NOMINAL == 0 || r & CASE == 0))
             .then_some(self.other);
         case.into_iter()
+            .chain(infn)
             .chain(other)
             .reduce(f32::max)
             .unwrap_or(0.0)
@@ -372,8 +408,11 @@ pub struct AttrWeights {
     pub other: f32,
     pub agree: f32,
     pub disagree: f32,
-    /// `ln P(other)`: how often anything but a noun phrase comes anywhere.
+    /// `ln P(other)`: how often anything but a noun phrase (or an
+    /// infinitive) comes anywhere…
     pub base_other: f32,
+    /// …and `ln P(infinitive)`.
+    pub base_infn: f32,
 }
 
 /// The phrase before the next word, read back from its end (as [`misfit`]
@@ -423,7 +462,7 @@ pub fn walk<'a>(phrase: &'a [(&str, Vec<u64>)]) -> Walk<'a> {
             continue;
         }
         if collected == 0 {
-            if let Some(s) = subject(w) {
+            if let Some(s) = subject(w).or_else(|| subject_noun(readings)) {
                 out.subject = Some(s);
                 return out;
             }
@@ -499,8 +538,9 @@ pub fn phrase_score(walk: &Walk, frame: Option<&Frame>, attr: &AttrWeights, word
     // найти», «о том же».
     let frame = frame.filter(|_| !walk.attributes.is_empty());
     if let Some(f) = frame.filter(|_| !nominal.is_empty()) {
-        let base = attr.base_other.exp().min(0.99);
-        let here = (base * f.other.exp()).min(0.99);
+        let (b_other, b_infn) = (attr.base_other.exp(), attr.base_infn.exp());
+        let base = (b_other + b_infn).min(0.99);
+        let here = (b_other * f.other.exp() + b_infn * f.infn.exp()).min(0.99);
         let nominal_share = ((1.0 - here) / (1.0 - base)).ln();
         let readings = if agreeing.is_empty() {
             &nominal
@@ -675,12 +715,14 @@ mod tests {
         let iz = Frame {
             other: -1.9,
             cases: [-1.0, 1.6, -0.4, 0.4, -1.1, 0.6],
+            infn: -3.0,
         };
         let attr = AttrWeights {
             other: -1.1,
             agree: 0.4,
             disagree: -2.7,
-            base_other: 0.5f32.ln(),
+            base_other: 0.4f32.ln(),
+            base_infn: 0.1f32.ln(),
         };
         (iz, attr)
     }
@@ -722,6 +764,52 @@ mod tests {
         assert!(governing(&r(&["PREP"])) && !governing(&r(&["NPRO,sing,datv"])));
         // A noun that is a verb too: by its best reading.
         assert_eq!(iz.next(&r(&["NOUN,femn,sing,gent", "VERB,sing"])), 1.6);
+    }
+
+    #[test]
+    fn animacy_decides_the_accusative() {
+        // «такого исход»: «такого» is accusative only with an animate noun.
+        let takogo = [(
+            "такого",
+            r(&[
+                "ADJF,anim,masc,sing,accs",
+                "ADJF,masc,sing,gent",
+                "ADJF,neut,sing,gent",
+            ]),
+        )];
+        assert!(misfit(
+            &takogo,
+            &r(&["NOUN,inan,masc,sing,accs", "NOUN,inan,masc,sing,nomn"])
+        ));
+        assert!(!misfit(&takogo, &r(&["NOUN,inan,masc,sing,gent"])));
+        assert!(!misfit(
+            &takogo,
+            &r(&["NOUN,anim,masc,sing,accs", "NOUN,anim,masc,sing,gent"])
+        ));
+    }
+
+    #[test]
+    fn a_noun_in_the_nominative_is_a_subject_too() {
+        let girl = [("девочка", r(&["NOUN,anim,femn,sing,nomn"]))];
+        assert!(misfit(&girl, &r(&["VERB,masc,sing,past"])));
+        assert!(!misfit(&girl, &r(&["VERB,femn,sing,past"])));
+        // «дом» may be the accusative: nothing said.
+        let house = [(
+            "дом",
+            r(&["NOUN,inan,masc,sing,nomn", "NOUN,inan,masc,sing,accs"]),
+        )];
+        assert!(!misfit(&house, &r(&["VERB,femn,sing,past"])));
+    }
+
+    #[test]
+    fn a_frame_expects_an_infinitive() {
+        // After «могут»: an infinitive, hardly a finite verb.
+        let mogut = Frame {
+            other: -1.0,
+            cases: [-2.4, -2.9, -2.2, -2.5, -2.8, -3.0],
+            infn: 3.0,
+        };
+        assert!(mogut.next(&r(&["INFN"])) > mogut.next(&r(&["VERB,plur,3per,futr"])));
     }
 
     #[test]

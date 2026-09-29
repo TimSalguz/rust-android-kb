@@ -34,6 +34,9 @@ const NEAR: f32 = 1.1;
 /// (0.4 key off) 85.0 → 87.5% right, careful ones untouched.
 const RETRY_BEYOND: f32 = 0.6;
 const NEAR_WIDE: f32 = 1.5;
+/// Within this of the dictionary's floor (thousandths of a nat) a word is
+/// one the counts saw at most twice (word lists add theirs at a count of 1).
+const UNSEEN_SPAN: u64 = 1700;
 /// The first letter must be near one of the first points, the last near one
 /// of the last points…
 const END_SLACK: usize = 4;
@@ -290,7 +293,12 @@ impl Gesture {
     fn ideal(&self, ids: &[u8]) -> Option<Vec<Pt>> {
         let mut corners: Vec<Pt> = Vec::with_capacity(ids.len());
         for &c in ids {
-            let p = self.pos[c as usize]?;
+            let Some(p) = self.pos[c as usize] else {
+                if silent(c) {
+                    continue;
+                }
+                return None;
+            };
             if corners.last() != Some(&p) {
                 corners.push(p);
             }
@@ -422,10 +430,17 @@ impl<D: AsRef<[u8]>> Engine<D> {
         let times = times.filter(|_| cfg.gesture_pace > 0.0);
         let g = Gesture::new(path, times, keys, key_w, NEAR);
         let mut fits = self.fits(&g);
-        // Nothing fits well: the corners strayed past the keys' reach — a
-        // wider one, once, for words the first walk couldn't reach.
-        let best = fits.iter().map(|f| f.3).fold(f32::INFINITY, f32::min);
-        if best > RETRY_BEYOND {
+        // A word the counts never saw (or barely), for this dictionary.
+        let unseen = |prior: u64| self.format.unseen(prior, UNSEEN_SPAN);
+        // Nothing fits well — or only such rare words: the corners strayed
+        // past the keys' reach; a wider one, once, for words the first walk
+        // couldn't reach.
+        let best_known = fits
+            .iter()
+            .filter(|f| !unseen(f.1))
+            .map(|f| f.3)
+            .fold(f32::INFINITY, f32::min);
+        if best_known > RETRY_BEYOND {
             let wide = Gesture::new(path, times, keys, key_w, NEAR_WIDE);
             for f in self.fits(&wide) {
                 if !fits.iter().any(|x| x.0 == f.0) {
@@ -448,9 +463,11 @@ impl<D: AsRef<[u8]>> Engine<D> {
             .into_iter()
             .map(|(ids, prior, pace, loc, shape)| {
                 let ids = &ids;
+                let rare = if unseen(prior) { cfg.gesture_rare } else { 0.0 };
                 let geo = trust
                     * (cfg.gesture_location * loc * loc + cfg.gesture_shape * shape * shape)
-                    + cfg.gesture_pace * pace;
+                    + cfg.gesture_pace * pace
+                    + rare;
                 Candidate {
                     word: alphabet::ids_to_string(ids),
                     cost: geo + cfg.w_lm * prior as f32 * cfg.prior_scale,
@@ -465,8 +482,15 @@ impl<D: AsRef<[u8]>> Engine<D> {
 }
 
 /// A letter the walk may take next: its (geometric, pace) cost so far, its
-/// point, id and key, the FST outputs so far and its node.
-type Kid = ((f32, f32), usize, u8, Pt, u64, fst::raw::CompiledAddr);
+/// point, id, the letter the next one comes after (itself, or the one before
+/// a hyphen) and its key, the FST outputs so far and its node.
+type Kid = ((f32, f32), usize, u8, u8, Pt, u64, fst::raw::CompiledAddr);
+
+/// A character with no key of its own that a word may have inside (a hyphen,
+/// an apostrophe): not drawn.
+fn silent(c: u8) -> bool {
+    Some(c) == alphabet::char_to_id('-') || Some(c) == alphabet::char_to_id('\'')
+}
 
 /// Distance from `p` to the segment `a`–`b`.
 fn seg_dist(p: Pt, a: Pt, b: Pt) -> f32 {
@@ -511,6 +535,11 @@ fn walk<F: AsRef<[u8]>>(
     for t in node.transitions() {
         let c = t.inp;
         let Some(key) = g.pos[c as usize] else {
+            // A hyphen or apostrophe isn't drawn (как-то, don't): the way
+            // goes on from the letter before it.
+            if depth > 0 && silent(c) {
+                kids.push((cost, j, c, last, from, acc + t.out.value(), t.addr));
+            }
             continue;
         };
         let (at, step, paced) = if depth > 0 && c == last {
@@ -548,12 +577,12 @@ fn walk<F: AsRef<[u8]>>(
         if w.w_walk * c_cost.0 + w.w_pace * c_cost.1 + bound >= w.bound() {
             continue;
         }
-        kids.push((c_cost, at, c, key, acc, t.addr));
+        kids.push((c_cost, at, c, c, key, acc, t.addr));
     }
     kids.sort_by(|a, b| {
         (w.w_walk * a.0 .0 + w.w_pace * a.0 .1).total_cmp(&(w.w_walk * b.0 .0 + w.w_pace * b.0 .1))
     });
-    for (c_cost, at, c, key, acc, addr) in kids {
+    for (c_cost, at, c, next_last, key, acc, addr) in kids {
         ids.push(c);
         let child = fst.node(addr);
         if child.is_final() && depth >= 1 && at + g.slack >= M - 1 {
@@ -565,7 +594,19 @@ fn walk<F: AsRef<[u8]>>(
                 + w.w_prior * prior as f32;
             w.offer(total, ids, prior, c_cost.1);
         }
-        walk(g, fst, child, depth + 1, at, c, key, acc, c_cost, ids, w);
+        walk(
+            g,
+            fst,
+            child,
+            depth + 1,
+            at,
+            next_last,
+            key,
+            acc,
+            c_cost,
+            ids,
+            w,
+        );
         ids.pop();
     }
 }
@@ -717,6 +758,23 @@ mod tests {
             even.first().map(|c| c.word.as_str()),
             Some("пл"),
             "{even:?}"
+        );
+    }
+
+    #[test]
+    fn a_hyphen_is_not_drawn() {
+        let e = engine(&[("как-то", 5000), ("как", 3000), ("кто-то", 5000)]);
+        let got = e.gesture(&draw("както", 10.0), &keys(), 100.0);
+        assert_eq!(
+            got.first().map(|c| c.word.as_str()),
+            Some("как-то"),
+            "{got:?}"
+        );
+        let got = e.gesture(&draw("ктото", 10.0), &keys(), 100.0);
+        assert_eq!(
+            got.first().map(|c| c.word.as_str()),
+            Some("кто-то"),
+            "{got:?}"
         );
     }
 

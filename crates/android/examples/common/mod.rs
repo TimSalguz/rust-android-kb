@@ -77,10 +77,16 @@ pub fn draw(
             rng,
         )),
     };
+    // SMOOTH=n: the finger cuts corners over ±n points (8 px each), 3 by
+    // default; more is sloppier.
+    let half: usize = std::env::var("SMOOTH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3);
     let smooth = (0..pts.len())
         .map(|i| {
-            let lo = i.saturating_sub(3);
-            let hi = (i + 4).min(pts.len());
+            let lo = i.saturating_sub(half);
+            let hi = (i + half + 1).min(pts.len());
             let k = (hi - lo) as f32;
             pts[lo..hi]
                 .iter()

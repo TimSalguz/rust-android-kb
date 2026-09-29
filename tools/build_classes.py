@@ -13,7 +13,8 @@ noun). `--classes` gets `word<TAB>class id` (ids by frequency, from 1),
 `--class-tags` `class id<TAB>tag id,tag id…` (at most 8 readings, each a tag:
 POS with gender, number, case…, ids by frequency, from 1).
 
-`--readings` keeps every reading of each word, however rare OpenCorpora
+`--readings` keeps every reading of each word (with its animacy: «такого»
+agrees with «друга», not with «исхода» in the accusative), however rare OpenCorpora
 counts it («такой» is the feminine genitive most of the time, but also
 masculine; «ним» 0.8% instrumental, «все» 0.8% adjective), for the phrase
 grammar (kbcore::gram), which must not take a rare reading for a mistake:
@@ -59,9 +60,11 @@ args = ap.parse_args()
 morph = pymorphy3.MorphAnalyzer()
 
 
-def coarse(tag):
+def coarse(tag, animacy=False):
     parts = [tag.POS or "X"]
-    for g in ("gender", "number", "case", "person", "tense"):
+    for g in ("animacy", "gender", "number", "case", "person", "tense"):
+        if g == "animacy" and not animacy:
+            continue
         v = getattr(tag, g)
         if v:
             parts.append(v)
@@ -82,8 +85,9 @@ def class_key(word):
         t = coarse(p.tag)
         if (p.score >= MIN_SCORE or not tags) and t not in tags:
             tags.append(t)
-        if t not in full:
-            full.append(t)
+        f = coarse(p.tag, animacy=True)
+        if f not in full:
+            full.append(f)
     tags = sorted(tags[:MAX_READINGS])
     return ("|".join(tags) if tags else None), "|".join(sorted(full))
 

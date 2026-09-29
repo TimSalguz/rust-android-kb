@@ -19,10 +19,11 @@ rules, the rest is the default.
 SOURCE: Tatoeba `*_sentences.tsv.bz2` (held-out ids skipped, as in
 build_bigrams.py) or Leipzig `*.tar.gz`.
 
-stdout: `governor<TAB>other,nomn,gent,datv,accs,ablt,loct` (log ratios,
-nats), and `@attr<TAB>other,agree,disagree,ln P(other)` for the words after
-adjectives (the last: how often anything but a noun phrase comes anywhere,
-to tell a frame's cases apart among noun phrases alone).
+stdout: `governor<TAB>other,nomn,gent,datv,accs,ablt,loct,infn` (log ratios,
+nats), and `@attr<TAB>other,agree,disagree,ln P(other),ln P(infn)` for the
+words after adjectives (the last two: how often something else and an
+infinitive come anywhere, to tell a frame's cases apart among noun phrases
+alone).
 """
 import argparse
 import bz2
@@ -53,13 +54,15 @@ args = ap.parse_args()
 
 
 class Reading:
-    __slots__ = ("pos", "case", "number", "gender")
+    __slots__ = ("pos", "case", "number", "gender", "animacy")
 
     def __init__(self, tag):
         parts = tag.split(",")
         self.pos = parts[0]
-        self.case = self.number = self.gender = None
+        self.case = self.number = self.gender = self.animacy = None
         for g in parts[1:]:
+            if g in ("anim", "inan"):
+                self.animacy = g
             if g in CASES:
                 self.case = g
             elif g in FOLD:
@@ -96,6 +99,8 @@ def nominal(rs):
 
 def agree(a, b):
     if not a.case or a.case != b.case or not a.number or a.number != b.number:
+        return False
+    if a.case == "accs" and a.animacy and b.animacy and a.animacy != b.animacy:
         return False
     if a.number == "plur" or not a.gender or not b.gender:
         return True
@@ -144,9 +149,10 @@ def sentences(path):
 
 
 # Outcomes: 0 something else, 1… a noun phrase in CASES[i - 1] (fractional
-# over the cases the word may be in).
-base = [0.0] * 7
-gov = defaultdict(lambda: [0.0] * 7)
+# over the cases the word may be in), 7 an infinitive («могут выдержать»).
+OUTCOMES = 8
+base = [0.0] * OUTCOMES
+gov = defaultdict(lambda: [0.0] * OUTCOMES)
 attr = Counter()  # other / agree / disagree after adjectives, and in general
 seen = 0
 for path in args.sources:
@@ -160,8 +166,12 @@ for path in args.sources:
             rs = readings.get(tok)
             if phrase_w and rs:
                 g, attrs = walk(phrase_w, phrase_r)
-                outcome = [0.0] * 7
-                if nominal(rs):
+                outcome = [0.0] * OUTCOMES
+                if all(r.pos == "INFN" for r in rs):
+                    outcome[7] = 1.0
+                    if attrs:
+                        attr["other"] += 1
+                elif nominal(rs):
                     fits = [r for r in rs if all(any(agree(a, r) for a in at) for at in attrs)]
                     cases = {r.case for r in (fits or rs)}
                     for c in cases:
@@ -174,11 +184,11 @@ for path in args.sources:
                         attr["other"] += 1
                 if attrs:
                     attr["n"] += 1
-                for i in range(7):
+                for i in range(OUTCOMES):
                     base[i] += outcome[i]
                 if g is not None:
                     row = gov[phrase_w[g]]
-                    for i in range(7):
+                    for i in range(OUTCOMES):
                         row[i] += outcome[i]
                 seen += 1
             phrase_w.append(tok)
@@ -192,7 +202,7 @@ for g, row in sorted(gov.items()):
     n = sum(row)
     if n < args.min:
         continue
-    lr = [math.log((row[i] + ALPHA * p_base[i]) / (n + ALPHA) / p_base[i]) for i in range(7)]
+    lr = [math.log((row[i] + ALPHA * p_base[i]) / (n + ALPHA) / p_base[i]) for i in range(OUTCOMES)]
     if max(abs(x) for x in lr) < MIN_SAYS:
         continue
     print(g + "\t" + ",".join(f"{x:.3f}" for x in lr))
@@ -200,12 +210,14 @@ for g, row in sorted(gov.items()):
 # After adjectives: other words, agreeing ones and not, against their share
 # anywhere (agreeing: any noun phrase; not: all but never, so a floor).
 n = attr["n"] or 1
-p_nominal = 1 - p_base[0]
+p_other = p_base[0] + p_base[7]
+p_nominal = 1 - p_other
 print("@attr\t" + ",".join(f"{x:.3f}" for x in (
-    math.log((attr["other"] + 1) / n / p_base[0]),
+    math.log((attr["other"] + 1) / n / p_other),
     math.log((attr["agree"] + 1) / n / p_nominal),
     math.log((attr["disagree"] + 1) / n / p_nominal),
     math.log(p_base[0]),
+    math.log(p_base[7]),
 )))
 print(f"{kept} governors of {len(gov)}; after adjectives {attr['n']} words: "
       f"{attr['other']} other, {attr['agree']} agree, {attr['disagree']} don't", file=sys.stderr)
