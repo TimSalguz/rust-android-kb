@@ -45,7 +45,16 @@ fn main() -> io::Result<()> {
     let open = || -> io::Result<Engine<kbcore::Mmap>> {
         let dict = std::env::var("DICT_FST").unwrap_or_else(|_| "dict.fst".into());
         match std::env::var("BIGRAMS_FST") {
-            Ok(b) => Engine::open_with_bigrams(&dict, b, config_from_env()),
+            Ok(b) => {
+                let engine = Engine::open_with_bigrams(&dict, &b, config_from_env())?;
+                // The lemma vectors, when they lie beside the context model.
+                let lemmas = std::path::Path::new(&b).with_file_name("lemmas.bin");
+                if lemmas.exists() {
+                    engine.open_lemmas(lemmas)
+                } else {
+                    Ok(engine)
+                }
+            }
             Err(_) => Engine::open(&dict, config_from_env()),
         }
     };

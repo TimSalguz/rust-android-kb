@@ -41,6 +41,8 @@
 //!                two sense classes share a sentence, a byte (0.05 nat steps
 //!                around 128) under `0, 14, class, class` (2 bytes each, the
 //!                smaller first)
+//!   --lemmas     IDS.tsv (tools/lemma_export.py): each word's lemma id under
+//!                `0, 25, word` — the row of its lemma's vectors (kbcore::lemmas)
 //!   --yo         YO.tsv (tools/yo_words.py): words written without their ё
 //!                (еще → ещё) under `0, 24, word`, the ё's letter positions
 //!                as a bit mask
@@ -89,6 +91,7 @@ fn main() -> ExitCode {
         let mut frames = None;
         let mut topic_pairs = None;
         let mut topics = None;
+        let mut lemmas = None;
         let mut commas = None;
         let mut yo = None;
         while let Some(flag) = args.next() {
@@ -106,6 +109,7 @@ fn main() -> ExitCode {
                 "--frames" => frames = args.next(),
                 "--topic-pairs" => topic_pairs = args.next(),
                 "--topics" => topics = args.next(),
+                "--lemmas" => lemmas = args.next(),
                 "--commas" => commas = args.next(),
                 "--yo" => yo = args.next(),
                 other => {
@@ -122,7 +126,7 @@ fn main() -> ExitCode {
             readings,
             table,
             frames,
-            (topics, topic_pairs),
+            (topics, topic_pairs, lemmas),
             (commas, yo),
             rules,
         ) {
@@ -388,7 +392,7 @@ fn build_bigrams(
     readings: Option<(String, String)>,
     table: Option<(String, String)>,
     frames: Option<String>,
-    (topics, topic_pairs): (Option<String>, Option<String>),
+    (topics, topic_pairs, lemmas): (Option<String>, Option<String>, Option<String>),
     (commas, yo): (Option<String>, Option<String>),
     rules: Option<(String, String)>,
 ) -> io::Result<()> {
@@ -491,6 +495,18 @@ fn build_bigrams(
             };
             if let (Some(ids), Ok(c)) = (remap(w), c.trim().parse::<u64>()) {
                 entries.push(([vec![0, 13], ids].concat(), c));
+            }
+        }
+    }
+    // Each word's lemma: the row of its lemma's vectors.
+    if let Some(path) = &lemmas {
+        for line in BufReader::new(File::open(path)?).lines() {
+            let line = line?;
+            let Some((w, id)) = line.split_once('\t') else {
+                continue;
+            };
+            if let (Some(k), Ok(id)) = (remap(w), id.trim().parse::<u64>()) {
+                entries.push(([vec![0, 25], k].concat(), id));
             }
         }
     }

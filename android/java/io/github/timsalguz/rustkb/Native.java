@@ -8,8 +8,8 @@ final class Native {
 
     private Native() {}
 
-    static native long create(String dictPath, String bigramsPath, String casingPath, String settingsPath,
-            String logPath, String locale, float density, int sdk);
+    static native long create(String dictPath, String bigramsPath, String casingPath, String lemmasPath,
+            String settingsPath, String logPath, String locale, float density, int sdk);
     /** Language packs to install ("de,fr"), then hand over with addPack (dictPath null: not in the app). */
     static native String wantedPacks(long h);
     static native int addPack(long h, String pack, String dictPath, String bigramsPath, String casingPath);

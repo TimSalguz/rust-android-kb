@@ -28,6 +28,7 @@ use crate::alphabet;
 use crate::config::Config;
 use crate::dict::DictFormat;
 use crate::keyboard::{Keyboard, N};
+use crate::lemmas::Lemmas;
 
 #[derive(Clone, Debug)]
 pub struct Candidate {
@@ -323,6 +324,9 @@ pub struct Engine<D: AsRef<[u8]>> {
     /// Optional context model: `previous\0word` → quantized `−log P(word |
     /// previous)`, same encoding as the dictionary (see index-builder).
     pub(crate) bigrams: Option<Map<D>>,
+    /// Optional lemma vectors ([`crate::lemmas`]), each word's row under `0,
+    /// 25, word` in the context model.
+    pub(crate) lemmas: Option<Lemmas<D>>,
     /// Optional casing list: lowercase word → 1 (always Capitalized) or 2 (in
     /// CAPITALS) — names, places, abbreviations (tools/proper_nouns.py).
     casing: Option<Map<D>>,
@@ -433,6 +437,11 @@ impl Engine<Mmap> {
     pub fn open_casing<P: AsRef<Path>>(self, path: P) -> io::Result<Self> {
         Ok(self.with_casing(map_file(path)?))
     }
+
+    /// Add the lemma vectors ([`crate::lemmas`]), mmap'd.
+    pub fn open_lemmas<P: AsRef<Path>>(self, path: P) -> io::Result<Self> {
+        Ok(self.with_lemmas(Lemmas::open(path)?))
+    }
 }
 
 impl<D: AsRef<[u8]>> Engine<D> {
@@ -441,6 +450,7 @@ impl<D: AsRef<[u8]>> Engine<D> {
             format: DictFormat::from_type(map.as_fst().fst_type()),
             map,
             bigrams: None,
+            lemmas: None,
             casing: None,
             user: None,
             kb: Keyboard::new(&cfg),
@@ -486,6 +496,13 @@ impl<D: AsRef<[u8]>> Engine<D> {
     /// Attach a context model (a bigram FST built by index-builder).
     pub fn with_bigrams(mut self, bigrams: Map<D>) -> Self {
         self.bigrams = Some(bigrams);
+        self
+    }
+
+    /// Attach lemma vectors (with a context model that holds the words'
+    /// lemma ids).
+    pub fn with_lemmas(mut self, lemmas: Lemmas<D>) -> Self {
+        self.lemmas = Some(lemmas);
         self
     }
 
@@ -602,6 +619,21 @@ impl<D: AsRef<[u8]>> Engine<D> {
     }
 
     /// A word's sense class (tools/build_topics.py): `0, 13, word`.
+    /// A word's row in the lemma vectors: its lemma's (`0, 25, word`), UNK
+    /// for another Russian word — its lemma too rare for vectors of its own
+    /// — and None for the rest (no vectors, or not a Russian word).
+    pub(crate) fn lemma(&self, word: &str) -> Option<u32> {
+        let lemmas = self.lemmas.as_ref()?;
+        let key = [vec![BIGRAM_SEP, 25], remap(word)?].concat();
+        match self.bigrams.as_ref()?.get(key) {
+            Some(id) => Some(id as u32),
+            None => word
+                .chars()
+                .all(|c| matches!(c, 'а'..='я' | 'ё' | '-'))
+                .then(|| lemmas.unk()),
+        }
+    }
+
     fn topic(&self, word: &str) -> Option<u64> {
         let key = [vec![BIGRAM_SEP, 13], remap(word)?].concat();
         self.bigrams.as_ref()?.get(key)
@@ -2062,6 +2094,80 @@ mod tests {
         wide.weigh(&ctx, &mut all);
         assert_eq!(all[0].word, "кот");
         assert!((all[0].cost - got[0].cost).abs() < 1e-3, "{all:?} {got:?}");
+    }
+
+    #[test]
+    fn the_lemmas_speak_inside_the_search() {
+        // «ча…» after «пить»: on its own «час» by far; the lemma vectors
+        // know «чай» goes with «пить» — no pair of these words needed.
+        let words = [("час", 4_000), ("чай", 6_000), ("чан", 12_000)];
+        let id = |w: &str| -> Vec<u8> {
+            w.chars()
+                .map(|c| alphabet::char_to_id(c).unwrap())
+                .collect()
+        };
+        // Lemma ids: пить 0, чай 1, час 2, чан 3; UNK 4, START 5.
+        let (z, one) = (vec![0.0; 4], |x: f32| vec![x, 0.0, 0.0, 0.0]);
+        let ctx = vec![
+            one(3.0),
+            z.clone(),
+            z.clone(),
+            z.clone(),
+            z.clone(),
+            z.clone(),
+        ];
+        let tgt = vec![z.clone(), one(2.0), z.clone(), z.clone(), z.clone()];
+        let stems: Vec<Vec<u8>> = ["пить", "чай", "час", "чан"]
+            .iter()
+            .map(|w| id(w))
+            .collect();
+        let stems: Vec<&[u8]> = stems.iter().map(Vec::as_slice).collect();
+        let blob =
+            || Lemmas::new(crate::lemmas::tests::blob(&ctx, &tgt, &[0.0; 5], &stems)).unwrap();
+        let ids = || {
+            let mut kv: Vec<(Vec<u8>, u64)> = [("пить", 0), ("чай", 1), ("час", 2), ("чан", 3)]
+                .iter()
+                .map(|(w, i)| ([vec![0, 25], id(w)].concat(), *i))
+                .collect();
+            kv.sort();
+            Map::from_iter(kv).unwrap()
+        };
+        let narrow = Config {
+            top_k: 1,
+            ..Config::default()
+        };
+        let e = engine_with(&words, narrow)
+            .with_bigrams(ids())
+            .with_lemmas(blob());
+        let wide = engine_with(&words, Config::default())
+            .with_bigrams(ids())
+            .with_lemmas(blob());
+        let ctx = e.context(Some("пить"), &["пить".to_string()], &[]);
+        let taps = Evidence::Taps("ча", &[]);
+        assert_eq!(e.read(taps)[0].word, "час");
+        let got = e.decode(&ctx, taps);
+        assert_eq!(got[0].word, "чай", "{got:?}");
+        let mut all = wide.read(taps);
+        wide.weigh(&ctx, &mut all);
+        assert_eq!(all[0].word, "чай");
+        assert!((all[0].cost - got[0].cost).abs() < 1e-3, "{all:?} {got:?}");
+        // Nothing typed yet: the lemma predicts the word, no pair seen.
+        let next = e.decode(&ctx, Evidence::Nothing);
+        assert_eq!(
+            next.first().map(|c| c.word.as_str()),
+            Some("чай"),
+            "{next:?}"
+        );
+        // Without their weight, the word's own odds again.
+        let off = Config {
+            w_lemma: 0.0,
+            ..Config::default()
+        };
+        let off = engine_with(&words, off)
+            .with_bigrams(ids())
+            .with_lemmas(blob());
+        let ctx = off.context(Some("пить"), &["пить".to_string()], &[]);
+        assert_eq!(off.decode(&ctx, taps)[0].word, "час");
     }
 
     #[test]

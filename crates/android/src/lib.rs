@@ -206,6 +206,7 @@ pub extern "system" fn Java_io_github_timsalguz_rustkb_Native_create(
     dict: JString,
     bigrams: JString,
     casing: JString,
+    lemmas: JString,
     settings: JString,
     log: JString,
     locale: JString,
@@ -224,6 +225,7 @@ pub extern "system" fn Java_io_github_timsalguz_rustkb_Native_create(
         } else {
             Some(env.get_string(&casing)?.into())
         };
+        let lemmas = opt_string(&mut env, &lemmas)?;
         let settings: String = env.get_string(&settings)?.into();
         let log_path: Option<String> = if log.is_null() {
             None
@@ -232,7 +234,13 @@ pub extern "system" fn Java_io_github_timsalguz_rustkb_Native_create(
         };
         let locale = opt_string(&mut env, &locale)?.unwrap_or_default();
         first_settings(&settings, &locale);
-        let engine = open_engine(&path, bigrams, casing, phone_config(kbcore::Latin::Qwerty))?;
+        let mut engine = open_engine(&path, bigrams, casing, phone_config(kbcore::Latin::Qwerty))?;
+        // The lemma vectors: without them the keyboard works as before.
+        match lemmas.map(kbcore::Lemmas::open) {
+            Some(Ok(l)) => engine = engine.with_lemmas(l),
+            Some(Err(e)) => crate::log(&format!("lemmas: {e}")),
+            None => {}
+        }
         let grip_path = std::path::Path::new(&settings).with_file_name("grip.conf");
         let words_path = std::path::Path::new(&settings).with_file_name("user_words.txt");
         let mut ime = Ime::new(engine, density);

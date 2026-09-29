@@ -4,6 +4,11 @@
 
 use super::{Candidate, Context, Engine, Hint, PREDICT_POOL, PREDICT_RULED_OUT};
 
+/// Lemmas the previous word's lemma predicts, and forms of each, that join
+/// the words seen after it.
+const PREDICT_LEMMAS: usize = 16;
+const PREDICT_FORMS: usize = 12;
+
 /// What the finger gave for a word.
 #[derive(Clone, Copy, Debug)]
 pub enum Evidence<'a> {
@@ -75,14 +80,24 @@ impl<D: AsRef<[u8]>> Engine<D> {
                 let Some(prev) = ctx.prev() else {
                     return Vec::new();
                 };
-                self.predict(prev, self.cfg.top_k * PREDICT_POOL)
+                // The words seen after it, and the forms of the lemmas its
+                // lemma leads to (seen with it or not).
+                let mut words: Vec<String> = self
+                    .predict(prev, self.cfg.top_k * PREDICT_POOL)
                     .into_iter()
-                    .filter(|c| self.grammar_allows(ctx, &c.word))
-                    .filter_map(|c| {
+                    .map(|c| c.word)
+                    .chain(self.lemma_words(ctx, PREDICT_LEMMAS, PREDICT_FORMS))
+                    .collect();
+                let mut seen = std::collections::HashSet::new();
+                words.retain(|w| seen.insert(w.clone()));
+                words
+                    .into_iter()
+                    .filter(|w| self.grammar_allows(ctx, w))
+                    .filter_map(|w| {
                         Some(Candidate {
-                            cost: self.word_cost(&c.word)?,
+                            cost: self.word_cost(&w)?,
                             edit: 0.0,
-                            word: c.word,
+                            word: w,
                         })
                     })
                     .collect()

@@ -26,6 +26,8 @@ pub struct Context {
     /// and its class's tags: the word pairs' grammar.
     prev_frame: Option<Frame>,
     prev_tags: Option<Vec<u8>>,
+    /// The previous word's row in the lemma vectors.
+    prev_lemma: Option<u32>,
     /// Where the previous word's pairs start in the context model: the node
     /// after `previous\0` and the outputs on the way there — a search goes
     /// down the pairs along with the dictionary.
@@ -134,8 +136,10 @@ impl<D: AsRef<[u8]>> Engine<D> {
             .as_deref()
             .and_then(|p| self.word_class(p))
             .map(|c| self.class_tags(c));
+        let prev_lemma = prev.as_deref().and_then(|p| self.lemma(p));
         let fit_max = prev.as_deref().map_or(0.0, |p| {
             self.fit_max_of(p, prev_frame.as_ref(), prev_tags.as_deref())
+                + self.lemma_max(prev_lemma)
         });
         let phrase_max = if phrase.is_empty() {
             0.0
@@ -160,6 +164,7 @@ impl<D: AsRef<[u8]>> Engine<D> {
         Context {
             prev_frame,
             prev_tags,
+            prev_lemma,
             pairs: prev.as_deref().and_then(|p| self.pairs_of(p)),
             fit_max,
             bonus_max: phrase_max + topic_max,
@@ -221,6 +226,64 @@ impl<D: AsRef<[u8]>> Engine<D> {
         });
         let ending_part = cfg.w_endings * ending.unwrap_or(0.0).clamp(0.0, FIT_CLAMP);
         class_part.max(ending_part)
+    }
+
+    /// The most the lemma vectors may raise any word's own odds after a
+    /// word of lemma `c` (nats, weighted).
+    fn lemma_max(&self, c: Option<u32>) -> f32 {
+        match (&self.lemmas, c) {
+            (Some(l), Some(c)) => self.cfg.w_lemma.max(0.0) * l.most(c).clamp(0.0, FIT_CLAMP),
+            _ => 0.0,
+        }
+    }
+
+    /// How much likelier `word`'s lemma comes after the previous word's
+    /// than on its own (nats, weighted; 0 without vectors for either).
+    fn lemma_fit(&self, ctx: &Context, word: &str) -> f32 {
+        let (Some(lemmas), Some(c)) = (&self.lemmas, ctx.prev_lemma) else {
+            return 0.0;
+        };
+        if self.cfg.w_lemma <= 0.0 {
+            return 0.0;
+        }
+        self.lemma(word).map_or(0.0, |l| {
+            self.cfg.w_lemma * lemmas.pmi(c, l).clamp(-FIT_CLAMP, FIT_CLAMP)
+        })
+    }
+
+    /// Words the lemma vectors expect after the previous word: the forms of
+    /// the `lemmas` lemmas likeliest after its lemma, each lemma's `forms`
+    /// commonest — the grammar picks among them ([`Engine::weigh`]).
+    pub(super) fn lemma_words(&self, ctx: &Context, lemmas: usize, forms: usize) -> Vec<String> {
+        let (Some(vectors), Some(bigrams), Some(c)) = (&self.lemmas, &self.bigrams, ctx.prev_lemma)
+        else {
+            return Vec::new();
+        };
+        if self.cfg.w_lemma <= 0.0 {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for (l, _) in vectors.top(c, lemmas) {
+            let lo = [&[BIGRAM_SEP, 25][..], vectors.stem(l)].concat();
+            let mut hi = lo.clone();
+            if let Some(last) = hi.last_mut() {
+                *last += 1;
+            }
+            let mut of_lemma: Vec<(f32, String)> = Vec::new();
+            let mut stream = bigrams.range().ge(&lo).lt(&hi).into_stream();
+            while let Some((key, id)) = stream.next() {
+                if id as u32 != l {
+                    continue;
+                }
+                let word = crate::alphabet::ids_to_string(&key[2..]);
+                if let Some(cost) = self.word_cost(&word) {
+                    of_lemma.push((cost, word));
+                }
+            }
+            of_lemma.sort_by(|a, b| a.0.total_cmp(&b.0));
+            out.extend(of_lemma.into_iter().take(forms).map(|(_, w)| w));
+        }
+        out
     }
 
     /// Where `previous`'s word pairs start in the context model.
@@ -290,9 +353,9 @@ impl<D: AsRef<[u8]>> Engine<D> {
     /// The prior part of a cost, `−log P` in nats, after the previous word:
     /// `λ·P(w | prev) + (1 − λ)·P'(w)` — `pair`, `−log P(w | prev)` if the
     /// pair is in the context model; `P'`, the word's own odds (`unigram`
-    /// nats) moved by how well the two go together: the previous word's
-    /// frame or the two classes where both are classed, the endings
-    /// otherwise.
+    /// nats) moved by how well the two go together: their forms — the
+    /// previous word's frame or the two classes where both are classed, the
+    /// endings otherwise — and their lemmas (the lemma vectors).
     fn pair_nats(
         &self,
         ctx: &Context,
@@ -318,7 +381,7 @@ impl<D: AsRef<[u8]>> Engine<D> {
             Some(pmi) => cfg.w_classes * pmi.clamp(-FIT_CLAMP, FIT_CLAMP),
             None => cfg.w_endings * self.ending_pmi(prev, word).clamp(-FIT_CLAMP, FIT_CLAMP),
         };
-        let p_uni = (fit - unigram).exp();
+        let p_uni = (fit + self.lemma_fit(ctx, word) - unigram).exp();
         let p_ctx = pair.map_or(0.0, |b| (-b).exp());
         -(l * p_ctx + (1.0 - l) * p_uni).max(f32::MIN_POSITIVE).ln()
     }

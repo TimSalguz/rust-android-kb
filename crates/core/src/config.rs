@@ -170,6 +170,10 @@ pub struct Config {
     /// Weight of the sense classes ([`crate::Engine::weigh`]): how
     /// well a word's class goes with those of the sentence so far (nats).
     pub w_topic: f32,
+    /// Weight of the lemma vectors ([`crate::lemmas`]): how much likelier the
+    /// word's lemma comes after the previous word's than on its own (PMI,
+    /// nats), on the word's own odds.
+    pub w_lemma: f32,
     /// Gesture typing: weights of the full comparison with a word's path —
     /// location (squared mean distance, key widths) and shape (scale-free) —
     /// and of the per-letter costs that choose which words get compared.
@@ -274,6 +278,7 @@ impl Config {
             w_phrase: 0.5,
             w_subject: 1.0,
             w_topic: 0.25,
+            w_lemma: 0.5,
             gesture_location: 7.0,
             gesture_shape: 6.0,
             gesture_walk: 8.0,
@@ -341,7 +346,7 @@ impl Config {
         fields!(
             f32: sigma, base_sub, cross_alphabet_penalty, max_sub, c_phonetic, c_yo, c_tsya, c_yo_reverse,
                 c_hard_soft, c_accent, c_accent_reverse, c_del, c_del_double, c_del_sign, c_del_punct, c_del_held, c_ins, c_ins_repeat,
-                c_ins_neighbor, c_ins_sign, c_trans, c_trans_cross, c_trans_rollover, layout_switch, layout_max_cost, home_row_penalty, home_row_trigger, c_home_finger, c_complete_char, ctx_lambda, w_endings, w_classes, w_rules, w_phrase, w_subject, w_topic, gesture_location, gesture_shape, gesture_walk, gesture_trust, gesture_rare, gesture_pace,
+                c_ins_neighbor, c_ins_sign, c_trans, c_trans_cross, c_trans_rollover, layout_switch, layout_max_cost, home_row_penalty, home_row_trigger, c_home_finger, c_complete_char, ctx_lambda, w_endings, w_classes, w_rules, w_phrase, w_subject, w_topic, w_lemma, gesture_location, gesture_shape, gesture_walk, gesture_trust, gesture_rare, gesture_pace,
                 w_lm, w_ch, prior_scale, max_cost, widen_step, max_cost_ceiling, rescue_cost;
             usize: min_results, max_nodes, max_input_len, top_k
         );

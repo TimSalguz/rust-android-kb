@@ -98,6 +98,11 @@ fn main() {
     if let Some(casing) = args.get(2) {
         engine = engine.open_casing(casing).expect("casing");
     }
+    // The lemma vectors, when they lie beside the context model.
+    let lemmas = std::path::Path::new(&args[1]).with_file_name("lemmas.bin");
+    if lemmas.exists() {
+        engine = engine.open_lemmas(lemmas).expect("lemmas");
+    }
     let jitter: f32 = std::env::var("JITTER")
         .ok()
         .and_then(|s| s.parse().ok())

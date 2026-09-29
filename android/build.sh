@@ -14,8 +14,11 @@ VERSION_NAME=${VERSION_NAME:-0.1.0}
 BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
 JAR=$ANDROID_HOME/platforms/android-$API/android.jar
 
-rm -rf "$OUT"
+# Nothing wholesale is deleted: the models in assets are replaced in place
+# (written beside and renamed), so a program reading them keeps going. Only
+# the compiled classes are cleared — one of a deleted source would get in.
 mkdir -p "$OUT"/{classes,dex,assets,lib}
+find "$OUT/classes" -name '*.class' -delete
 
 echo "== native library (arm64-v8a)"
 cargo ndk -t arm64-v8a -P "$MIN_SDK" -o "$OUT/lib" build --release -p kbime
@@ -41,6 +44,15 @@ if [ -s data/proper.tsv ]; then
     ${PYTHON:-python3} tools/offensive.py base data/lexicon.tsv > "$OUT/offensive.txt"
     cargo run --release -q -p index-builder -- --casing data/proper.tsv "$OUT/assets/casing.fst" "$OUT/offensive.txt"
 fi
+# Lemma vectors (tools/lemma_vectors.py → data/lemma/vectors.npz), optional:
+# the vectors beside the context model, each word's lemma id in it.
+if [ -s data/lemma/vectors.npz ] && [ -s data/lemma/words.tsv ]; then
+    ${PYTHON:-python3} tools/lemma_export.py data/lemma/vectors.npz \
+        --bin "$OUT/assets/lemmas.bin.part" --ids data/lemma/ids.tsv
+    mv "$OUT/assets/lemmas.bin.part" "$OUT/assets/lemmas.bin"
+else
+    rm -f "$OUT/assets/lemmas.bin"
+fi
 if [ -s data/bigrams.tsv ]; then
     cargo run --release -q -p index-builder -- --bigrams data/bigrams.tsv "$OUT/assets/bigrams.fst" \
         $([ -s data/endings.tsv ] && echo --endings data/endings.tsv) \
@@ -51,6 +63,7 @@ if [ -s data/bigrams.tsv ]; then
         $([ -s data/topic_words.tsv ] && echo --topics data/topic_words.tsv --topic-pairs data/topic_pairs.tsv) \
         $([ -s data/commas.tsv ] && echo --commas data/commas.tsv) \
         $([ -s data/yo.tsv ] && echo --yo data/yo.tsv) \
+        $([ -s "$OUT/assets/lemmas.bin" ] && echo --lemmas data/lemma/ids.tsv) \
         $([ -s data/rules.tsv ] && echo --rules data/confusions.tsv data/rules.tsv)
 fi
 
