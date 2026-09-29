@@ -123,7 +123,7 @@ pub fn parse(tag: &str) -> u64 {
 
 /// The case bits with the second genitive, accusative and locative (чаю, в
 /// лесу) counted as the first.
-fn cases(r: u64) -> u64 {
+pub(crate) fn cases(r: u64) -> u64 {
     let mut c = r & CASE;
     if c & GEN2 != 0 {
         c |= GENT;
@@ -208,6 +208,9 @@ fn subject(word: &str) -> Option<u64> {
         "мы" => PER1 | PLUR,
         "вы" => PER2 | PLUR,
         "они" => PER3 | PLUR,
+        // «кто пришёл», «никто не знает», «ничто не изменилось».
+        "кто" | "никто" => PER3 | SING,
+        "ничто" => PER3 | SING | NEUT,
         _ => return None,
     })
 }
@@ -467,6 +470,47 @@ pub struct AttrWeights {
     /// much likelier than a predicate drawn from anywhere would be.
     pub subject_fits: f32,
     pub subject_misfits: f32,
+    /// After a subject, how much likelier than anywhere each kind of word
+    /// ([`kind`]): a predicate, hardly a gerund or an infinitive.
+    pub after_subject: Option<[f32; 8]>,
+    /// …and among the kinds a word's own frame lumps together (a
+    /// predicate, a gerund, an adverb, a preposition or conjunction,
+    /// anything else; 0 for the rest): right after the subject its frame
+    /// knows the cases and the infinitive.
+    pub after_subject_other: Option<[f32; 8]>,
+    /// After «X и» (X in one case): the next noun phrase in X's case, or
+    /// not («кошку и собаку»).
+    pub coord: Option<(f32, f32)>,
+    /// After a genitive and «не» with no subject («её не существовало»,
+    /// «денег не было»): a predicate that is impersonal (neuter, third
+    /// person singular), or not.
+    pub impersonal: Option<(f32, f32)>,
+}
+
+/// What kind of word a reading is, as what follows a subject is counted
+/// (tools/build_frames.py): a predicate, a gerund, an infinitive, an adverb
+/// or particle, a noun phrase in the nominative, in another case, a
+/// preposition or conjunction, anything else.
+fn kind(r: u64) -> usize {
+    if r & PREDICATE != 0 {
+        0
+    } else if r & GRND != 0 {
+        1
+    } else if r & INFN != 0 {
+        2
+    } else if r & (ADVB | PRCL | PRED | COMP) != 0 {
+        3
+    } else if r & NOMINAL != 0 && r & CASE != 0 {
+        if cases(r) & NOMN != 0 {
+            4
+        } else {
+            5
+        }
+    } else if r & (PREP | CONJ) != 0 {
+        6
+    } else {
+        7
+    }
 }
 
 /// The phrase before the next word, read back from its end (as [`misfit`]
@@ -482,10 +526,36 @@ pub struct Walk {
     /// anything else).
     pub attributes: Vec<Vec<u64>>,
     pub subject: Option<u64>,
+    /// The subject stands right before the word (no adverb between).
+    pub subject_next: bool,
+    /// No subject but a genitive before «не» («её не [существовало]»): the
+    /// predicate impersonal.
+    pub impersonal: bool,
     /// When the governor is a noun or pronoun: the verb whose clause its
     /// phrase stands in, back over noun phrases and adverbs («дал книгу»,
     /// «помог ему») — what else it takes comes next.
     pub clause: Option<usize>,
+    /// Right after «X и»/«X или», X a noun phrase in one case: that case.
+    pub coord: Option<u64>,
+    /// The word index of the adjective nearest the word, and how much less
+    /// likely than a noun phrase anywhere a noun phrase that doesn't agree
+    /// comes after that very word (learned, when it has its own: «всем» is
+    /// mostly on its own — «всем привет»); `AttrWeights::disagree` if not.
+    pub nearest_attribute: Option<usize>,
+    pub attribute_disagree: Option<f32>,
+    /// The governor is «два», «три», «четыре», «оба», «полтора»: the
+    /// adjectives after it needn't share the noun's number or case («два
+    /// больших стола», «две большие книги»).
+    pub paucal: bool,
+}
+
+/// The numerals after which a noun is in the genitive singular and its
+/// adjectives in the plural.
+fn paucal(word: &str) -> bool {
+    matches!(
+        word,
+        "два" | "две" | "три" | "четыре" | "оба" | "обе" | "полтора" | "полторы"
+    )
 }
 
 /// The verb whose clause the noun phrase ending at `g` stands in (see
@@ -520,6 +590,7 @@ pub fn walk<S: AsRef<str>>(phrase: &[(S, Vec<u64>)]) -> Walk {
     // Words collected that are only adverbs or particles: a subject may
     // stand before them («девочка быстро побежала», «я не знаю»).
     let mut adverbs = 0;
+    let mut negated = false;
     for (i, (w, readings)) in phrase.iter().enumerate().rev().take(5) {
         let w = w.as_ref();
         if w.starts_with("котор") {
@@ -538,6 +609,9 @@ pub fn walk<S: AsRef<str>>(phrase: &[(S, Vec<u64>)]) -> Walk {
                 return out;
             }
             if strict(readings) {
+                if out.attributes.is_empty() {
+                    out.nearest_attribute = Some(i);
+                }
                 out.attributes.push(readings.clone());
             }
             collected += 1;
@@ -550,19 +624,58 @@ pub fn walk<S: AsRef<str>>(phrase: &[(S, Vec<u64>)]) -> Walk {
         if collected == adverbs {
             if subject(w).or_else(|| subject_noun(readings)).is_some() {
                 out.subject = subject_at(phrase, i);
+                out.subject_next = i + 1 == phrase.len();
                 return out;
             }
             if adverbial(readings) {
+                negated |= w == "не";
                 collected += 1;
                 adverbs += 1;
                 continue;
             }
+            // A genitive before «не», no subject before it: impersonal.
+            let cased: Vec<u64> = readings.iter().copied().filter(|r| r & CASE != 0).collect();
+            let genitive = !cased.is_empty()
+                && cased
+                    .iter()
+                    .all(|&r| r & (NOUN | NPRO) != 0 && cases(r) & NOMN == 0)
+                && cased.iter().any(|&r| cases(r) & GENT != 0);
+            let subject_before = phrase[..i]
+                .iter()
+                .any(|(w, r)| subject(w.as_ref()).or_else(|| subject_noun(r)).is_some());
+            if negated && adverbs > 0 && genitive && !subject_before {
+                out.impersonal = true;
+            }
         }
         out.governor = Some(i);
+        out.paucal = paucal(w);
         out.clause = clause(phrase, i);
+        if collected == 0 && i >= 1 && matches!(w, "и" | "или") {
+            let x = &phrase[i - 1].1;
+            let nominal = !x.is_empty() && x.iter().all(|&r| r & NOMINAL != 0 && r & CASE != 0);
+            let case = x.iter().fold(0, |a, &r| a | cases(r));
+            if nominal && case.count_ones() == 1 {
+                out.coord = Some(case);
+            }
+        }
         return out;
     }
     out
+}
+
+/// The verb a preposition at `g` hangs on: right before it, maybe adverbs
+/// between («бежала за», «бежала быстро за»).
+pub fn verb_before<S: AsRef<str>>(phrase: &[(S, Vec<u64>)], g: usize) -> Option<usize> {
+    for k in (g.saturating_sub(3)..g).rev() {
+        let r = &phrase[k].1;
+        if !r.is_empty() && r.iter().all(|&x| x & (VERB | INFN | GRND) != 0) {
+            return Some(k);
+        }
+        if !adverbial(r) {
+            return None;
+        }
+    }
+    None
 }
 
 /// Whether a word governs the noun phrase after it across adjectives — a
@@ -572,7 +685,7 @@ pub fn walk<S: AsRef<str>>(phrase: &[(S, Vec<u64>)]) -> Walk {
 pub fn governing(readings: &[u64]) -> bool {
     readings
         .iter()
-        .any(|r| r & (PREP | VERB | INFN | GRND | PRTF | PRTS) != 0)
+        .any(|r| r & (PREP | VERB | INFN | GRND | PRTF | PRTS | NUMR) != 0)
 }
 
 /// How the phrase before weighs `word` (its readings), in nats: agreement
@@ -591,12 +704,28 @@ pub fn phrase_score(
     if word.is_empty() {
         return 0.0;
     }
+    if walk.impersonal {
+        if let (Some((fit, misfit)), Some(ok)) = (attr.impersonal, fits(word, PER3 | SING | NEUT)) {
+            return if ok { fit } else { misfit };
+        }
+    }
     if let Some(s) = walk.subject {
-        return match fits(word, s) {
-            Some(true) => attr.subject_fits,
-            Some(false) => attr.subject_misfits,
-            None => 0.0,
+        // What kind of word it is, by its likeliest reading: right after
+        // the subject only what its own frame can't tell apart.
+        let kinds = if walk.subject_next {
+            attr.after_subject_other
+        } else {
+            attr.after_subject
         };
+        let by_kind = kinds.map_or(0.0, |k| {
+            word.iter().map(|&r| k[kind(r)]).fold(f32::MIN, f32::max)
+        });
+        return by_kind
+            + match fits(word, s) {
+                Some(true) => attr.subject_fits,
+                Some(false) => attr.subject_misfits,
+                None => 0.0,
+            };
     }
     let nominal: Vec<u64> = word
         .iter()
@@ -613,8 +742,12 @@ pub fn phrase_score(
         })
         .collect();
     let mut score = 0.0;
-    if !walk.attributes.is_empty() && nominal.len() == word.len() && agreeing.is_empty() {
-        score += attr.disagree;
+    if !walk.attributes.is_empty()
+        && !walk.paucal
+        && nominal.len() == word.len()
+        && agreeing.is_empty()
+    {
+        score += walk.attribute_disagree.unwrap_or(attr.disagree);
     }
     // The frame counts when the adjectives can take a case it governs
     // («что за головная боль»: not the accusative of «за»).
@@ -642,6 +775,16 @@ pub fn phrase_score(
     if let Some(c) = clause.filter(|_| walk.clause.is_some()) {
         score += c.next(word);
     }
+    // After «X и»: the case of X.
+    if let (Some(x), Some((same, other))) = (walk.coord, attr.coord) {
+        if !nominal.is_empty() {
+            score += if nominal.iter().any(|&r| cases(r) & x != 0) {
+                same
+            } else {
+                other
+            };
+        }
+    }
     score
 }
 
@@ -663,7 +806,12 @@ pub fn phrase_score_max(
     attr: &AttrWeights,
 ) -> f32 {
     if walk.subject.is_some() {
-        return attr.subject_fits.max(0.0);
+        let kinds = [attr.after_subject, attr.after_subject_other]
+            .iter()
+            .flatten()
+            .flat_map(|k| k.iter().copied())
+            .fold(0.0, f32::max);
+        return attr.subject_fits.max(0.0) + kinds;
     }
     let across = frame
         .filter(|_| !walk.attributes.is_empty())
@@ -678,7 +826,11 @@ pub fn phrase_score_max(
             .chain([c.other, c.infn])
             .fold(0.0, f32::max)
     });
-    across + verb
+    let coord = walk
+        .coord
+        .and(attr.coord)
+        .map_or(0.0, |(same, _)| same.max(0.0));
+    across + verb + coord
 }
 
 #[cfg(test)]
@@ -854,6 +1006,10 @@ mod tests {
             base_infn: 0.1f32.ln(),
             subject_fits: 0.6,
             subject_misfits: -2.0,
+            after_subject: None,
+            after_subject_other: None,
+            coord: None,
+            impersonal: None,
         };
         (iz, attr)
     }
@@ -999,6 +1155,69 @@ mod tests {
             ("руки", r(&["NOUN,inan,femn,plur,accs"])),
         ];
         assert_eq!(walk(&phrase).clause, None);
+    }
+
+    #[test]
+    fn after_x_and_the_case_of_x() {
+        // «кошку и [собаку]»: the accusative again, not «собака».
+        let (_, mut attr) = learned();
+        attr.coord = Some((1.6, -1.9));
+        let phrase = [
+            ("кошку", r(&["NOUN,anim,femn,sing,accs"])),
+            ("и", r(&["CONJ"])),
+        ];
+        let w = walk(&phrase);
+        assert_eq!(w.coord, Some(ACCS));
+        let s = |word: &[u64]| phrase_score(&w, None, None, &attr, word);
+        assert!(s(&r(&["NOUN,anim,femn,sing,accs"])) > s(&r(&["NOUN,anim,femn,sing,nomn"])));
+        // A verb after «и» is no noun phrase: nothing said.
+        assert_eq!(s(&r(&["VERB,femn,sing,past"])), 0.0);
+    }
+
+    #[test]
+    fn after_a_subject_a_predicate_not_a_gerund() {
+        let (_, mut attr) = learned();
+        attr.after_subject = Some([1.2, -0.7, -2.2, 0.5, -0.9, -1.1, -0.4, -0.7]);
+        attr.after_subject_other = Some([0.45, -1.5, 0.0, -0.2, 0.0, 0.0, -1.1, -1.5]);
+        let phrase = [("девочка", r(&["NOUN,anim,femn,sing,nomn"]))];
+        let w = walk(&phrase);
+        let s = |word: &[u64]| phrase_score(&w, None, None, &attr, word);
+        assert!(s(&r(&["VERB,femn,sing,past"])) - s(&r(&["GRND"])) > 2.0);
+    }
+
+    #[test]
+    fn after_two_the_adjective_goes_its_own_way() {
+        // «два больших стола»: the adjective plural, the noun singular.
+        let (_, attr) = learned();
+        let phrase = [
+            ("два", r(&["NUMR,masc,nomn", "NUMR,masc,accs"])),
+            (
+                "больших",
+                r(&["ADJF,plur,gent", "ADJF,plur,loct", "ADJF,anim,plur,accs"]),
+            ),
+        ];
+        let w = walk(&phrase);
+        assert!(w.paucal);
+        assert_eq!(
+            phrase_score(&w, None, None, &attr, &r(&["NOUN,inan,masc,sing,gent"])),
+            0.0
+        );
+    }
+
+    #[test]
+    fn no_subject_but_a_genitive_before_ne() {
+        // «её не существовало»: impersonal, not «существовала»; «я её не
+        // видел» has its subject.
+        let (_, mut attr) = learned();
+        attr.impersonal = Some((0.8, -2.5));
+        let her = ("её", r(&["NPRO,femn,sing,gent", "NPRO,femn,sing,accs"]));
+        let ne = ("не", r(&["PRCL"]));
+        let w = walk(&[her.clone(), ne.clone()]);
+        assert!(w.impersonal);
+        let s = |w: &Walk, word: &[u64]| phrase_score(w, None, None, &attr, word);
+        assert!(s(&w, &r(&["VERB,neut,sing,past"])) > s(&w, &r(&["VERB,femn,sing,past"])));
+        let w = walk(&[("я", r(&["NPRO,sing,nomn"])), her, ne]);
+        assert!(!w.impersonal);
     }
 
     #[test]

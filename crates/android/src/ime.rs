@@ -37,6 +37,15 @@ const SPACE_SLIP: f32 = 1.0;
 const SPACE_SLIP_MAX: f32 = 4.5;
 /// "The space was a letter" must beat "two separate words" by this much.
 const MERGE_MARGIN: f32 = 1.0;
+/// The two-word window's margin for a spelling pair (в / во что, учится /
+/// учиться): what the next word says settles it.
+const SPELLING_MARGIN: f32 = 0.5;
+/// A word read as the other of its confusion pair (к / ко, раненый /
+/// раненный): what that costs as a slip, for the next word to outweigh.
+const PAIR_SLIP: f32 = 1.0;
+/// Two words that are one with a hyphen (кто то → кто-то, по русски →
+/// по-русски): the hyphenated word must beat the two apart by this much.
+const HYPHEN_MARGIN: f32 = 1.0;
 /// Marks the strip suggestion that joins the current word with the previous.
 const MERGE_MARK: &str = "↶ ";
 /// Reading the previous word again in the light of the current one (а
@@ -59,6 +68,11 @@ const KNOWN_SLIP: f32 = 1.6;
 /// one that does), and the other form still clearly likelier in context.
 const GRAMMAR_SLIP: f32 = 3.5;
 const GRAMMAR_GAP: f32 = 2.5;
+/// Space after a whole real word, read as a longer form not finished: that
+/// slip of its own costs this much (nats) — space after a word usually means
+/// the word is done («он всем друг», not «другом»; «эта девочка бежа», a
+/// gerund nobody writes, still «бежала»).
+const SPACE_EARLY: f32 = 2.5;
 /// A tap this close to the border with a neighbor (its touch cost at most
 /// this over the key's own, in the engine's units) may be read as the
 /// neighbor when no word goes on with the key's own letter.
@@ -709,12 +723,35 @@ fn jstr(s: &str) -> String {
     out
 }
 
-/// Two forms of one word, as far as the typed one tells: they part within
-/// their last two letters («побежал», «побежала»; «дом», «доме»).
+/// Words spelled one for the other by mistake rather than mistyped: a
+/// preposition and its form with о (к / ко мне, о / об этом), -тся / -ться.
+fn spelling_pair(a: &str, b: &str) -> bool {
+    const PREPOSITIONS: [(&str, &str); 6] = [
+        ("в", "во"),
+        ("с", "со"),
+        ("к", "ко"),
+        ("о", "об"),
+        ("об", "обо"),
+        ("о", "обо"),
+    ];
+    let tsya = |x: &str, y: &str| {
+        x.strip_suffix("тся")
+            .is_some_and(|stem| y.strip_suffix("ться") == Some(stem))
+    };
+    PREPOSITIONS
+        .iter()
+        .any(|&(x, y)| (a, b) == (x, y) || (a, b) == (y, x))
+        || tsya(a, b)
+        || tsya(b, a)
+}
+
+/// Two forms of one word, as far as the typed one tells: the shorter one
+/// is the other's start but for its last two letters at most («побежал»,
+/// «побежала»; «дом», «доме»; «учится», «учиться»; «бежа», «бежала»).
 fn same_stem(a: &str, b: &str) -> bool {
     let common = a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count();
-    let longer = a.chars().count().max(b.chars().count());
-    common >= 2 && common + 2 >= longer
+    let shorter = a.chars().count().min(b.chars().count());
+    common >= 2 && common + 2 >= shorter
 }
 
 /// One letter repeated (аа, ммм) or any letter three times in a row (аааа).
@@ -2826,6 +2863,18 @@ impl<D: AsRef<[u8]>> Ime<D> {
         self.undo = None;
         self.clip_offer = None;
         self.comma_undo = None;
+        // Punctuation right after a word the strip joins with the one before
+        // («кто нибудь,»): joined first, as space would (the space it leaves
+        // moves after the mark, below).
+        if !self.word.is_empty()
+            && ",.!?;".contains(c)
+            && self.settings.autocorrect
+            && !self.editing
+        {
+            if let Some(m) = self.merge.take() {
+                self.apply_merge(m);
+            }
+        }
         let tap = self.slip_tap.take();
         // "word ," → "word, ": the space moves after sentence punctuation,
         // and after a closing bracket that ends the word (привет) · a+b)).
@@ -3001,6 +3050,9 @@ impl<D: AsRef<[u8]>> Ime<D> {
         }
         let typed = std::mem::take(&mut self.word);
         let drawn = self.drawn.take();
+        // A join or split offered for this word no longer stands.
+        self.merge = None;
+        self.split = None;
         // While editing, what is shown is what gets committed; a trailing
         // hyphen (кто-, из-) is a word in the making.
         let lower = typed.to_lowercase();
@@ -3017,6 +3069,23 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 self.cased(&typed, &lower)
             }
             _ => typed.clone(),
+        };
+        // Written with its ё where е and ё are the same word (еще → ещё);
+        // not once undone here, nor while editing.
+        let yo = self.settings.yo
+            && correct
+            && !self.editing
+            && !insisted
+            && !self
+                .rejected
+                .iter()
+                .any(|(t, _)| *t == fixed.to_lowercase());
+        let fixed = match yo
+            .then(|| self.engine.yo_form(&fixed.to_lowercase()))
+            .flatten()
+        {
+            Some(y) => self.cased(&fixed, &y),
+            None => fixed,
         };
         self.editing = false;
         // A clean, correct, uncorrected word shows the user's normal rhythm.
@@ -3168,7 +3237,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
         }
         if !self
             .engine
-            .comma_odds(&a, &b)
+            .comma_odds_in(head, &a, &b)
             .is_some_and(|o| o >= COMMA_SURE)
         {
             return;
@@ -3250,8 +3319,31 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 .strip_suffix(sep)
                 .and_then(|b| b.strip_suffix(committed.as_str()))
                 .unwrap_or("");
-            self.engine.weigh(&self.context_at(rest), &mut readings);
+            let here = self.context_at(rest);
+            self.engine.weigh(&here, &mut readings);
             readings.truncate(WINDOW_ALTS);
+            // The words it is spelled for by mistake (к / ко, учится /
+            // учиться): the next word may speak for one of them — a slip of
+            // its own kind, not of the finger. (A key's slip, н / нн, comes
+            // in with its own cost above.)
+            let lower_committed = committed.to_lowercase();
+            for w in self.engine.partners(&lower_committed) {
+                if readings.iter().any(|c| c.word == w)
+                    || self.blocked(&w, &lower)
+                    || !spelling_pair(&lower_committed, &w)
+                {
+                    continue;
+                }
+                if let Some(prior) = self.engine.word_cost(&w) {
+                    let mut c = vec![Candidate {
+                        word: w,
+                        cost: prior + PAIR_SLIP,
+                        edit: PAIR_SLIP,
+                    }];
+                    self.engine.weigh(&here, &mut c);
+                    readings.extend(c);
+                }
+            }
             alts = readings;
         }
         // (A drawn word is kept anyway: its way gives the swipe up's variants.)
@@ -3335,6 +3427,44 @@ impl<D: AsRef<[u8]>> Ime<D> {
         })
     }
 
+    /// «кто то», «по русски», «во первых», «кое что»: the previous word and
+    /// this one are one word written with a hyphen — when the dictionary has
+    /// it and, at the previous word's place, it is clearly likelier than
+    /// the two apart (this one not a word at all: always).
+    fn find_hyphen(&self, lower: &str) -> Option<Merge> {
+        let prev = self.prev_here().filter(|p| p.sep == ' ')?;
+        let head = prev.typed.to_lowercase();
+        let joined = format!("{head}-{lower}");
+        if !self.engine.contains(&joined) {
+            return None;
+        }
+        let rest = self
+            .before
+            .strip_suffix(' ')
+            .and_then(|b| b.strip_suffix(prev.committed.as_str()))
+            .unwrap_or("");
+        let at = |ctx: &Context, w: &str| -> Option<f32> {
+            let mut c = vec![Candidate {
+                word: w.to_string(),
+                cost: self.engine.word_cost(w)?,
+                edit: 0.0,
+            }];
+            self.engine.weigh(ctx, &mut c);
+            Some(c[0].cost)
+        };
+        let here = self.context_at(rest);
+        let one = at(&here, &joined)?;
+        let apart = match (at(&here, &head), self.engine.contains(lower)) {
+            (Some(first), true) => first + at(&self.context_at(&self.before), lower)?,
+            _ => f32::INFINITY,
+        };
+        (one + HYPHEN_MARGIN < apart).then(|| Merge {
+            word: self.cased(&prev.typed, &joined),
+            variants: Vec::new(),
+            delete: prev.committed.chars().count() + 1,
+        })
+    }
+
     /// The previous word, if it is still right before the cursor (nothing
     /// was typed or moved in between).
     fn prev_here(&self) -> Option<&PrevWord> {
@@ -3350,7 +3480,19 @@ impl<D: AsRef<[u8]>> Ime<D> {
     fn find_window(&self, plain: &[Candidate]) -> Option<Merge> {
         let prev = self.prev_here()?;
         let committed = prev.committed.to_lowercase();
-        let base_prev = prev.alts.iter().find(|a| a.word == committed)?.cost;
+        // ё put in is no correction: «ее» went in as «её», at the cost of
+        // the «ее» typed — one word, whichever spelling (not все / всё).
+        let same = |w: &str| {
+            w == committed
+                || self.engine.yo_form(w).is_some_and(|y| y == committed)
+                || self.engine.yo_form(&committed).is_some_and(|y| y == w)
+        };
+        let base_prev = prev
+            .alts
+            .iter()
+            .filter(|a| same(&a.word))
+            .map(|a| a.cost)
+            .min_by(f32::total_cmp)?;
         // The text before the previous word.
         let rest = self
             .before
@@ -3370,18 +3512,17 @@ impl<D: AsRef<[u8]>> Ime<D> {
         // (а принципе: «принципе» almost always follows «в»).
         // (A drawn word was read, not typed: its readings' costs decide.)
         let typed_word = matches!(prev.input, Input::Typed { .. })
-            && prev.typed.to_lowercase() == committed
-            && self.engine.contains(&committed);
+            && same(&prev.typed.to_lowercase())
+            && self.engine.contains(&prev.typed.to_lowercase());
         let w_rules = self.engine.config().w_rules * self.engine.config().w_lm;
-        // Every reading of the pair: the previous word re-read (only a slip
-        // of the finger for a word typed as a real word) or as it stands.
-        let mut pairs: Vec<(f32, &str, String)> = Vec::new();
-        for a in &prev.alts {
+        // Every reading of the pair: the previous word as it stands, or
+        // re-read (only a slip of the finger for a word typed as a real word).
+        let mut pairs: Vec<(f32, &str, String)> = after(&committed)
+            .into_iter()
+            .map(|(cost, c)| (base_prev + cost, committed.as_str(), c))
+            .collect();
+        for a in prev.alts.iter().filter(|a| !same(&a.word)) {
             for (cost, c) in after(&a.word) {
-                if a.word == committed {
-                    pairs.push((a.cost + cost, &a.word, c));
-                    continue;
-                }
                 let e = self.engine.next_evidence(&committed, &a.word, &c);
                 let slip = self.known_slip + 0.5 * (e - 3.0).max(0.0);
                 if !typed_word || a.edit <= slip {
@@ -3390,8 +3531,15 @@ impl<D: AsRef<[u8]>> Ime<D> {
             }
         }
         pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let (total, _, _) = pairs.iter().find(|(_, p, _)| *p != committed)?;
-        if *total + self.window_margin >= base {
+        let (total, alt, _) = pairs.iter().find(|(_, p, _)| *p != committed)?;
+        // A spelling of the pair's other word (в что → во что): not a slip
+        // the finger may or may not have made — the next word settles it.
+        let margin = if spelling_pair(&committed, alt) {
+            SPELLING_MARGIN
+        } else {
+            self.window_margin
+        };
+        if *total + margin >= base {
             return None;
         }
         // The best re-reading first, then the other likeliest pairs.
@@ -4534,7 +4682,9 @@ impl<D: AsRef<[u8]>> Ime<D> {
         let rejected = |w: &str| self.rejected.iter().any(|(_, f)| f == w);
         if !self.settings.one_row && !insisted {
             let alone = corrections.first().map_or(f32::INFINITY, |c| c.cost);
-            self.merge = self.find_merge(&lower, alone);
+            self.merge = self
+                .find_hyphen(&lower)
+                .or_else(|| self.find_merge(&lower, alone));
             if self.merge.is_none() {
                 self.split = self.find_split(&lower, alone);
             }
@@ -4597,6 +4747,12 @@ impl<D: AsRef<[u8]>> Ime<D> {
         if self.settings.autocorrect && !shaped && !insisted && n >= 2 {
             let (per_letter, lead, known_margin) = self.settings.strength.limits();
             let known = self.engine.contains(&lower);
+            // A real word typed is guarded: kept unless a cheap slip, or a
+            // form the grammar asks for. Not at «Always»: there it gives way
+            // to any reading clearly likelier (the margin still protects what
+            // is itself likely).
+            let always = self.settings.strength == crate::settings::Strength::Always;
+            let guarded = known && !always;
             // What the typed word costs here: the search at the place may have
             // left it out, crowded by likelier words — its reading on its own,
             // weighed by the place, is the same number.
@@ -4619,7 +4775,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 .iter()
                 .filter(|c| c.word != lower && !rejected(&c.word))
                 .collect();
-            if !known && n >= COMPLETE_FROM {
+            if !guarded && n >= COMPLETE_FROM {
                 for c in &completions {
                     let extra = c.word.chars().count().saturating_sub(n);
                     if !(1..=COMPLETE_ON_SPACE).contains(&extra) || rejected(&c.word) {
@@ -4635,9 +4791,6 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 }
                 pool.sort_by(|a, b| a.cost.total_cmp(&b.cost));
             }
-            let mut others = pool.into_iter();
-            let best = others.next();
-            let runner_up = others.next().map_or(f32::INFINITY, |c| c.cost);
             let typed_fit = known.then(|| self.engine.grammar_fit(&ctx, &lower));
             let other_form = |c: &Candidate| {
                 typed_fit.is_some_and(|t| {
@@ -4646,6 +4799,39 @@ impl<D: AsRef<[u8]>> Ime<D> {
                         && self.engine.grammar_fit(&ctx, &c.word) - t >= GRAMMAR_GAP
                 })
             };
+            // A guarded word's completion too, when it is the form the
+            // grammar asks for («эта девочка бежа» → «бежала»), space before
+            // its end counted as a slip.
+            let mut early: Vec<Candidate> = Vec::new();
+            if guarded {
+                for c in &completions {
+                    let extra = c.word.chars().count().saturating_sub(n);
+                    if !(1..=COMPLETE_ON_SPACE).contains(&extra)
+                        || rejected(&c.word)
+                        || !other_form(c)
+                    {
+                        continue;
+                    }
+                    early.push(Candidate {
+                        cost: c.cost + SPACE_EARLY,
+                        edit: c.edit,
+                        word: c.word.clone(),
+                    });
+                }
+            }
+            for c in &early {
+                match pool.iter_mut().find(|p| p.word == c.word) {
+                    Some(p) if c.cost < p.cost => *p = c,
+                    Some(_) => {}
+                    None => pool.push(c),
+                }
+            }
+            if !early.is_empty() {
+                pool.sort_by(|a, b| a.cost.total_cmp(&b.cost));
+            }
+            let mut others = pool.into_iter();
+            let best = others.next();
+            let runner_up = others.next().map_or(f32::INFINITY, |c| c.cost);
             self.autocorrect = best
                 .filter(|c| c.edit <= per_letter * n.max(3) as f32)
                 .filter(|c| runner_up - c.cost >= lead)
@@ -4653,10 +4839,17 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 // it the grammar asks for, clearly likelier (the context is
                 // already in the costs — a missing word pair only means the
                 // previous word doesn't change its odds).
+                // (A completion the grammar asks for has paid for space
+                // before the word's end: no margin on top.)
                 .filter(|c| {
+                    let margin = if early.iter().any(|e| std::ptr::eq(e, *c)) {
+                        0.0
+                    } else {
+                        known_margin
+                    };
                     !known
-                        || (c.edit <= self.known_slip || other_form(c))
-                            && typed_cost.is_some_and(|t| c.cost + known_margin < t)
+                        || (c.edit <= self.known_slip || other_form(c) || !guarded)
+                            && typed_cost.is_some_and(|t| c.cost + margin < t)
                 })
                 .map(|c| c.word.clone());
         }
@@ -5357,6 +5550,14 @@ impl<D: AsRef<[u8]>> Ime<D> {
     }
 
     /// Center of the first key with this action (tests, diagnostics).
+    /// A character as its key would give it, where this layer has no key
+    /// of its own for it — a symbol from the other layer, an alternative
+    /// from a held key (ё from е): for simulations.
+    pub fn put_char(&mut self, c: char) -> i32 {
+        self.type_char(c);
+        REDRAW | OUTPUT
+    }
+
     pub fn key_center(&self, action: Action) -> Option<(f32, f32)> {
         self.keys
             .iter()
@@ -5779,6 +5980,106 @@ mod tests {
         );
         type_str(&mut k, " ");
         assert_eq!(k.before, "такого исхода ");
+    }
+
+    #[test]
+    fn the_grammar_finishes_a_real_word_it_rules_out() {
+        // «девочка бежа»: a gerund right after a subject hardly ever comes;
+        // space finishes it as the predicate, «бежала».
+        let id = |w: &str| -> Vec<u8> {
+            w.chars()
+                .map(|c| kbcore::alphabet::char_to_id(c).unwrap())
+                .collect()
+        };
+        let words = [("девочка", 5000u64), ("бежа", 12000), ("бежала", 7000)];
+        let dict = Map::from_iter(
+            words
+                .iter()
+                .map(|(w, v)| (id(w), *v))
+                .collect::<std::collections::BTreeMap<_, _>>(),
+        )
+        .unwrap();
+        let parse = kbcore::gram::parse;
+        let byte = |x: f32| ((x / 0.05).round() + 128.0) as u64;
+        let pack = |v: &[f32]| {
+            v.iter()
+                .enumerate()
+                .fold(0u64, |a, (i, x)| a | byte(*x) << (8 * i))
+        };
+        let word = |w: &str, set: u64| ([vec![0, 3], id(w)].concat(), 1 | set << 16);
+        let mut kv = vec![
+            word("девочка", 1),
+            word("бежа", 2),
+            word("бежала", 3),
+            (vec![0, 9, 0, 1, 0], parse("NOUN,anim,femn,sing,nomn")),
+            (vec![0, 9, 0, 2, 0], parse("GRND")),
+            (vec![0, 9, 0, 3, 0], parse("VERB,femn,sing,past")),
+            (vec![0, 12], pack(&[-1.1, 0.5, -2.7, -0.8, -3.2, 1.0, -4.9])),
+            (
+                vec![0, 18],
+                pack(&[1.2, -0.7, -2.2, 0.5, -0.9, -1.1, -0.4, -0.7]),
+            ),
+            (
+                vec![0, 21],
+                pack(&[0.45, -1.5, 0.0, -0.2, 0.0, 0.0, -1.1, -1.5]),
+            ),
+        ];
+        kv.sort();
+        let bigrams = Map::from_iter(kv).unwrap();
+        let cfg = Config::balanced().with_profile(Profile::Phone);
+        let mut k = Ime::new(Engine::new(dict, cfg).with_bigrams(bigrams), 2.625);
+        k.measure(1080);
+        k.start_input("", 1);
+        type_str(&mut k, "девочка бежа ");
+        assert_eq!(k.before.to_lowercase(), "девочка бежала ");
+    }
+
+    #[test]
+    fn a_word_goes_in_with_its_yo() {
+        // «еще» is «ещё» without its ё: the ё goes in; «все» and «всё» are
+        // two words, left as typed. ⌫ right after takes it out.
+        let id = |w: &str| -> Vec<u8> {
+            w.chars()
+                .map(|c| kbcore::alphabet::char_to_id(c).unwrap())
+                .collect()
+        };
+        let words = [
+            ("еще", 5000u64),
+            ("ещё", 5500),
+            ("все", 4000),
+            ("всё", 4500),
+            ("раз", 4000),
+        ];
+        let dict = Map::from_iter(
+            words
+                .iter()
+                .map(|(w, v)| (id(w), *v))
+                .collect::<std::collections::BTreeMap<_, _>>(),
+        )
+        .unwrap();
+        // «еще» is only «ещё» spelled without it (the ё third: bit 2); the
+        // text learned from writes «еще раз» without it.
+        let mut kv = vec![
+            ([vec![0, 24], id("еще")].concat(), 1u64 << 2),
+            ([id("еще"), vec![0], id("раз")].concat(), 100),
+        ];
+        kv.sort();
+        let bigrams = Map::from_iter(kv).unwrap();
+        let cfg = Config::balanced().with_profile(Profile::Phone);
+        let mut k = Ime::new(Engine::new(dict, cfg).with_bigrams(bigrams), 2.625);
+        k.measure(1080);
+        k.start_input("", 1);
+        type_str(&mut k, "еще ");
+        assert_eq!(k.before.to_lowercase(), "ещё ");
+        type_str(&mut k, "все ");
+        assert_eq!(k.before.to_lowercase(), "ещё все ");
+        // The next word's pair doesn't take it out again.
+        k.start_input("", 1);
+        type_str(&mut k, "еще раз ");
+        assert_eq!(k.before.to_lowercase(), "ещё раз ");
+        k.start_input("", 1);
+        type_str(&mut k, "еще ⌫");
+        assert_eq!(k.word.to_lowercase(), "еще");
     }
 
     #[test]

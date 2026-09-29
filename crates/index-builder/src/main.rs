@@ -28,18 +28,27 @@
 //!   --frames     FRAMES.tsv (tools/build_frames.py): each governing word's
 //!                frame under `0, 11, word`, the weights after adjectives and
 //!                a subject under `0, 12`, a verb's clause frame (after a noun
-//!                phrase) under `0, 16, verb` — log ratios, a byte each (0.05
-//!                nat steps around 128)
+//!                phrase) under `0, 16, verb`, a preposition's frame by the
+//!                sense class of the verb it hangs on under `0, 17, class (2
+//!                bytes), preposition`, what kind of word follows a subject
+//!                under `0, 18`, the case after «X и» under `0, 19`, a
+//!                preposition's frame by the word right before it under `0,
+//!                20, word, 0, preposition` («что за») — log
+//!                ratios, a byte each (0.05 nat steps around 128)
 //!   --topics     TOPIC_WORDS.tsv (tools/build_topics.py): each word's sense
 //!                class under `0, 13, word`
 //!   --topic-pairs  TOPIC_PAIRS.tsv (tools/build_topics.py): how much likelier
 //!                two sense classes share a sentence, a byte (0.05 nat steps
 //!                around 128) under `0, 14, class, class` (2 bytes each, the
 //!                smaller first)
+//!   --yo         YO.tsv (tools/yo_words.py): words written without their ё
+//!                (еще → ещё) under `0, 24, word`, the ё's letter positions
+//!                as a bit mask
 //!   --commas     COMMAS.tsv (tools/build_commas.py): the log odds of a comma
 //!                between two words, a byte each (0.05 nat steps around 128):
 //!                anywhere `0, 15, 0`, before a word `0, 15, 1, word`, after
-//!                it `0, 15, 2, word`, a pair of its own `0, 15, 3, a, 0, b`
+//!                it `0, 15, 2, word`, a pair of its own `0, 15, 3, a, 0, b`, by
+//!                the words' kinds and the sentence's state `0, 15, 4, feature`
 //!   --grammar-table  the dictionary holds the words' grammar ids: each id's
 //!                (class, reading set) under `0, 10, id (2 bytes)`, and no
 //!                word under `0, 3`
@@ -81,6 +90,7 @@ fn main() -> ExitCode {
         let mut topic_pairs = None;
         let mut topics = None;
         let mut commas = None;
+        let mut yo = None;
         while let Some(flag) = args.next() {
             match flag.as_str() {
                 "--endings" => endings = args.next(),
@@ -97,6 +107,7 @@ fn main() -> ExitCode {
                 "--topic-pairs" => topic_pairs = args.next(),
                 "--topics" => topics = args.next(),
                 "--commas" => commas = args.next(),
+                "--yo" => yo = args.next(),
                 other => {
                     eprintln!("unknown option {other}");
                     return ExitCode::FAILURE;
@@ -112,7 +123,7 @@ fn main() -> ExitCode {
             table,
             frames,
             (topics, topic_pairs),
-            commas,
+            (commas, yo),
             rules,
         ) {
             Ok(()) => ExitCode::SUCCESS,
@@ -289,13 +300,14 @@ fn run(
     entries.dedup_by(|a, b| a.0 == b.0);
 
     let kept = entries.len();
-    let out = BufWriter::new(File::create(out_path)?);
+    let out = BufWriter::new(File::create(staged(out_path))?);
     let mut builder =
         fst::raw::Builder::new_type(out, format.fst_type()).map_err(io::Error::other)?;
     for (key, val) in &entries {
         builder.insert(key, *val).map_err(io::Error::other)?;
     }
     builder.finish().map_err(io::Error::other)?;
+    std::fs::rename(staged(out_path), out_path)?;
 
     let size = std::fs::metadata(out_path)?.len();
     println!(
@@ -338,12 +350,13 @@ fn build_casing(list_path: &str, out_path: &str, offensive: Option<&str>) -> io:
         }
     }
     let entries: Vec<(Vec<u8>, u64)> = flags.into_iter().collect();
-    let mut builder =
-        MapBuilder::new(BufWriter::new(File::create(out_path)?)).map_err(io::Error::other)?;
+    let mut builder = MapBuilder::new(BufWriter::new(File::create(staged(out_path))?))
+        .map_err(io::Error::other)?;
     for (key, v) in &entries {
         builder.insert(key, *v).map_err(io::Error::other)?;
     }
     builder.finish().map_err(io::Error::other)?;
+    std::fs::rename(staged(out_path), out_path)?;
     let size = std::fs::metadata(out_path)?.len();
     println!(
         "wrote {out_path}: {} words ({obscene} obscene), {:.1} MB",
@@ -376,7 +389,7 @@ fn build_bigrams(
     table: Option<(String, String)>,
     frames: Option<String>,
     (topics, topic_pairs): (Option<String>, Option<String>),
-    commas: Option<String>,
+    (commas, yo): (Option<String>, Option<String>),
     rules: Option<(String, String)>,
 ) -> io::Result<()> {
     let mut entries: Vec<(Vec<u8>, u64)> = Vec::new();
@@ -418,6 +431,24 @@ fn build_bigrams(
     }
     let with_endings = entries.len();
     // Each word's reading set, and each set's readings.
+    // Words written without their ё (tools/yo_words.py): which of their е
+    // are ё, as a mask of letter positions.
+    if let Some(path) = &yo {
+        for line in BufReader::new(File::open(path)?).lines() {
+            let line = line?;
+            let Some((e, y)) = line.split_once('\t') else {
+                continue;
+            };
+            let mask = y
+                .chars()
+                .enumerate()
+                .filter(|(i, c)| *c == 'ё' && *i < 64)
+                .fold(0u64, |m, (i, _)| m | 1 << i);
+            if let (Some(k), true) = (remap(e), mask != 0) {
+                entries.push(([vec![0, 24], k].concat(), mask));
+            }
+        }
+    }
     // Where commas go.
     if let Some(path) = &commas {
         for line in BufReader::new(File::open(path)?).lines() {
@@ -430,6 +461,10 @@ fn build_bigrams(
             };
             let key = if k == "@" {
                 Some(vec![0, 15, 0])
+            } else if let Some(feature) = k.strip_prefix('#') {
+                // By the words' kinds (a gerund, a finite verb…), and the
+                // sentence's state (an open phrase, an «и» before).
+                Some([vec![0, 15, 4], feature.as_bytes().to_vec()].concat())
             } else if let Some(w) = k.strip_prefix('>') {
                 remap(w).map(|w| [vec![0, 15, 1], w].concat())
             } else if let Some(w) = k.strip_prefix('<') {
@@ -493,6 +528,27 @@ fn build_bigrams(
                 });
             let key = if w == "@attr" {
                 Some(vec![0, 12])
+            } else if w == "@subj" {
+                Some(vec![0, 18])
+            } else if w == "@subjx" {
+                Some(vec![0, 21])
+            } else if w == "@coord" {
+                Some(vec![0, 19])
+            } else if w == "@impers" {
+                Some(vec![0, 22])
+            } else if let Some((class, prep)) = w.strip_prefix('&').and_then(|r| r.split_once(' '))
+            {
+                let class = class.parse::<u16>().ok();
+                class.zip(remap(prep)).map(|(c, p)| {
+                    let c = c.to_be_bytes();
+                    [vec![0, 17, c[0], c[1]], p].concat()
+                })
+            } else if let Some((word, prep)) = w.strip_prefix('^').and_then(|r| r.split_once(' ')) {
+                remap(word)
+                    .zip(remap(prep))
+                    .map(|(a, b)| [vec![0, 20], a, vec![0], b].concat())
+            } else if let Some(adj) = w.strip_prefix('*') {
+                remap(adj).map(|k| [vec![0, 23], k].concat())
             } else if let Some(verb) = w.strip_prefix('%') {
                 remap(verb).map(|k| [vec![0, 16], k].concat())
             } else {
@@ -629,12 +685,13 @@ fn build_bigrams(
     let rules = entries.len() - with_endings - classes;
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     entries.dedup_by(|a, b| a.0 == b.0);
-    let mut builder =
-        MapBuilder::new(BufWriter::new(File::create(out_path)?)).map_err(io::Error::other)?;
+    let mut builder = MapBuilder::new(BufWriter::new(File::create(staged(out_path))?))
+        .map_err(io::Error::other)?;
     for (key, val) in &entries {
         builder.insert(key, *val).map_err(io::Error::other)?;
     }
     builder.finish().map_err(io::Error::other)?;
+    std::fs::rename(staged(out_path), out_path)?;
     let size = std::fs::metadata(out_path)?.len();
     println!(
         "wrote {out_path}: {pairs} pairs + {} endings + {classes} grammar + {rules} rules, {dropped} dropped, {:.1} MB",
@@ -642,6 +699,13 @@ fn build_bigrams(
         size as f64 / 1_048_576.0
     );
     Ok(())
+}
+
+/// Where a file is written before it takes `path`'s place, once complete: a
+/// process with the old one mapped keeps reading that one (written in place,
+/// its pages would be cut from under it — SIGBUS).
+fn staged(path: &str) -> String {
+    format!("{path}.part")
 }
 
 /// Remap a word to alphabet ids, or `None` if it holds an unsupported char.

@@ -59,6 +59,8 @@ if [ $have = 1 ]; then
     # Government frames and agreement weights for the phrase grammar.
     python3 tools/build_frames.py data/tatoeba/rus_sentences.tsv.bz2 \
         data/leipzig/rus-ru_web-public_2019_1M.tar.gz > data/frames.tsv
+    # Words written without their ё (еще → ещё), for the «Ё» setting.
+    ${PYTHON:-python3} tools/yo_words.py > data/yo.tsv
     # Where commas go.
     python3 tools/build_commas.py data/tatoeba/rus_sentences.tsv.bz2 \
         data/leipzig/rus-ru_web-public_2019_1M.tar.gz > data/commas.tsv

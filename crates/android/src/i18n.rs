@@ -173,6 +173,14 @@ const TEXTS: &[(&str, [&str; 6])] = &[
         "Comas: ponerlas solas donde casi seguro van; ⌫ justo después la quita",
         "Vírgulas: colocar sozinhas onde quase certamente vão; ⌫ logo depois tira",
     ]),
+    ("set.yo", [
+        "Ё: писать «ещё», «пошёл», «её», когда набрано через е",
+        "Ё (Russian): write «ещё», «пошёл», «её» when typed with е",
+        "Ё (Russisch): «ещё», «пошёл», «её» schreiben, wenn mit е getippt",
+        "Ё (russe) : écrire «ещё», «пошёл», «её» quand tapé avec е",
+        "Ё (ruso): escribir «ещё», «пошёл», «её» cuando se teclea con е",
+        "Ё (russo): escrever «ещё», «пошёл», «её» quando digitado com е",
+    ]),
     ("panel.clips_empty", [
         "Здесь будет то, что вы скопируете, пока клавиатура работает. Нигде не сохраняется.",
         "What you copy while the keyboard runs shows up here. It is never saved.",

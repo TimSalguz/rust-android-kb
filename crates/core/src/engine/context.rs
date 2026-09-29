@@ -78,15 +78,44 @@ impl<D: AsRef<[u8]>> Engine<D> {
             .iter()
             .map(|w| (w.to_lowercase(), self.readings(&w.to_lowercase())))
             .collect();
-        let walk = gram::walk(&phrase);
+        let mut walk = gram::walk(&phrase);
+        walk.attribute_disagree = walk
+            .nearest_attribute
+            .and_then(|i| self.attribute_weights(&phrase[i].0))
+            .map(|(_, disagree)| disagree);
+        // A preposition's frame by what it hangs on says more than its
+        // own: the word right before it, when the two are common together
+        // («что за [головная боль]», «благодарю за [помощь]»), else the
+        // sense class of the verb before it («бежала за [велосипедом]»,
+        // «заплатила за [велосипед]»).
+        let through = walk.governor.and_then(|g| {
+            let r = &phrase[g].1;
+            if r.is_empty() || !r.iter().all(|&x| x & gram::bit::PREP != 0) {
+                return None;
+            }
+            let prep = &phrase[g].0;
+            let paired = g
+                .checked_sub(1)
+                .and_then(|b| self.paired_frame(&phrase[b].0, prep));
+            paired
+                .or_else(|| {
+                    let v = gram::verb_before(&phrase, g)?;
+                    self.through_frame(self.topic(&phrase[v].0)?, prep)
+                })
+                .map(|f| (g, f))
+        });
+        let frame_of = |g: usize| match through {
+            Some((t, f)) if t == g => Some(f),
+            _ => self.frame(&phrase[g].0),
+        };
         let across = walk
             .governor
             .filter(|&g| g + 1 < phrase.len() && gram::governing(&phrase[g].1))
-            .and_then(|g| self.frame(&phrase[g].0));
-        let next = phrase
-            .last()
-            .filter(|(_, r)| gram::governing(r))
-            .and_then(|(w, _)| self.frame(w));
+            .and_then(frame_of);
+        let last = phrase.len().checked_sub(1);
+        let next = last
+            .filter(|&l| gram::governing(&phrase[l].1))
+            .and_then(frame_of);
         let clause = walk.clause.and_then(|v| self.clause_frame(&phrase[v].0));
         let mut topics: Vec<u64> = sentence
             .iter()
@@ -97,7 +126,10 @@ impl<D: AsRef<[u8]>> Engine<D> {
         let prev = prev.map(str::to_lowercase);
         let attr = self.attr_weights();
         let cfg = &self.cfg;
-        let prev_frame = prev.as_deref().and_then(|p| self.frame(p));
+        let prev_frame = match (through, last) {
+            (Some((g, f)), Some(l)) if g == l => Some(f),
+            _ => prev.as_deref().and_then(|p| self.frame(p)),
+        };
         let prev_tags = prev
             .as_deref()
             .and_then(|p| self.word_class(p))
@@ -349,7 +381,13 @@ impl<D: AsRef<[u8]>> Engine<D> {
     /// nothing.
     pub fn grammar_fit(&self, ctx: &Context, word: &str) -> f32 {
         let readings = self.readings(word);
-        let frame = ctx.next.map_or(0.0, |f| f.next(&readings));
+        // The previous word's frame: a governing word's (its preposition's
+        // by what it hangs on), or any word's own («он» — hardly an
+        // infinitive after it).
+        let frame = ctx
+            .next
+            .or(ctx.prev_frame)
+            .map_or(0.0, |f| f.next(&readings));
         self.phrase_nats(ctx, &readings).0 + frame
     }
 }

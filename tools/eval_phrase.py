@@ -32,6 +32,7 @@ ap.add_argument("--sentences", default=f"{ROOT}/data/tatoeba/rus_sentences.tsv.b
 ap.add_argument("--show", type=int, default=8, help="print this many sentences the settings disagree on")
 ap.add_argument("--predict-only", action="store_true", help="only the next-word prediction")
 ap.add_argument("--swipe", type=float, help="draw the words, corners missed by this many key widths")
+ap.add_argument("--bigrams", help="another context model than the assets' (to compare two)")
 args = ap.parse_args()
 
 PREP = set("""в во на о об обо при по с со к ко за под подо над перед передо между через
@@ -64,7 +65,7 @@ with bz2.open(args.sentences, "rt", encoding="utf-8") as f:
         text = parts[2].lower().replace("ё", "е")
         if re.search(r"[^а-я .!?-]", text):
             continue
-        words = re.findall(r"[а-я]+", text)
+        words = re.findall(r"[а-я]+(?:-[а-я]+)*", text)
         s = constrained(words)
         if 3 <= len(words) <= 10 and s and all(w in lexicon for w in words):
             lines.append(" ".join(words))
@@ -73,7 +74,8 @@ with bz2.open(args.sentences, "rt", encoding="utf-8") as f:
             break
 
 assets = f"{ROOT}/target/apk/assets"
-cmd = [f"{ROOT}/target/release/examples/typetext", f"{assets}/dict.fst", f"{assets}/bigrams.fst"]
+bigrams = args.bigrams or f"{assets}/bigrams.fst"
+cmd = [f"{ROOT}/target/release/examples/typetext", f"{assets}/dict.fst", bigrams]
 if os.path.exists(f"{assets}/casing.fst"):
     cmd.append(f"{assets}/casing.fst")
 
@@ -130,7 +132,7 @@ for l, s in zip(lines, spots):
     for i in range(1, len(w)):
         queries.append((" ".join(w[max(0, i - 5):i]), w[i], i in s))
 for kb_set in [] if args.swipe is not None else args.set:
-    env = dict(os.environ, DICT_FST=f"{assets}/dict.fst", BIGRAMS_FST=f"{assets}/bigrams.fst",
+    env = dict(os.environ, DICT_FST=f"{assets}/dict.fst", BIGRAMS_FST=bigrams,
                KB_PROFILE="phone", KB_SET=kb_set)
     out = subprocess.run([kbdemo, "--predict"] + [q for q, _, _ in queries],
                          capture_output=True, text=True, env=env).stdout.splitlines()

@@ -41,6 +41,7 @@ fn main() -> io::Result<()> {
     // Non-interactive modes (dict from DICT_FST, context model from BIGRAMS_FST):
     //   kbdemo --query word1 prev|word2 ...   corrections (+ completions); `prev|` adds context
     //   kbdemo --predict word1 "w1 w2" ...    likeliest next words (after a phrase: its grammar)
+    //   kbdemo --swipes FILE                  drawn words read back (tools/real_swipes.py)
     let open = || -> io::Result<Engine<kbcore::Mmap>> {
         let dict = std::env::var("DICT_FST").unwrap_or_else(|_| "dict.fst".into());
         match std::env::var("BIGRAMS_FST") {
@@ -62,6 +63,13 @@ fn main() -> io::Result<()> {
             println!("{w:?} → {}", next.join(", "));
         }
         return Ok(());
+    }
+    if args.first().map(String::as_str) == Some("--swipes") {
+        let engine = open()?;
+        let path = args
+            .get(1)
+            .ok_or_else(|| io::Error::other("--swipes FILE"))?;
+        return swipes(&engine, path);
     }
     if args.first().map(String::as_str) == Some("--query") {
         let engine = open()?;
@@ -163,6 +171,107 @@ fn main() -> io::Result<()> {
 /// Select a preset from `KB_PRESET` (fast|balanced|accurate) and a keyboard
 /// from `KB_PROFILE` (desktop|phone), then apply any fine-grained `KB_*`
 /// overrides. Used by both interactive and `--query` modes.
+/// Swipes drawn by people, read back one by one (no context: each word on its
+/// own): how often the word drawn comes first, among the first three, at all
+/// — by its length — and how long a reading takes. FILE (tools/real_swipes.py):
+/// `#key GRID CHAR X Y` (key centers), `#width GRID W` (a key's width), then
+/// `WORD GRID x,y,t x,y,t …`. `PACE=0` leaves the times out.
+fn swipes(engine: &Engine<kbcore::Mmap>, path: &str) -> io::Result<()> {
+    use std::collections::HashMap;
+    let text = std::fs::read_to_string(path)?;
+    let mut keys: HashMap<String, Vec<(char, f32, f32)>> = HashMap::new();
+    let mut width: HashMap<String, f32> = HashMap::new();
+    let pace = std::env::var("PACE").as_deref() != Ok("0");
+    let fold = |w: &str| w.to_lowercase().replace('ё', "е");
+    // By length: 1–2, 3–4, 5–7, 8+ letters — (seen, first, top 3, found).
+    let bucket = |n: usize| match n {
+        0..=2 => 0,
+        3..=4 => 1,
+        5..=7 => 2,
+        _ => 3,
+    };
+    let mut stats = [[0usize; 4]; 4];
+    let mut ms = 0f64;
+    let mut misses: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let mut f = line.split_whitespace();
+        match f.next() {
+            Some("#key") => {
+                let (Some(g), Some(c), Some(x), Some(y)) = (f.next(), f.next(), f.next(), f.next())
+                else {
+                    continue;
+                };
+                let (Some(c), Ok(x), Ok(y)) = (c.chars().next(), x.parse(), y.parse()) else {
+                    continue;
+                };
+                keys.entry(g.to_string()).or_default().push((c, x, y));
+            }
+            Some("#width") => {
+                if let (Some(g), Some(Ok(w))) = (f.next(), f.next().map(str::parse::<f32>)) {
+                    width.insert(g.to_string(), w);
+                }
+            }
+            Some(word) => {
+                let Some(g) = f.next() else { continue };
+                let (Some(k), Some(&w)) = (keys.get(g), width.get(g)) else {
+                    continue;
+                };
+                let mut pts = Vec::new();
+                let mut times = Vec::new();
+                for p in f {
+                    let v: Vec<f32> = p.split(',').filter_map(|x| x.parse().ok()).collect();
+                    if v.len() == 3 {
+                        pts.push((v[0], v[1]));
+                        times.push(v[2]);
+                    }
+                }
+                let t0 = times.first().copied().unwrap_or(0.0);
+                let times: Vec<f32> = times.iter().map(|t| t - t0).collect();
+                let start = Instant::now();
+                let got = engine.gesture_timed(&pts, pace.then_some(&times[..]), k, w);
+                ms += start.elapsed().as_secs_f64() * 1000.0;
+                let want = fold(word);
+                let rank = got.iter().position(|c| fold(&c.word) == want);
+                let s = &mut stats[bucket(want.chars().count())];
+                s[0] += 1;
+                s[1] += (rank == Some(0)) as usize;
+                s[2] += rank.is_some_and(|r| r < 3) as usize;
+                s[3] += rank.is_some() as usize;
+                if rank != Some(0) && misses.len() < 30 {
+                    let top: Vec<&str> = got.iter().take(3).map(|c| c.word.as_str()).collect();
+                    misses.push(format!("{want} → {}", top.join(", ")));
+                }
+            }
+            None => {}
+        }
+    }
+    let total: [usize; 4] = std::array::from_fn(|i| stats.iter().map(|s| s[i]).sum());
+    let pct = |a: usize, n: usize| 100.0 * a as f64 / n.max(1) as f64;
+    println!(
+        "{} swipes: first {:.2}%, top-3 {:.2}%, found {:.2}% ({:.2} ms each)",
+        total[0],
+        pct(total[1], total[0]),
+        pct(total[2], total[0]),
+        pct(total[3], total[0]),
+        ms / total[0].max(1) as f64
+    );
+    for (s, name) in stats.iter().zip(["1–2", "3–4", "5–7", "8+"]) {
+        println!(
+            "  {name:>4} letters: {:>6} swipes, first {:.2}%, top-3 {:.2}%, found {:.2}%",
+            s[0],
+            pct(s[1], s[0]),
+            pct(s[2], s[0]),
+            pct(s[3], s[0])
+        );
+    }
+    if std::env::var("MISSES").is_ok() {
+        for m in &misses {
+            println!("  miss: {m}");
+        }
+    }
+    Ok(())
+}
+
 fn config_from_env() -> Config {
     let mut cfg = match std::env::var("KB_PRESET").as_deref() {
         Ok("fast") => Config::fast(),

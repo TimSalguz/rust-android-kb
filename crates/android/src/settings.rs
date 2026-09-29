@@ -91,6 +91,9 @@ pub struct Settings {
     pub clipboard: bool,
     /// A comma that is almost surely due goes in by itself (⌫ takes it out).
     pub auto_commas: bool,
+    /// A word written without its ё (еще, пошел) goes in with it (ещё, пошёл)
+    /// — only where е and ё are the same word.
+    pub yo: bool,
     /// Where the finger slowed down or flew along a drawn word weighs its
     /// letters too.
     pub gesture_pace: bool,
@@ -139,6 +142,7 @@ impl Default for Settings {
             gestures: true,
             clipboard: true,
             auto_commas: true,
+            yo: true,
             gesture_pace: true,
             grip_indicator: true,
             grip_offsets: true,
@@ -219,6 +223,10 @@ const FIELDS: &[Field] = &[
     },
     Field {
         key: "auto_commas",
+        kind: Kind::Bool,
+    },
+    Field {
+        key: "yo",
         kind: Kind::Bool,
     },
     Field {
@@ -339,6 +347,7 @@ impl Settings {
             "gestures" => flag(self.gestures),
             "clipboard" => flag(self.clipboard),
             "auto_commas" => flag(self.auto_commas),
+            "yo" => flag(self.yo),
             "gesture_pace" => flag(self.gesture_pace),
             "grip_indicator" => flag(self.grip_indicator),
             "grip_offsets" => flag(self.grip_offsets),
@@ -418,6 +427,7 @@ impl Settings {
             "gestures" => self.gestures = on,
             "clipboard" => self.clipboard = on,
             "auto_commas" => self.auto_commas = on,
+            "yo" => self.yo = on,
             "gesture_pace" => self.gesture_pace = on,
             "grip_indicator" => self.grip_indicator = on,
             "grip_offsets" => self.grip_offsets = on,

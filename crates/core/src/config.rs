@@ -76,6 +76,9 @@ pub struct Config {
     pub c_phonetic: f32,
     /// е typed where ё was meant: people routinely skip ё, so almost free.
     pub c_yo: f32,
+    /// ь missing or extra between т and ся (учится / учиться): a spelling
+    /// slip, one of the commonest — cheap, the context decides.
+    pub c_tsya: f32,
     /// ё typed where е was meant: the user chose ё on purpose, so rarely a slip.
     pub c_yo_reverse: f32,
     /// ь↔ъ (ъ is a long-press / rare key).
@@ -238,6 +241,7 @@ impl Config {
             max_sub: 6.0,
             c_phonetic: 3.0,
             c_yo: 0.2,
+            c_tsya: 0.5,
             c_yo_reverse: 2.0,
             c_hard_soft: 1.0,
             c_accent: 0.2,
@@ -335,7 +339,7 @@ impl Config {
             };
         }
         fields!(
-            f32: sigma, base_sub, cross_alphabet_penalty, max_sub, c_phonetic, c_yo, c_yo_reverse,
+            f32: sigma, base_sub, cross_alphabet_penalty, max_sub, c_phonetic, c_yo, c_tsya, c_yo_reverse,
                 c_hard_soft, c_accent, c_accent_reverse, c_del, c_del_double, c_del_sign, c_del_punct, c_del_held, c_ins, c_ins_repeat,
                 c_ins_neighbor, c_ins_sign, c_trans, c_trans_cross, c_trans_rollover, layout_switch, layout_max_cost, home_row_penalty, home_row_trigger, c_home_finger, c_complete_char, ctx_lambda, w_endings, w_classes, w_rules, w_phrase, w_subject, w_topic, gesture_location, gesture_shape, gesture_walk, gesture_trust, gesture_rare, gesture_pace,
                 w_lm, w_ch, prior_scale, max_cost, widen_step, max_cost_ceiling, rescue_cost;

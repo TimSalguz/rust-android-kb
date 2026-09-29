@@ -55,6 +55,7 @@ ap.add_argument("sources", nargs="+")
 ap.add_argument("--word-readings", default="data/word_readings.tsv")
 ap.add_argument("--readings", default="data/readings.tsv")
 ap.add_argument("--min", type=int, default=100)
+ap.add_argument("--topics", default="data/topic_words.tsv", help="word → sense class (build_topics.py)")
 args = ap.parse_args()
 
 
@@ -68,6 +69,9 @@ PRONOUNS = {
     "мы": ("1per", "plur", None),
     "вы": ("2per", "plur", None),
     "они": ("3per", "plur", None),
+    "кто": ("3per", "sing", None),
+    "никто": ("3per", "sing", None),
+    "ничто": ("3per", "sing", "neut"),
 }
 
 
@@ -95,6 +99,15 @@ class Reading:
             elif g in GENDERS:
                 self.gender = g
 
+
+topic = {}
+try:
+    with open(args.topics, encoding="utf-8") as f:
+        for line in f:
+            w, c = line.rstrip("\n").split("\t")
+            topic[w] = c
+except FileNotFoundError:
+    print(f"{args.topics}: no sense classes, no frames through prepositions", file=sys.stderr)
 
 sets = {}
 with open(args.readings, encoding="utf-8") as f:
@@ -189,10 +202,32 @@ def subject(words, rs):
     return None
 
 
+IMPERSONAL = ("3per", "sing", "neut")
+
+
+def impersonal(words, rs):
+    """A genitive before «не» (maybe other adverbs), no subject before it:
+    «её не [существовало]», «денег не [было]»."""
+    negated = False
+    for k in range(len(words) - 1, max(-1, len(words) - 6), -1):
+        if adverbial(rs[k]):
+            negated |= words[k] == "не"
+            continue
+        cased = [x for x in rs[k] if x.case]
+        genitive = (bool(cased) and all(x.pos in ("NOUN", "NPRO") and x.case != "nomn" for x in cased)
+                    and any(x.case == "gent" for x in cased))
+        if not (negated and genitive):
+            return False
+        return not any(PRONOUNS.get(words[j]) or subject_noun(rs[j]) for j in range(k))
+    return False
+
+
 def walk(words, rs):
-    """Back from the end: (governor index or None, the strict attributes)."""
+    """Back from the end: (governor index or None, the strict attributes);
+    `walk.nearest` — the word index of the nearest strict attribute."""
     attrs = []
     collected = 0
+    walk.nearest = None
     for k in range(len(words) - 1, max(-1, len(words) - 6), -1):
         w, r = words[k], rs[k]
         if w.startswith("котор"):
@@ -203,6 +238,8 @@ def walk(words, rs):
             if nxt and not any(agree(x, y) for x in as_attr for y in nxt):
                 return None, attrs
             if strict(r):
+                if not attrs:
+                    walk.nearest = k
                 attrs.append(r)
             collected += 1
             continue
@@ -217,6 +254,36 @@ def walk(words, rs):
 
 
 VERBAL = {"VERB", "INFN", "GRND"}
+
+# What comes after a subject, by kind: the word's readings' kinds, shared.
+AFTER_SUBJECT = ["predicate", "gerund", "infinitive", "adverb", "nominative", "oblique", "linking", "other"]
+
+
+def kind(r):
+    if r.pos in PREDICATE:
+        return "predicate"
+    if r.pos == "GRND":
+        return "gerund"
+    if r.pos == "INFN":
+        return "infinitive"
+    if r.pos in ("ADVB", "PRCL", "PRED", "COMP"):
+        return "adverb"
+    if r.pos in NOMINAL and r.case:
+        return "nominative" if r.case == "nomn" else "oblique"
+    if r.pos in ("PREP", "CONJ"):
+        return "linking"
+    return "other"
+
+
+def verb_before(words, rs, g):
+    """The verb a preposition at `g` hangs on: right before it, maybe
+    adverbs between; its index or None."""
+    for k in range(g - 1, max(-1, g - 4), -1):
+        if rs[k] and all(x.pos in VERBAL for x in rs[k]):
+            return k
+        if not adverbial(rs[k]):
+            return None
+    return None
 
 
 def clause(words, rs, g):
@@ -258,12 +325,25 @@ OUTCOMES = 8
 base = [0.0] * OUTCOMES
 gov = defaultdict(lambda: [0.0] * OUTCOMES)
 attr = Counter()  # other / agree / disagree after adjectives, and in general
+# …by the adjective nearest the word («всем друг»: «всем» mostly stands on
+# its own — «всем привет»; «большому» hardly).
+attr_by = defaultdict(Counter)
 predicates = Counter()  # predicates anywhere, by reading set
 # A verb's clause after a noun phrase (see `clause`): what comes next, by the
 # verb. (By the case the phrase filled it says what the word pairs' classes
 # already know: the next word's case after that one's.)
 clause_verb = defaultdict(lambda: [0.0] * OUTCOMES)
 clause_base = [0.0] * OUTCOMES
+# After a preposition, by the sense class of the verb it hangs on («бежала за
+# [велосипедом]», «заплатила за [велосипед]»): (class, preposition) → outcomes.
+through = defaultdict(lambda: [0.0] * OUTCOMES)
+# …and by the word right before it («что за [головная боль]»: the nominative).
+paired = defaultdict(lambda: [0.0] * OUTCOMES)
+# What kind of word comes after a subject, and anywhere.
+subj_kinds = Counter()
+any_kinds = Counter()
+# After «X и» (X a noun phrase in one case): the next one in X's case, or not.
+coord = Counter()
 after_subject = Counter()  # (subject, fits) for a predicate after a subject
 seen = 0
 for path in args.sources:
@@ -277,8 +357,22 @@ for path in args.sources:
             rs = readings.get(tok)
             if phrase_w and rs:
                 g, attrs = walk(phrase_w, phrase_r)
+                kinds = {kind(r) for r in rs}
+                for k_ in kinds:
+                    any_kinds[k_] += 1 / len(kinds)
+                if subject(phrase_w, phrase_r):
+                    for k_ in kinds:
+                        subj_kinds[k_] += 1 / len(kinds)
+                if (len(phrase_w) >= 2 and phrase_w[-1] in ("и", "или") and nominal(phrase_r[-2])
+                        and nominal(rs)):
+                    before = {x.case for x in phrase_r[-2]}
+                    if len(before) == 1:
+                        coord["same" if any(x.case in before for x in rs) else "other"] += 1
+                        coord["chance"] += sum(base[1 + CASES.index(c)] for c in before if c in CASES) / max(sum(base[1:7]), 1)
                 if all(r.pos in PREDICATE for r in rs):
                     predicates[rs] += 1
+                    if impersonal(phrase_w, phrase_r):
+                        after_subject[IMPERSONAL + ("impersonal",), any(fits_subject(r, IMPERSONAL) for r in rs)] += 1
                     subj = subject(phrase_w, phrase_r)
                     if subj:
                         after_subject[subj, any(fits_subject(r, subj) for r in rs)] += 1
@@ -287,6 +381,7 @@ for path in args.sources:
                     outcome[7] = 1.0
                     if attrs:
                         attr["other"] += 1
+                        attr_by[phrase_w[walk.nearest]]["other"] += 1
                 elif nominal(rs):
                     fits = [r for r in rs if all(any(agree(a, r) for a in at) for at in attrs)]
                     cases = {r.case for r in (fits or rs)}
@@ -294,10 +389,12 @@ for path in args.sources:
                         outcome[1 + CASES.index(c)] = 1 / len(cases)
                     if attrs:
                         attr["agree" if fits else "disagree"] += 1
+                        attr_by[phrase_w[walk.nearest]]["agree" if fits else "disagree"] += 1
                 else:
                     outcome[0] = 1.0
                     if attrs:
                         attr["other"] += 1
+                        attr_by[phrase_w[walk.nearest]]["other"] += 1
                 if attrs:
                     attr["n"] += 1
                 for i in range(OUTCOMES):
@@ -311,6 +408,17 @@ for path in args.sources:
                         for i in range(OUTCOMES):
                             clause_base[i] += outcome[i]
                             clause_verb[phrase_w[v]][i] += outcome[i]
+                    pg = phrase_r[g]
+                    if pg and all(x.pos == "PREP" for x in pg) and g >= 1:
+                        row = paired[(phrase_w[g - 1], phrase_w[g])]
+                        for i in range(OUTCOMES):
+                            row[i] += outcome[i]
+                    if pg and all(x.pos == "PREP" for x in pg):
+                        v = verb_before(phrase_w, phrase_r, g)
+                        if v is not None and phrase_w[v] in topic:
+                            row = through[(topic[phrase_w[v]], phrase_w[g])]
+                            for i in range(OUTCOMES):
+                                row[i] += outcome[i]
                 seen += 1
             phrase_w.append(tok)
             phrase_r.append(rs or ())
@@ -328,12 +436,35 @@ for g, row in sorted(gov.items()):
         continue
     print(g + "\t" + ",".join(f"{x:.3f}" for x in lr))
     kept += 1
+# By the nearest adjective (`*word`): agree, disagree against a noun phrase
+# anywhere, when the word's own differs (0.5 off) from all adjectives'.
+p_nom = 1 - (p_base[0] + p_base[7])
+glob = math.log((attr["disagree"] + 1) / (attr["n"] or 1) / p_nom)
+kept_by = 0
+for w, c in sorted(attr_by.items()):
+    n = c["agree"] + c["disagree"] + c["other"]
+    if n < args.min:
+        continue
+    # Smoothed toward all adjectives' shares.
+    share = (c["disagree"] + ALPHA * attr["disagree"] / (attr["n"] or 1)) / (n + ALPHA)
+    dis = math.log(share / p_nom)
+    agr = math.log(((c["agree"] + ALPHA * attr["agree"] / (attr["n"] or 1)) / (n + ALPHA)) / p_nom)
+    if abs(dis - glob) >= 0.5:
+        print(f"*{w}\t{agr:.3f},{dis:.3f}")
+        kept_by += 1
+print(f"adjectives with an agreement of their own: {kept_by}", file=sys.stderr)
 # After a subject: predicates that fit it and don't, against a predicate
 # drawn from anywhere (how often that one would fit the same subject).
 n_pred = sum(predicates.values()) or 1
 chance = {}
 fit = misfit = expected = 0.0
-for (subj, ok), k in after_subject.items():
+imp = {"fit": 0.0, "misfit": 0.0, "expected": 0.0}
+imp_chance = sum(c for rs, c in predicates.items() if any(fits_subject(r, IMPERSONAL) for r in rs)) / n_pred
+for (subj, ok), k in list(after_subject.items()):
+    if len(subj) == 4:
+        imp["fit" if ok else "misfit"] += k
+        imp["expected"] += k * imp_chance
+        continue
     if subj not in chance:
         chance[subj] = sum(c for rs, c in predicates.items()
                            if any(fits_subject(r, subj) for r in rs)) / n_pred
@@ -369,6 +500,67 @@ for v, row in sorted(clause_verb.items()):
     print("%" + v + "\t" + ",".join(f"{x:.3f}" for x in lr))
     kept_cl += 1
 print(f"clauses after a noun phrase {n_cl:.0f}: {kept_cl} verbs of {len(clause_verb)}", file=sys.stderr)
+# Through a preposition, by the verb's sense class (`&class prep`): against
+# the preposition's own frame — what the verb adds.
+kept_th = 0
+for (c, prep), row in sorted(through.items()):
+    n = sum(row)
+    own = gov.get(prep)
+    if n < args.min or not own:
+        continue
+    n_own = sum(own)
+    p_own = [(own[i] + 1) / (n_own + OUTCOMES) for i in range(OUTCOMES)]
+    lr = [math.log((row[i] + ALPHA * p_own[i]) / (n + ALPHA) / p_base[i]) for i in range(OUTCOMES)]
+    print(f"&{c} {prep}\t" + ",".join(f"{x:.3f}" for x in lr))
+    kept_th += 1
+print(f"through prepositions: {kept_th} (class, preposition) of {len(through)}", file=sys.stderr)
+# By the word right before (`^word prep`), when it says something beyond the
+# preposition's own frame (a log ratio 0.7 off it somewhere).
+kept_pa = 0
+for (w, prep), row in sorted(paired.items()):
+    n = sum(row)
+    own = gov.get(prep)
+    if n < args.min or not own:
+        continue
+    n_own = sum(own)
+    p_own = [(own[i] + 1) / (n_own + OUTCOMES) for i in range(OUTCOMES)]
+    lr = [math.log((row[i] + ALPHA * p_own[i]) / (n + ALPHA) / p_base[i]) for i in range(OUTCOMES)]
+    lr_own = [math.log(p_own[i] / p_base[i]) for i in range(OUTCOMES)]
+    if max(abs(a - b) for a, b in zip(lr, lr_own)) < 0.7:
+        continue
+    print(f"^{w} {prep}\t" + ",".join(f"{x:.3f}" for x in lr))
+    kept_pa += 1
+print(f"by the word before: {kept_pa} (word, preposition) of {len(paired)}", file=sys.stderr)
+# After a subject, each kind against anywhere (`@subj`).
+n_s, n_a = sum(subj_kinds.values()) or 1, sum(any_kinds.values()) or 1
+print("@subj\t" + ",".join(
+    f"{math.log((subj_kinds[k] + 1) / n_s / ((any_kinds[k] + 1) / n_a)):.3f}" for k in AFTER_SUBJECT))
+# …and among the kinds a word's own frame lumps as «other» (right after the
+# subject its frame knows the cases and the infinitive): `@subjx`, 0 for the
+# rest.
+OTHER_KINDS = ["predicate", "gerund", "adverb", "linking", "other"]
+s_o = sum(subj_kinds[k] for k in OTHER_KINDS) or 1
+a_o = sum(any_kinds[k] for k in OTHER_KINDS) or 1
+print("@subjx\t" + ",".join(
+    f"{math.log((subj_kinds[k] + 1) / s_o / ((any_kinds[k] + 1) / a_o)):.3f}" if k in OTHER_KINDS else "0.000"
+    for k in AFTER_SUBJECT))
+print("after a subject: " + ", ".join(f"{k} {subj_kinds[k] / n_s:.3f} (anywhere {any_kinds[k] / n_a:.3f})"
+                                      for k in AFTER_SUBJECT), file=sys.stderr)
+# After «X и»: the next noun phrase in X's case, or not, against chance.
+n_c = coord["same"] + coord["other"] or 1
+chance = coord["chance"] / n_c
+print("@coord\t" + ",".join(f"{x:.3f}" for x in (
+    math.log((coord["same"] + 1) / n_c / chance),
+    math.log((coord["other"] + 1) / n_c / (1 - chance)),
+)))
+print(f"after «X и»: {coord['same']} in X's case, {coord['other']} not (chance {chance:.2f})", file=sys.stderr)
+n_imp = imp["fit"] + imp["misfit"]
+print("@impers\t" + ",".join(f"{x:.3f}" for x in (
+    math.log((imp["fit"] + 1) / (imp["expected"] + 1)),
+    math.log((imp["misfit"] + 1) / (n_imp - imp["expected"] + 1)),
+)))
+print(f"impersonal after a genitive and «не» {n_imp:.0f} predicates: {imp['fit']:.0f} fit, "
+      f"{imp['misfit']:.0f} don't ({imp['expected']:.0f} would by chance)", file=sys.stderr)
 print(f"after a subject {n_subj:.0f} predicates: {fit:.0f} fit, {misfit:.0f} don't "
       f"({expected:.0f} would by chance)", file=sys.stderr)
 print(f"{kept} governors of {len(gov)}; after adjectives {attr['n']} words: "

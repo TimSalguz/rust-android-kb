@@ -236,6 +236,11 @@ fn main() {
                 _ => Action::Char(c.to_lowercase().next().unwrap_or(c)),
             };
             let Some((x, y)) = ime.key_center(action) else {
+                // No key of its own here (ё, a hyphen): as its key gives it.
+                if let Action::Char(c) = action {
+                    ime.put_char(c);
+                    field.apply(&ime.take_output());
+                }
                 continue;
             };
             // Noise that lands on another kind of key (⌫, Enter, the strip)

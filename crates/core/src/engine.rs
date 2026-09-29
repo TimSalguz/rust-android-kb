@@ -123,6 +123,8 @@ struct Query {
     /// `kept_del[j]`: extra cost of a word char missing at input column `j`
     /// between two kept letters (see [`Hint::kept`]). Empty: none kept.
     kept_del: Vec<f32>,
+    /// The ids of т, ь, с: ь between т and ся is a spelling slip of its own.
+    tsya: Option<(u8, u8, u8)>,
 }
 
 impl Query {
@@ -179,6 +181,21 @@ impl Query {
                 cost
             })
             .collect();
+        // ь typed between т and ся where the word has none (учиться for
+        // учится): a spelling slip, cheap.
+        let tsya = alphabet::char_to_id('т')
+            .zip(alphabet::char_to_id('ь'))
+            .zip(alphabet::char_to_id('с'))
+            .map(|((t, soft), s)| (t, soft, s));
+        let ya = alphabet::char_to_id('я');
+        if let (Some((t, soft, s)), Some(ya)) = (tsya, ya) {
+            for j in 1..m.saturating_sub(2) {
+                if input[j] == soft && input[j - 1] == t && input[j + 1] == s && input[j + 2] == ya
+                {
+                    ins[j] = ins[j].min(cfg.c_tsya);
+                }
+            }
+        }
         // Letters of different hands swap more easily; nearly simultaneous
         // presses from both hands swap most easily.
         let mut trans: Vec<f32> = (0..=m)
@@ -253,6 +270,7 @@ impl Query {
             max_budget,
             absorb,
             kept_del,
+            tsya,
         }
     }
 }
@@ -325,6 +343,7 @@ pub enum Casing {
     Upper,
 }
 
+mod commas;
 mod context;
 mod decode;
 pub use context::Context;
@@ -612,6 +631,48 @@ impl<D: AsRef<[u8]>> Engine<D> {
         self.frame_at(16, verb)
     }
 
+    /// A preposition's frame by the sense class of the verb it hangs on
+    /// («бежала за [велосипедом]», «заплатила за [велосипед]»): `0, 17,
+    /// class, preposition`.
+    fn through_frame(&self, class: u64, prep: &str) -> Option<crate::gram::Frame> {
+        let c = (class as u16).to_be_bytes();
+        let key = [vec![BIGRAM_SEP, 17, c[0], c[1]], remap(prep)?].concat();
+        let v: [f32; 8] = Self::log_ratios(self.bigrams.as_ref()?.get(key)?);
+        Some(crate::gram::Frame {
+            other: v[0],
+            cases: [v[1], v[2], v[3], v[4], v[5], v[6]],
+            infn: v[7],
+        })
+    }
+
+    /// A preposition's frame by the word right before it («что за
+    /// [головная боль]», «благодарю за [помощь]»): `0, 20, word, 0,
+    /// preposition`.
+    fn paired_frame(&self, word: &str, prep: &str) -> Option<crate::gram::Frame> {
+        let key = [
+            vec![BIGRAM_SEP, 20],
+            remap(word)?,
+            vec![BIGRAM_SEP],
+            remap(prep)?,
+        ]
+        .concat();
+        let v: [f32; 8] = Self::log_ratios(self.bigrams.as_ref()?.get(key)?);
+        Some(crate::gram::Frame {
+            other: v[0],
+            cases: [v[1], v[2], v[3], v[4], v[5], v[6]],
+            infn: v[7],
+        })
+    }
+
+    /// An adjective's own agreement weights (`0, 23, word`): how much likelier
+    /// than anywhere a noun phrase that agrees with it, and one that
+    /// doesn't, comes next.
+    fn attribute_weights(&self, word: &str) -> Option<(f32, f32)> {
+        let key = [vec![BIGRAM_SEP, 23], remap(word)?].concat();
+        let [agree, disagree] = Self::log_ratios::<2>(self.bigrams.as_ref()?.get(key)?);
+        Some((agree, disagree))
+    }
+
     /// A frame kept under `0, space, word`.
     fn frame_at(&self, space: u8, word: &str) -> Option<crate::gram::Frame> {
         let key = [vec![BIGRAM_SEP, space], remap(word)?].concat();
@@ -639,6 +700,24 @@ impl<D: AsRef<[u8]>> Engine<D> {
             base_infn: v[4],
             subject_fits: if subject { v[5] } else { 0.0 },
             subject_misfits: if subject { v[6] } else { -1.0 },
+            after_subject: self
+                .bigrams
+                .as_ref()?
+                .get([BIGRAM_SEP, 18])
+                .map(Self::log_ratios::<8>),
+            after_subject_other: self
+                .bigrams
+                .as_ref()?
+                .get([BIGRAM_SEP, 21])
+                .map(Self::log_ratios::<8>),
+            coord: self.bigrams.as_ref()?.get([BIGRAM_SEP, 19]).map(|v| {
+                let [same, other] = Self::log_ratios::<2>(v);
+                (same, other)
+            }),
+            impersonal: self.bigrams.as_ref()?.get([BIGRAM_SEP, 22]).map(|v| {
+                let [fit, misfit] = Self::log_ratios::<2>(v);
+                (fit, misfit)
+            }),
         })
     }
 
@@ -692,12 +771,44 @@ impl<D: AsRef<[u8]>> Engine<D> {
         Some((v / 2 - 1, v % 2 == 0))
     }
 
+    /// The words `word` forms a confusion pair with (docs/rules-format.md):
+    /// the next word may speak for one of them (к / ко мне, раненый /
+    /// раненный осколком).
+    pub fn partners(&self, word: &str) -> Vec<String> {
+        use fst::{IntoStreamer, Streamer};
+        let (Some(bigrams), Some(ids)) = (self.bigrams.as_ref(), remap(word)) else {
+            return Vec::new();
+        };
+        let lo = [vec![BIGRAM_SEP, 7], ids, vec![BIGRAM_SEP]].concat();
+        let mut hi = lo.clone();
+        *hi.last_mut().unwrap() += 1;
+        let mut out = Vec::new();
+        let mut stream = bigrams.range().ge(&lo).lt(&hi).into_stream();
+        while let Some((key, _)) = stream.next() {
+            out.push(alphabet::ids_to_string(&key[lo.len()..]));
+        }
+        out
+    }
+
     /// What the next word says about `typed` vs `alt` when the two are a
     /// confusion pair: the strongest matching rule's evidence (log
     /// likelihood ratio, nats) — positive for `alt`, negative for `typed`,
     /// 0 without a rule. Rules sit under `0, 6, pair id (3 bytes), feature`
     /// as `member·100000 + strength·1000`.
     pub fn next_evidence(&self, typed: &str, alt: &str, next: &str) -> f32 {
+        // «о» before a vowel sound is «об» (об этом, об успехе) — by the
+        // sound, not by the word: no list of words holds them all. (Back,
+        // «об» → «о», is left to the rules: «об стену» is right too.)
+        if (typed, alt) == ("о", "об") {
+            let vowel = next
+                .chars()
+                .next()
+                .and_then(|c| c.to_lowercase().next())
+                .is_some_and(|c| "аоуэиы".contains(c));
+            if vowel {
+                return 6.0;
+            }
+        }
         let (Some(bigrams), Some((id, typed_first))) =
             (self.bigrams.as_ref(), self.pair(typed, alt))
         else {
@@ -839,6 +950,27 @@ impl<D: AsRef<[u8]>> Engine<D> {
         }
         out.sort_by(|a, b| a.cost.total_cmp(&b.cost));
         out
+    }
+
+    /// `word` written with its ё (еще → ещё, пошел → пошёл) where the е-form
+    /// is only a spelling of the ё-word (tools/yo_words.py, `0, 24, word`):
+    /// None where there is none, or where е and ё make two words (небе /
+    /// нёбе, все / всё — the context's to decide).
+    pub fn yo_form(&self, word: &str) -> Option<String> {
+        let key = [vec![BIGRAM_SEP, 24], remap(word)?].concat();
+        let mask = self.bigrams.as_ref()?.get(key)?;
+        Some(
+            word.chars()
+                .enumerate()
+                .map(|(i, c)| {
+                    if i < 64 && mask >> i & 1 == 1 {
+                        'ё'
+                    } else {
+                        c
+                    }
+                })
+                .collect(),
+        )
     }
 
     /// The prior cost `w_lm·(−log P(word))` of a dictionary word, if it is one.
@@ -1440,11 +1572,21 @@ impl<D: AsRef<[u8]>> Engine<D> {
         // Letters swallowed by a held key are cheap to be missing.
         let absorb =
             (!q.absorb.is_empty()).then(|| &q.absorb[c as usize * w..(c as usize + 1) * w]);
+        // ь left out between т and ся (учится typed for учиться).
+        let tsya = q
+            .tsya
+            .filter(|&(t, soft, _)| c == soft && last == t)
+            .map(|(_, _, s)| s);
         let del_at = |j: usize| {
             let d = if absorb.is_some_and(|a| a[j]) {
                 del.min(cfg.c_del_held)
             } else {
                 del
+            };
+            let d = if tsya.is_some_and(|s| q.input.get(j) == Some(&s)) {
+                d.min(cfg.c_tsya)
+            } else {
+                d
             };
             d + q.kept_del.get(j).copied().unwrap_or(0.0)
         };
@@ -1920,6 +2062,61 @@ mod tests {
         wide.weigh(&ctx, &mut all);
         assert_eq!(all[0].word, "кот");
         assert!((all[0].cost - got[0].cost).abs() < 1e-3, "{all:?} {got:?}");
+    }
+
+    #[test]
+    fn a_preposition_takes_its_case_from_the_verb() {
+        // «бежала за [велосипедом]»: after verbs of running «за» takes the
+        // instrumental (sense class 7), by itself it might be either.
+        let e = engine_vals(&[
+            ("бежала", 6000),
+            ("за", 3000),
+            ("велосипед", 8000),
+            ("велосипедом", 9000),
+        ]);
+        let id = |w: &str| -> Vec<u8> {
+            w.chars()
+                .map(|c| alphabet::char_to_id(c).unwrap())
+                .collect()
+        };
+        let parse = crate::gram::parse;
+        let byte = |x: f32| ((x / 0.05).round() + 128.0) as u64;
+        let frame = |v: [f32; 8]| {
+            v.iter()
+                .enumerate()
+                .fold(0u64, |a, (i, x)| a | byte(*x) << (8 * i))
+        };
+        let word = |w: &str, set: u64| ([vec![0, 3], id(w)].concat(), 1 | set << 16);
+        let mut kv = vec![
+            word("бежала", 1),
+            word("за", 2),
+            word("велосипед", 3),
+            word("велосипедом", 4),
+            (vec![0, 9, 0, 1, 0], parse("VERB,femn,sing,past")),
+            (vec![0, 9, 0, 2, 0], parse("PREP")),
+            (vec![0, 9, 0, 3, 0], parse("NOUN,inan,masc,sing,nomn")),
+            (vec![0, 9, 0, 3, 1], parse("NOUN,inan,masc,sing,accs")),
+            (vec![0, 9, 0, 4, 0], parse("NOUN,inan,masc,sing,ablt")),
+            ([vec![0, 13], id("бежала")].concat(), 7),
+            (
+                [vec![0, 17, 0, 7], id("за")].concat(),
+                frame([-2.6, -0.7, -1.0, 0.4, 0.1, 2.6, -1.0, -3.0]),
+            ),
+        ];
+        kv.sort();
+        let e = e.with_bigrams(Map::from_iter(kv).unwrap());
+        let phrase = ["бежала".to_string(), "за".to_string()];
+        let ctx = e.context(Some("за"), &phrase, &[]);
+        let mut cands: Vec<Candidate> = ["велосипед", "велосипедом"]
+            .iter()
+            .map(|w| Candidate {
+                word: w.to_string(),
+                cost: e.word_cost(w).unwrap(),
+                edit: 0.0,
+            })
+            .collect();
+        e.weigh(&ctx, &mut cands);
+        assert_eq!(cands[0].word, "велосипедом", "{cands:?}");
     }
 
     #[test]

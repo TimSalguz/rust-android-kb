@@ -6,9 +6,10 @@ Usage: tools/confusion_sets.py [--lexicon data/lexicon.tsv] [--top 80000]
 
 Frequent words that one slip turns into each other on the phone keyboard — a
 letter replaced by a neighboring key (из/их, а/в, не/ее) — or that draw the
-same gesture path (a doubled letter: ввод/вод), or that differ in an accent
-only, which people often leave out (el/él, esta/está, ou/où). One set per
-such pair. `--rows` gives the layout of a language pack (its rows, centered);
+same gesture path (a doubled letter: ввод/вод; н/нн: раненый/раненный), or
+that differ in an accent only, which people often leave out (el/él,
+esta/está, ou/où); then spelling pairs (к/ко, с/со…, -тся/-ться, не/ни). One
+set per such pair. `--rows` gives the layout of a language pack (its rows, centered);
 by default ЙЦУКЕН and QWERTY.
 """
 import unicodedata
@@ -99,3 +100,25 @@ pairs = sorted(
 for a, b in pairs:
     print(f"{a}\t{b}")
 print(f"{len(pairs)} pairs over the top {len(top)} words", file=sys.stderr)
+
+# Spelling pairs, after the slips (their ids stay as they were): a
+# preposition and its form with о before some consonant clusters (к тебе, ко
+# мне — the next word decides), -тся / -ться (он учится, хочет учиться), не /
+# ни (ни разу, не раз).
+PREPOSITIONS = [("в", "во"), ("с", "со"), ("к", "ко"), ("о", "об"), ("об", "обо"), ("о", "обо"),
+                ("из", "изо"), ("от", "ото"), ("над", "надо"), ("под", "подо"),
+                ("перед", "передо"), ("без", "безо"), ("не", "ни")]
+seen = set(pairs)
+spelling = []
+for a, b in PREPOSITIONS:
+    if a in known and b in known:
+        spelling.append((a, b))
+for w in top:
+    if w.endswith("тся") and re.search("[а-яё]", w):
+        v = w[:-3] + "ться"
+        if v in known:
+            spelling.append(tuple(sorted((w, v), key=rank.get)))
+spelling = [p for p in dict.fromkeys(spelling) if p not in seen and (p[1], p[0]) not in seen]
+for a, b in spelling:
+    print(f"{a}\t{b}")
+print(f"{len(spelling)} spelling pairs", file=sys.stderr)

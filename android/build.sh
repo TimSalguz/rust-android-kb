@@ -50,6 +50,7 @@ if [ -s data/bigrams.tsv ]; then
         $([ -s data/frames.tsv ] && echo --frames data/frames.tsv) \
         $([ -s data/topic_words.tsv ] && echo --topics data/topic_words.tsv --topic-pairs data/topic_pairs.tsv) \
         $([ -s data/commas.tsv ] && echo --commas data/commas.tsv) \
+        $([ -s data/yo.tsv ] && echo --yo data/yo.tsv) \
         $([ -s data/rules.tsv ] && echo --rules data/confusions.tsv data/rules.tsv)
 fi
 
