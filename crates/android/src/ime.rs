@@ -522,6 +522,9 @@ pub struct Ime<D: AsRef<[u8]>> {
     /// wasn't edited since: ⌫ takes it whole, punctuation after it brings a
     /// space, and it goes into the text with it.
     drawn: Option<Way>,
+    /// The strip shows the readings of the word just drawn (in the text with
+    /// its space): a tap puts one in its place, ⌫ takes the word whole.
+    variants_shown: bool,
     /// The app's own test field has focus.
     own_field: bool,
     /// The calibration / reset stamps last seen in the settings (None before
@@ -839,6 +842,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
             alternatives: Vec::new(),
             chosen: None,
             drawn: None,
+            variants_shown: false,
             popup: None,
             own_field: false,
             seen_stamps: None,
@@ -2861,6 +2865,14 @@ impl<D: AsRef<[u8]>> Ime<D> {
             return;
         }
         if self.suggest && self.is_word_char(c) {
+            // The cursor put back at a word's end: the letters go on with it
+            // (the whole word is read, not what's typed from here) — not in
+            // the middle of one.
+            let at_end = self.before.chars().last().is_some_and(char::is_alphabetic)
+                && !self.after.chars().next().is_some_and(char::is_alphabetic);
+            if self.word.is_empty() && at_end {
+                self.resume_word();
+            }
             if self.word.is_empty() {
                 self.clean = true;
                 self.restored = false;
@@ -3565,9 +3577,29 @@ impl<D: AsRef<[u8]>> Ime<D> {
     }
 
     fn backspace(&mut self) {
-        self.auto_space = false;
+        // Right after a drawn word went in with its space (nothing since).
+        let after_drawn = std::mem::take(&mut self.auto_space);
+        self.variants_shown = false;
         self.last_bksp = Some(self.now_ms);
         if self.take_comma() {
+            return;
+        }
+        let drawn_in = after_drawn
+            .then(|| self.prev_here())
+            .flatten()
+            .filter(|p| matches!(p.input, Input::Drawn { .. }))
+            .map(|p| p.committed.chars().count() + 1);
+        if let (Some(n), true) = (drawn_in, self.word.is_empty()) {
+            // A word drawn and put in with its space: ⌫ takes both — it was
+            // read, not typed.
+            self.log_event("bksp", &[("drawn", "true".into())]);
+            self.out.push(Op::Delete(n));
+            for _ in 0..n {
+                self.before.pop();
+            }
+            self.prev_word = None;
+            self.update_shift();
+            self.refresh_predictions();
             return;
         }
         if self.selected && self.word.is_empty() {
@@ -3924,7 +3956,40 @@ impl<D: AsRef<[u8]>> Ime<D> {
         self.drawn = Some((trail.to_vec(), ms.to_vec()));
         self.shown = word.clone();
         self.out.push(Op::Composing(word.clone()));
-        self.gesture_strip();
+        // It goes in with its space: the next word starts after it (a space
+        // tapped next isn't doubled, punctuation takes the space's place);
+        // its other readings stay in the strip.
+        self.space();
+        self.auto_space = true;
+        self.variant_strip();
+    }
+
+    /// Right after a drawn word went in: its other readings in the strip,
+    /// the word itself in the center — a tap puts one in its place.
+    fn variant_strip(&mut self) {
+        self.variants_shown = false;
+        let Some(p) = self.prev_here() else {
+            return;
+        };
+        if p.variants.len() < 2 || self.settings.strip == Strip::Off {
+            return;
+        }
+        let current = p.committed.clone();
+        let others: Vec<String> = p
+            .variants
+            .iter()
+            .map(|w| self.cased(&p.typed, w))
+            .filter(|w| *w != current)
+            .collect();
+        self.slots = match self.settings.strip {
+            Strip::Two => [others.first().cloned(), Some(current), None],
+            _ => [
+                others.first().cloned(),
+                Some(current),
+                others.get(1).cloned(),
+            ],
+        };
+        self.variants_shown = true;
     }
 
     /// The strip for a drawn word: the word itself in the center (as it is
@@ -4090,7 +4155,26 @@ impl<D: AsRef<[u8]>> Ime<D> {
             }
         }
         let variant = (prev.variant as i32 + step).rem_euclid(variants.len() as i32) as usize;
-        let next = self.cased(&typed, &variants[variant]);
+        if let Some(p) = self.prev_word.as_mut() {
+            p.variants = variants;
+        }
+        self.put_variant(variant);
+    }
+
+    /// The previous word's reading `variant` (of its variants) in its place.
+    fn put_variant(&mut self, variant: usize) {
+        let Some(prev) = self.prev_here() else {
+            return;
+        };
+        let (typed, committed, variants) = (
+            prev.typed.clone(),
+            prev.committed.clone(),
+            prev.variants.clone(),
+        );
+        let Some(word) = variants.get(variant) else {
+            return;
+        };
+        let next = self.cased(&typed, word);
         self.log_event("variant", &[("word", jstr(&next))]);
         let n = committed.chars().count() + 1;
         self.out.push(Op::Delete(n));
@@ -4270,6 +4354,16 @@ impl<D: AsRef<[u8]>> Ime<D> {
             self.forget_spot();
             self.update_shift();
             return;
+        }
+        if std::mem::take(&mut self.variants_shown) && self.word.is_empty() {
+            let at = self
+                .prev_here()
+                .and_then(|p| p.variants.iter().position(|w| self.cased(&p.typed, w) == s));
+            if let Some(i) = at {
+                self.put_variant(i);
+                self.variant_strip();
+                return;
+            }
         }
         if let Some(m) = self.merge.clone().filter(|_| s.starts_with(MERGE_MARK)) {
             self.apply_merge(m);
@@ -6297,25 +6391,39 @@ mod tests {
             ("приват", 9000),
         ]);
         swipe(&mut k, "привет");
-        assert_eq!(k.word, "Привет", "sentence start: a capital");
+        // In with its space; its other readings in the strip.
+        assert_eq!(k.before, "Привет ", "sentence start: a capital");
+        assert!(k.word.is_empty());
         assert!(
             k.slots.iter().flatten().any(|s| s == "Приват"),
             "{:?}",
             k.slots
         );
-        // The next one finishes the first, with a space.
-        swipe(&mut k, "как");
+        // A tap on one puts it in the word's place.
+        let at = k.slots.iter().position(|s| s.as_deref() == Some("Приват"));
+        k.pick_slot(at.unwrap());
+        assert_eq!(k.before, "Приват ");
+        k.pick_slot(
+            k.slots
+                .iter()
+                .position(|s| s.as_deref() == Some("Привет"))
+                .unwrap(),
+        );
         assert_eq!(k.before, "Привет ");
-        assert_eq!(k.word, "как");
+        // The next one goes after it; a space tapped then isn't doubled.
+        swipe(&mut k, "как");
+        assert_eq!(k.before, "Привет как ");
         type_str(&mut k, " ");
         assert_eq!(k.before, "Привет как ");
+        // Letters typed after a drawn word begin the next one.
+        type_str(&mut k, "дела ");
+        assert_eq!(k.before, "Привет как дела ");
     }
 
     #[test]
     fn a_drawn_word_keeps_its_way() {
         let mut k = ime(&[("привет", 3000), ("как", 2500), ("приват", 9000)]);
         swipe(&mut k, "привет");
-        swipe(&mut k, "как");
         // In the text it is read again from the way it was drawn, not as if
         // its letters were typed.
         let w = k.written.last().unwrap();
@@ -6329,6 +6437,25 @@ mod tests {
             "{:?}",
             prev.alts
         );
+    }
+
+    #[test]
+    fn a_word_goes_on_where_the_cursor_is_put_back() {
+        let mut k = ime(&[("привет", 3000), ("как", 2500)]);
+        type_str(&mut k, "прив");
+        // The cursor away and back to the end of «Прив»: the letters typed
+        // then go on with it — the whole word is read, not «ет».
+        k.selection(0, 0, -1, -1, "", "Прив", None);
+        k.selection(4, 4, -1, -1, "Прив", "", None);
+        type_str(&mut k, "ет");
+        assert_eq!(k.word, "Привет");
+        type_str(&mut k, " ");
+        assert_eq!(k.before, "Привет ");
+        // Not in the middle of a word: there a letter is only inserted.
+        k.start_input("", 1);
+        k.selection(2, 2, -1, -1, "Пр", "вет", None);
+        type_str(&mut k, "и");
+        assert_eq!(k.word, "и");
     }
 
     #[test]
@@ -6352,15 +6479,17 @@ mod tests {
         let mut k = ime(&[("привет", 3000), ("как", 2500)]);
         type_str(&mut k, "как ");
         swipe(&mut k, "привет");
+        assert_eq!(k.before, "Как привет ");
         k.take_ops();
+        // ⌫ right after: the word and its space.
         type_str(&mut k, "⌫");
         assert!(k.word.is_empty());
-        assert_eq!(k.take_ops(), vec![Op::Composing(String::new())]);
+        assert_eq!(k.take_ops(), vec![Op::Delete(7)]);
         assert_eq!(k.before, "Как ");
-        // Letters typed after a drawn word make it an ordinary one.
+        // Not once something else was typed: then ⌫ is a letter's.
         swipe(&mut k, "привет");
         type_str(&mut k, "ы⌫");
-        assert_eq!(k.word, "привет");
+        assert_eq!(k.before, "Как привет ");
     }
 
     #[test]
@@ -6749,9 +6878,8 @@ mod tests {
         assert!(k.word.is_empty(), "nothing in the text yet");
         let (x, y) = pts[2];
         k.touch(UP, 0, x, y, t + 500);
-        let drawn = k.word.clone();
-        assert!(!drawn.is_empty());
-        // Committed: the swipe up goes round the other readings of the way.
+        assert!(!k.before.trim().is_empty(), "in, with its space");
+        // The swipe up goes round the other readings of the way.
         type_str(&mut k, " ");
         let first = k.before.clone();
         k.next_variant();

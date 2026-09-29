@@ -61,7 +61,10 @@ memory-mapped files. See [`docs/DESIGN.md`](docs/DESIGN.md)
 - **Swipe typing** without third-party libraries: the path is matched against
   the dictionary by a branch-and-bound walk (~0.4 ms). Where the finger
   stopped or flew past a key is a hint too (a setting): +2–3 points top-1 on
-  simulated swipes (`examples/swipesim.rs`, `PACE=corners`).
+  simulated swipes (`examples/swipesim.rs`, `PACE=corners`). A drawn word goes
+  in with its space; its other readings stay in the strip (a tap, or a swipe
+  up on the space bar, puts one in its place) and ⌫ right after takes the
+  word whole.
 - **Commas:** learned from text — the odds of a comma between two words by
   the word after («что», «но», «который»), the word before («например») and
   the pair; one almost surely due goes in by itself (98–99% right on held-out
