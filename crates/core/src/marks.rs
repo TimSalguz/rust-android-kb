@@ -156,12 +156,14 @@ fn tag(word: &str, readings: &[u64], rel: &str) -> Tag {
             "root" | "conj" | "advcl" | "ccomp" | "acl" | "parataxis" | "csubj" | "xcomp" | "cop" | "aux"
         )
     {
+        // (A copula or an auxiliary is a verb to the rules: «был» in «у нее был».)
         verb(&mut t, Form::Fin);
         return t;
     }
+    // A pronoun's reading first: «нее» is «она», not the rare noun «нея».
     let order = [
-        (NOUN, Pos::Noun),
         (NPRO, Pos::Pron),
+        (NOUN, Pos::Noun),
         (ADJF, Pos::Adj),
         (ADJS, Pos::Adj),
         (NUMR, Pos::Num),

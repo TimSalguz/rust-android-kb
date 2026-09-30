@@ -16,12 +16,13 @@ SUBORDINATING = {"что", "чтобы", "если", "когда", "потому
 CASES = {"nomn": "Nom", "gent": "Gen", "gen2": "Gen", "datv": "Dat", "accs": "Acc", "acc2": "Acc",
          "ablt": "Ins", "loct": "Loc", "loc2": "Loc", "voct": "Voc"}
 
+ROOT = __import__("os").path.dirname(__import__("os").path.dirname(__import__("os").path.abspath(__file__)))
 sets = {}
-for line in open("data/readings.tsv", encoding="utf-8"):
+for line in open(f"{ROOT}/data/readings.tsv", encoding="utf-8"):
     i, tags = line.rstrip("\n").split("\t")
     sets[i] = [t.split(",") for t in tags.split("|")]
 word_set = {}
-for line in open("data/word_readings.tsv", encoding="utf-8"):
+for line in open(f"{ROOT}/data/word_readings.tsv", encoding="utf-8"):
     w, i = line.rstrip("\n").split("\t")
     word_set[w] = i
 
@@ -53,10 +54,12 @@ def tag(word, rel):
         return "VERB", feats
     if "INFN" in pos and base in ("xcomp", "csubj", "advcl", "acl", "ccomp", "root", "conj", "nsubj", "obj"):
         return "VERB", {"VerbForm": "Inf"}
-    if "VERB" in pos and base in ("root", "conj", "advcl", "ccomp", "acl", "parataxis", "csubj", "xcomp",
-                                  "cop", "aux"):
+    if base in ("cop", "aux") and "VERB" in pos:
+        return "AUX", {"VerbForm": "Fin"}
+    if "VERB" in pos and base in ("root", "conj", "advcl", "ccomp", "acl", "parataxis", "csubj", "xcomp"):
         return "VERB", {"VerbForm": "Fin"}
-    for want, upos in (("NOUN", "NOUN"), ("NPRO", "PRON"), ("ADJF", "ADJ"), ("ADJS", "ADJ"),
+    # A pronoun's reading first: «нее» is «она», not the rare noun «нея».
+    for want, upos in (("NPRO", "PRON"), ("NOUN", "NOUN"), ("ADJF", "ADJ"), ("ADJS", "ADJ"),
                        ("NUMR", "NUM"), ("ADVB", "ADV"), ("PREP", "ADP"), ("PRCL", "PART"),
                        ("INTJ", "INTJ"), ("PRED", "ADV"), ("COMP", "ADV"), ("CONJ", "CCONJ")):
         if want in pos:
@@ -75,8 +78,13 @@ def tag(word, rel):
     return ("PROPN" if not readings else "X"), feats
 
 
-src, dst = sys.argv[1:3]
-with open(dst, "w", encoding="utf-8") as out:
+def main():
+    src, dst = sys.argv[1:3]
+    with open(dst, "w", encoding="utf-8") as out:
+        retag(src, out)
+
+
+def retag(src, out):
     for line in open(src, encoding="utf-8"):
         f = line.rstrip("\n").split("\t")
         words, rels = f[1].split(), f[4].split()
@@ -86,3 +94,7 @@ with open(dst, "w", encoding="utf-8") as out:
         f[2] = " ".join(u for u, _ in tagged)
         f[5] = "|".join(";".join(f"{k}={v}" for k, v in fs.items()) or "_" for _, fs in tagged)
         out.write("\t".join(f) + "\n")
+
+
+if __name__ == "__main__":
+    main()
