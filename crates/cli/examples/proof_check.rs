@@ -31,6 +31,14 @@ fn main() {
     let head_levels = [0.5f32, 0.6, 0.7, 0.8, 0.9, 0.95];
     let mut head_alone = vec![(0usize, 0usize); head_levels.len()];
     let mut head_with = vec![(0usize, 0usize); head_levels.len()];
+    // The rules and the head both for it: a rule's comma (≥ 0.8) the head
+    // gives at least t, whatever the model says.
+    let mut both_say = vec![(0usize, 0usize); head_levels.len()];
+    // The head's say over the rules instead of the comma model's: a comma
+    // when the head is sure (≥ h), or a rule is (≥ 0.8) and the head not
+    // against it (≥ v).
+    let (hs, vs) = ([0.6f32, 0.7, 0.8], [0.1f32, 0.2, 0.3, 0.4]);
+    let mut headed = vec![vec![(0usize, 0usize); vs.len()]; hs.len()];
     let mut model = (0usize, 0usize);
     // Where the graph is sure (≥ 0.95) and the model mildly against (odds in
     // [-3, 0)): how right each rule is.
@@ -151,7 +159,8 @@ fn main() {
                                   ("parenthetical", -1.0)];
                     let less = [("subordinate", 0.6, 1.0), ("subordinate first", 0.6, 1.0),
                                 ("address", 0.6, 0.0), ("address", 0.9, -1.0)];
-                    let trusted = graph[i].is_some_and(|c| c >= 0.95)
+                    let trusted = graph[i].is_some_and(|c| c >= 0.8) && learned[i] >= 0.5
+                        || graph[i].is_some_and(|c| c >= 0.95)
                         && floors.iter().any(|&(r, f)| r == rule[i] && odds[i] >= f)
                         || graph[i].is_some_and(|c| {
                             less.iter().any(|&(r, gg, o)| r == rule[i] && c >= gg && odds[i] >= o)
@@ -161,7 +170,24 @@ fn main() {
                         paired[k][j].1 += right;
                     }
                     if g == 0.8 && m == 0.0 {
+                        for (a, &h) in hs.iter().enumerate() {
+                            for (b, &v) in vs.iter().enumerate() {
+                                let by_rule = graph[i].is_some_and(|c| c >= 0.8) && learned[i] >= v;
+                                if learned[i] >= h || by_rule {
+                                    headed[a][b].0 += 1;
+                                    headed[a][b].1 += right;
+                                }
+                            }
+                        }
+                    }
+                    if g == 0.8 && m == 0.0 {
                         let policy = (put || partner || trusted || sure) && rule[i] != "learned";
+                        for (h, &t) in [0.3f32, 0.4, 0.5, 0.6, 0.7, 0.8].iter().enumerate() {
+                            if graph[i].is_some_and(|c| c >= 0.8) && learned[i] >= t {
+                                both_say[h].0 += 1;
+                                both_say[h].1 += right;
+                            }
+                        }
                         for (h, &t) in head_levels.iter().enumerate() {
                             let by_head = learned[i] >= t;
                             if by_head {
@@ -208,6 +234,18 @@ fn main() {
         for (h, t) in head_levels.iter().enumerate() {
             println!("  {t:>5.2}  {}   {}", pct(head_alone[h]), pct(head_with[h]));
         }
+    }
+    println!("the head sure (≥ h), or a rule (≥ 0.8) the head isn't against (≥ v) — put, right, found:");
+    for (a, h) in hs.iter().enumerate() {
+        print!("  h {h:.1}");
+        for (b, v) in vs.iter().enumerate() {
+            print!("   v {v:.1}: {}", pct(headed[a][b]));
+        }
+        println!();
+    }
+    println!("a rule's comma (≥ 0.8) the head gives at least t (0.3, 0.4, …, 0.8):");
+    for (h, t) in [0.3f32, 0.4, 0.5, 0.6, 0.7, 0.8].iter().enumerate() {
+        println!("  {t:>5.2}  {}", pct(both_say[h]));
     }
     println!("commas of the text not put ({} put), by why and the next word's relation:", put_n);
     let mut by_why: std::collections::BTreeMap<&str, usize> = Default::default();

@@ -366,12 +366,23 @@ const PROOF_LESS_SURE: &[(&str, f32, f32)] = &[
 /// No comma the graph is less sure of than this is looked at.
 const PROOF_LEAST: f32 = 0.6;
 /// A comma the parser's comma head puts by itself (the rules or not): from
-/// this chance on. The head reads the whole sentence without its commas
-/// and says where they stand; with the rules' commas besides, on held-out
-/// sentences: news 92.0% right, 74.3% of the commas found (the rules
-/// alone: 95.0%, 45.5%); news and prose 87.9%, 73.5%; chat-like 99.4%,
-/// 95.2%. The suite: 84 of 88, none put wrong.
+/// this chance on. The head reads the whole sentence without its commas and
+/// says where they stand; it also judges the rules' commas (see
+/// [`PROOF_HEAD_VETO`]). On held-out sentences: news 92.4% right, 76.3% of
+/// the commas found (the rules and the comma model alone: 95.0%, 45.5%);
+/// news and prose 88.9%, 75.5%; chat-like 99.3%, 95.9%; two clauses 97.7%,
+/// 93.8%. The suite: 87 of 88, none put wrong.
 const PROOF_LEARNED: f32 = 0.7;
+/// A rule's comma the graph is sure of (≥ [`PROOF_SURE`]) with the comma
+/// head at least this for it: two voices, whatever the comma model says —
+/// on held-out news 95.6% right, news and prose 93.4%.
+const PROOF_AGREE: f32 = 0.5;
+/// The comma head, not the comma model, says whether a rule's comma stands:
+/// unless the head gives it under [`PROOF_VETO`]. The comma model threw out
+/// more right commas than wrong ones (on held-out news 546 and 179); the
+/// head is right more often than it.
+const PROOF_HEAD_VETO: bool = true;
+const PROOF_VETO: f32 = 0.3;
 /// The rules' commas besides the comma head's (it alone is better: see above).
 const PROOF_RULES: bool = true;
 
@@ -3639,7 +3650,11 @@ impl<D: AsRef<[u8]>> Ime<D> {
         }
         let cands: Vec<Cand> = put
             .iter()
-            .filter(|p| p.mark == Mark::Comma && p.before > 0 && p.chance >= PROOF_LEAST)
+            .filter(|p| {
+                p.mark == Mark::Comma
+                    && p.before > 0
+                    && (p.chance >= PROOF_LEAST || p.learned >= PROOF_LEARNED)
+            })
             .filter_map(|p| {
                 let (prev, next) = (&sent[p.before - 1], &sent[p.before]);
                 let pair = (prev.text.to_lowercase(), next.text.to_lowercase());
@@ -3673,8 +3688,16 @@ impl<D: AsRef<[u8]>> Ime<D> {
             if c.learned >= PROOF_LEARNED {
                 return true;
             }
+            if PROOF_HEAD_VETO {
+                // The head judges the rules: a rule's comma stands unless the
+                // head is against it.
+                return PROOF_RULES && c.rule != "learned" && c.chance >= PROOF_SURE && c.learned >= PROOF_VETO;
+            }
             if c.rule == "learned" || !PROOF_RULES {
                 return false;
+            }
+            if c.chance >= PROOF_SURE && c.learned >= PROOF_AGREE {
+                return true;
             }
             c.chance >= PROOF_SURE && c.odds >= PROOF_ODDS
                 || c.floor.is_some_and(|f| c.odds >= f)
@@ -3692,7 +3715,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
             // sure rule's pair on a firmer «no» only.
             let opened = cands.iter().filter(pair_of).any(|o| o.there || alone(o) && c.floor.is_some());
             let partner = cands.iter().filter(pair_of).any(|o| alone(o));
-            let sure = c.chance >= PROOF_SURE && c.rule != "learned" && PROOF_RULES;
+            let sure = c.chance >= PROOF_SURE && c.rule != "learned" && PROOF_RULES && !PROOF_HEAD_VETO;
             if alone(c) || sure && (c.odds >= PROOF_RESCUE && partner || c.odds >= PROOF_OPENED && opened) {
                 at.push((c.pos, c.pair.clone()));
             }

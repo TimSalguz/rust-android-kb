@@ -460,15 +460,26 @@ pub fn place(
                 }
                 None => set(start, "listed", i),
                 Some(c) => {
+                    // Two clauses, each with its own subject, and nothing
+                    // before the first one's verb but its subject that both
+                    // might share («Вчера шёл дождь и дул ветер»: no comma).
                     let joined_clauses = s.clause(i)
                         && s.clause(head)
                         && s.has_kid(i, "nsubj")
                         && head >= 1
-                        && s.has_kid(head, "nsubj");
+                        && s.has_kid(head, "nsubj")
+                        && !s.kids[head]
+                            .iter()
+                            .any(|&k| k < head && !matches!(s.rel(k), "nsubj" | "cc" | "punct" | "mark"));
+                    // «и…, и…»: the same joining word before the first part too
+                    // (whatever it hangs on).
                     let repeated = s.kids.get(head).is_some_and(|ks| {
                         ks.iter()
                             .any(|&k| k < head && s.rel(k) == "cc" && s.word(k) == s.word(c))
-                    });
+                    }) || {
+                        let hlo = s.span(head).0;
+                        hlo > 1 && hlo < c && s.word(hlo - 1) == s.word(c)
+                    };
                     if joined_clauses {
                         set(start, "clauses и", i);
                     } else if repeated {

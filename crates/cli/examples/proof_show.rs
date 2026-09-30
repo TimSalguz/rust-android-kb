@@ -60,11 +60,12 @@ fn main() {
                         })
                         .flatten();
                     println!(
-                        "  {:?} before «{}»: sure {:.2} ({}), comma odds {}",
+                        "  {:?} before «{}»: sure {:.2} ({}), head {:.2}, comma odds {}",
                         m.mark,
                         lower.get(m.before).map_or("", String::as_str),
                         m.chance,
                         m.rule,
+                        m.learned,
                         odds.map_or("—".into(), |o| format!("{o:.2}"))
                     );
                 }
@@ -83,5 +84,11 @@ fn main() {
             })
             .collect();
         println!("  comma odds: {}", gaps.join(", "));
+        if !graph.commas.is_empty() {
+            let head: Vec<String> = (1..lower.len())
+                .map(|i| format!("{}|{} {:.2}", lower[i - 1], lower[i], graph.commas[i]))
+                .collect();
+            println!("  comma head: {}", head.join(", "));
+        }
     }
 }
