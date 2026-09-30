@@ -76,3 +76,23 @@ Known bias: subtitles are mostly translated films, so some everyday words are
 underweighted (москва: 477). A broader frequency source would help.
 
 The derived lexicon is distributed under CC BY-SA 4.0.
+
+## Models: `lemmas.bin`, `chooser.bin`, `parser.bin`
+
+Learned weights that ship next to the dictionary, and what they learned from:
+
+| file | what | learned from | license |
+|------|------|--------------|---------|
+| `lemmas.bin` | lemma vectors: how likely one lemma follows another (`tools/lemma_vectors.py`) | lemmatized sentences of the Leipzig Corpora Collection (rus news 2022, Wikipedia 2021, web-public 2019; © Universität Leipzig / SAW / InfAI, CC BY) and Tatoeba (CC BY 2.0 FR), lemmas by the OpenCorpora dictionary (CC BY-SA 3.0) | CC BY-SA 4.0 |
+| `chooser.bin` | the chooser among the search's candidates (`tools/chooser.py`) | the same corpora typed through the keyboard's own engine (`tools/chooser_data.py`), on the lemma vectors above | CC BY-SA 4.0 |
+| `parser.bin` | the sentence parser: each word's head and relation (`tools/graph_parser.py`) | sentences of Tatoeba (CC BY 2.0 FR) and, in later versions, of the Leipzig corpora above and Russian classic prose from Wikisource (public domain; «Война и мир» never), parsed by [Stanza](https://stanfordnlp.github.io/stanza/) (Apache-2.0; its Russian models learned from the Universal Dependencies treebank UD_Russian-SynTagRus, CC BY-SA 4.0) as the teacher; words read through the lemma vectors and the OpenCorpora readings | CC BY-SA 4.0 |
+
+The weights are distributed under CC BY-SA 4.0
+(https://creativecommons.org/licenses/by-sa/4.0/): they are learned from, and
+carry, the CC BY-SA data above. Attribution: Leipzig Corpora Collection —
+D. Goldhahn, T. Eckart, U. Quasthoff, «Building Large Monolingual
+Dictionaries at the Leipzig Corpora Collection», LREC 2012; Stanza — P. Qi,
+Y. Zhang, Y. Zhang, J. Bolton, C. D. Manning, «Stanza: A Python Natural
+Language Processing Toolkit for Many Human Languages», ACL 2020 demos;
+UD_Russian-SynTagRus — Universal Dependencies (https://universaldependencies.org),
+from the SynTagRus treebank of the Russian National Corpus.
