@@ -383,6 +383,9 @@ const PROOF_AGREE: f32 = 0.5;
 /// head is right more often than it.
 const PROOF_HEAD_VETO: bool = true;
 const PROOF_VETO: f32 = 0.3;
+/// A set aside of several words («честно говоря», «по слухам») is one by
+/// what it is: only a firm «no» of the head keeps its commas out.
+const PROOF_VETO_SET: f32 = 0.05;
 /// The rules' commas besides the comma head's (it alone is better: see above).
 const PROOF_RULES: bool = true;
 
@@ -3691,7 +3694,8 @@ impl<D: AsRef<[u8]>> Ime<D> {
             if PROOF_HEAD_VETO {
                 // The head judges the rules: a rule's comma stands unless the
                 // head is against it.
-                return PROOF_RULES && c.rule != "learned" && c.chance >= PROOF_SURE && c.learned >= PROOF_VETO;
+                let veto = if c.rule == "set aside" { PROOF_VETO_SET } else { PROOF_VETO };
+                return PROOF_RULES && c.rule != "learned" && c.chance >= PROOF_SURE && c.learned >= veto;
             }
             if c.rule == "learned" || !PROOF_RULES {
                 return false;

@@ -41,6 +41,7 @@ fn main() {
     let mut headed = vec![vec![(0usize, 0usize); vs.len()]; hs.len()];
     // h 0.7, v 0.3, and a phrase's other comma along (the head ≥ 0.1 for it).
     let mut headed_pairs = (0usize, 0usize);
+    let mut set_phrases = (0usize, 0usize);
     let mut model = (0usize, 0usize);
     // Where the graph is sure (≥ 0.95) and the model mildly against (odds in
     // [-3, 0)): how right each rule is.
@@ -105,8 +106,18 @@ fn main() {
         }
         // The keyboard's policy (h 0.7, v 0.3) on each gap, for the pairs.
         let accepted: Vec<bool> = (0..words.len())
-            .map(|x| learned[x] >= 0.7 || graph[x].is_some_and(|c| c >= 0.8) && learned[x] >= 0.3)
+            .map(|x| {
+                let veto = if rule[x] == "set aside" { 0.05 } else { 0.3 };
+                learned[x] >= 0.7 || graph[x].is_some_and(|c| c >= 0.8) && learned[x] >= veto
+            })
             .collect();
+        // The set phrases' commas the keyboard puts: how right.
+        for x in 1..words.len() {
+            if rule[x] == "set aside" && accepted[x] {
+                set_phrases.0 += 1;
+                set_phrases.1 += usize::from(has(x));
+            }
+        }
         for i in 1..words.len() {
             let right = usize::from(has(i));
             let along = graph[i].is_some_and(|c| c >= 0.8)
@@ -258,6 +269,7 @@ fn main() {
         println!();
     }
     println!("h 0.7, v 0.3 and a phrase's other comma along (head ≥ 0.1): {}", pct(headed_pairs));
+    println!("the set asides' commas put (veto 0.05): {}", pct(set_phrases));
     println!("a rule's comma (≥ 0.8) the head gives at least t (0.3, 0.4, …, 0.8):");
     for (h, t) in [0.3f32, 0.4, 0.5, 0.6, 0.7, 0.8].iter().enumerate() {
         println!("  {t:>5.2}  {}", pct(both_say[h]));

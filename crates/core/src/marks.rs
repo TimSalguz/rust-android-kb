@@ -131,6 +131,19 @@ const PAREN_PHRASES: &[&str] = &[
     "по словам", "по данным", "по мнению", "по информации", "по сообщению", "по оценкам",
     "по прогнозам", "по подсчетам", "по сведениям", "по версии",
 ];
+/// Asides of several words, set apart whole (not «может быть», «в общем»,
+/// «в самом деле», «в конце концов»: a predicate, a phrase, an adverb as
+/// often).
+const ASIDE_PHRASES: &[&str] = &[
+    "честно говоря", "по правде говоря", "откровенно говоря", "собственно говоря",
+    "иначе говоря", "короче говоря", "мягко говоря", "грубо говоря", "строго говоря",
+    "вообще говоря", "попросту говоря", "по слухам", "как всегда", "как обычно",
+    "судя по всему", "между прочим", "скорее всего",
+    "на мой взгляд", "на твой взгляд", "на наш взгляд", "другими словами",
+    "иными словами", "так сказать", "по всей видимости", "по всей вероятности",
+    "как ни странно", "кроме шуток", "само собой разумеется", "к несчастью",
+    "без всякого сомнения",
+];
 const QUESTION: &[&str] = &["ли", "разве", "неужели", "неужто", "что-ли"];
 const ASKING: &[&str] = &[
     "кто", "что", "где", "куда", "откуда", "когда", "почему", "зачем", "отчего", "как", "сколько",
@@ -497,7 +510,11 @@ pub fn place(
     // Set parenthetical phrases, to the end of the phrase their last word
     // heads («по данным обсерватории»).
     for start in 1..=n {
-        for phrase in PAREN_PHRASES {
+        for (phrase, rule) in PAREN_PHRASES
+            .iter()
+            .map(|p| (p, "set phrase"))
+            .chain(ASIDE_PHRASES.iter().map(|p| (p, "set aside")))
+        {
             let parts: Vec<&str> = phrase.split(' ').collect();
             let k = parts.len();
             if start + k - 1 > n || (0..k).any(|j| s.word(start + j) != parts[j]) {
@@ -509,8 +526,8 @@ pub fn place(
             } else {
                 last
             };
-            set(start, "set phrase", last);
-            set(hi + 1, "set phrase", last);
+            set(start, rule, last);
+            set(hi + 1, rule, last);
             break;
         }
     }
