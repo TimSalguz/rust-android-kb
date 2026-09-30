@@ -353,6 +353,18 @@ const PROOF_TRUSTED: &[(&str, f32)] = &[
     ("parenthetical", -1.0),     // «Она, кажется, заболела»
 ];
 const PROOF_SURER: f32 = 0.95;
+/// Rules right where the graph is less sure, when the model is for them
+/// (rule, the graph at least, the model's odds at least): a clause its
+/// conjunction opens, the model clearly for it — 22 of 23 («ушёл, потому
+/// что устал»); an address — all of 45.
+const PROOF_LESS_SURE: &[(&str, f32, f32)] = &[
+    ("subordinate", 0.6, 1.0),
+    ("subordinate first", 0.6, 1.0),
+    ("address", 0.6, 0.0),
+    ("address", 0.9, -1.0),
+];
+/// No comma the graph is less sure of than this is looked at.
+const PROOF_LEAST: f32 = 0.6;
 
 /// A text just copied, offered in the strip (a tap pastes it) for this long.
 const CLIP_OFFER_MS: i64 = 90_000;
@@ -3608,6 +3620,8 @@ impl<D: AsRef<[u8]>> Ime<D> {
         struct Cand {
             pos: usize,
             by: usize,
+            chance: f32,
+            rule: &'static str,
             floor: Option<f32>,
             there: bool,
             odds: f32,
@@ -3615,7 +3629,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
         }
         let cands: Vec<Cand> = put
             .iter()
-            .filter(|p| p.mark == Mark::Comma && p.before > 0 && p.chance >= PROOF_SURE)
+            .filter(|p| p.mark == Mark::Comma && p.before > 0 && p.chance >= PROOF_LEAST)
             .filter_map(|p| {
                 let (prev, next) = (&sent[p.before - 1], &sent[p.before]);
                 let pair = (prev.text.to_lowercase(), next.text.to_lowercase());
@@ -3626,6 +3640,8 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 Some(Cand {
                     pos: prev.end,
                     by: p.by,
+                    chance: p.chance,
+                    rule: p.rule,
                     floor: PROOF_TRUSTED
                         .iter()
                         .find(|(r, _)| *r == p.rule && p.chance >= PROOF_SURER)
@@ -3642,7 +3658,13 @@ impl<D: AsRef<[u8]>> Ime<D> {
         // сотрудником, нашёл»).
         // By itself: the model not against it, or a sure rule's comma the
         // model is not too much against.
-        let alone = |c: &Cand| c.odds >= PROOF_ODDS || c.floor.is_some_and(|f| c.odds >= f);
+        let alone = |c: &Cand| {
+            c.chance >= PROOF_SURE && c.odds >= PROOF_ODDS
+                || c.floor.is_some_and(|f| c.odds >= f)
+                || PROOF_LESS_SURE
+                    .iter()
+                    .any(|&(r, g, o)| r == c.rule && c.chance >= g && c.odds >= o)
+        };
         let mut at: Vec<(usize, (String, String))> = Vec::new();
         for c in &cands {
             if c.there || at.iter().any(|(pos, _)| *pos == c.pos) {
@@ -3653,7 +3675,8 @@ impl<D: AsRef<[u8]>> Ime<D> {
             // sure rule's pair on a firmer «no» only.
             let opened = cands.iter().filter(pair_of).any(|o| o.there || alone(o) && c.floor.is_some());
             let partner = cands.iter().filter(pair_of).any(|o| alone(o));
-            if alone(c) || c.odds >= PROOF_RESCUE && partner || c.odds >= PROOF_OPENED && opened {
+            let sure = c.chance >= PROOF_SURE;
+            if alone(c) || sure && (c.odds >= PROOF_RESCUE && partner || c.odds >= PROOF_OPENED && opened) {
                 at.push((c.pos, c.pair.clone()));
             }
         }

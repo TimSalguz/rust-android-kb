@@ -361,6 +361,14 @@ pub fn misfit<S: AsRef<str>>(phrase: &[(S, Vec<u64>)], word: &[u64]) -> bool {
     if word.is_empty() {
         return false;
     }
+    // Right after an active participle the word may be its object («сдавшие
+    // экзамен», «с читающим книгу мальчиком»): nothing asked of it.
+    if phrase
+        .last()
+        .is_some_and(|(w, r)| active_participle(w.as_ref(), r))
+    {
+        return false;
+    }
     let attributive = |r: &Vec<u64>| r.iter().any(|x| x & ATTRIBUTE != 0 && x & CASE != 0);
     // Back from the word: attributes (and «и» between them) up to a
     // preposition; or a subject pronoun, maybe with adverbs and «не» between.
@@ -618,6 +626,26 @@ fn clause<S: AsRef<str>>(phrase: &[(S, Vec<u64>)], g: usize) -> Option<usize> {
     None
 }
 
+/// An active participle («сдавший», «читающего», «учащийся»): it takes an
+/// object as its verb does, so the word after it needn't agree with it. By
+/// its form — the stem before the adjective's ending ends in ш or щ (-вш-,
+/// -ш-, -ущ-, -ющ-, -ащ-, -ящ-); a passive one in н or т, or м.
+pub fn active_participle(word: &str, readings: &[u64]) -> bool {
+    if !readings.iter().any(|&r| r & PRTF != 0) {
+        return false;
+    }
+    let w = word.strip_suffix("ся").or_else(|| word.strip_suffix("сь")).unwrap_or(word);
+    const ENDINGS: [&str; 24] = [
+        "ими", "ыми", "его", "ого", "ему", "ому", "ая", "яя", "ое", "ее", "ие", "ые", "ий", "ый",
+        "ой", "ей", "ую", "юю", "им", "ым", "ем", "ом", "их", "ых",
+    ];
+    ENDINGS
+        .iter()
+        .find_map(|e| w.strip_suffix(e))
+        .and_then(|stem| stem.chars().last())
+        .is_some_and(|c| c == 'ш' || c == 'щ')
+}
+
 pub fn walk<S: AsRef<str>>(phrase: &[(S, Vec<u64>)]) -> Walk {
     walk_waiting(phrase, &mut |_| 0.0)
 }
@@ -641,6 +669,10 @@ pub fn walk_waiting<S: AsRef<str>>(
     for (i, (w, readings)) in phrase.iter().enumerate().rev().take(5) {
         let w = w.as_ref();
         if w.starts_with("котор") {
+            return out;
+        }
+        // Right after an active participle: maybe its object, not its noun.
+        if i + 1 == phrase.len() && active_participle(w, readings) {
             return out;
         }
         if collected == phrase.len() - 1 - i && attributive(readings) {
@@ -893,6 +925,17 @@ pub fn phrase_score_max(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn active_participles_by_their_form() {
+        for w in ["сдавшие", "читающего", "учащийся", "принесший", "идущими", "лежащая"] {
+            assert!(active_participle(w, &[PRTF]), "{w}");
+        }
+        for w in ["написанное", "забытый", "читаемый", "построенного", "умный"] {
+            assert!(!active_participle(w, &[PRTF]), "{w}");
+        }
+        assert!(!active_participle("сдавшие", &[ADJF]), "a participle's reading needed");
+    }
 
     fn r(tags: &[&str]) -> Vec<u64> {
         tags.iter().map(|t| parse(t)).collect()

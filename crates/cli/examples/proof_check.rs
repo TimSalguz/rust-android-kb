@@ -31,6 +31,9 @@ fn main() {
     // Where the graph is sure (≥ 0.95) and the model mildly against (odds in
     // [-3, 0)): how right each rule is.
     let mut band: std::collections::BTreeMap<(&'static str, &'static str), (usize, usize)> = Default::default();
+    // Where the graph is less sure (0.6…0.8, or 0.9…0.95), by rule and by
+    // whether the model is for (odds ≥ 0) or a little against (-1…0).
+    let mut less: std::collections::BTreeMap<(&'static str, &'static str), (usize, usize)> = Default::default();
     let (mut gold, mut sentences, mut t) = (0usize, 0usize, 0f64);
     for line in std::fs::read_to_string(&a[4]).expect("parses").lines() {
         let f: Vec<&str> = line.split('\t').collect();
@@ -75,6 +78,22 @@ fn main() {
         }
         for i in 1..words.len() {
             let right = usize::from(has(i));
+            if let Some(c) = graph[i] {
+                let key = if (0.6..0.8).contains(&c) && (0.0..1.0).contains(&odds[i]) {
+                    Some("0.6…0.8, odds 0…1")
+                } else if (0.6..0.8).contains(&c) && odds[i] >= 1.0 {
+                    Some("0.6…0.8, odds ≥ 1")
+                } else if (0.9..0.95).contains(&c) && (-1.0..0.0).contains(&odds[i]) {
+                    Some("0.9…0.95, odds -1…0")
+                } else {
+                    None
+                };
+                if let Some(key) = key {
+                    let t = less.entry((rule[i], key)).or_default();
+                    t.0 += 1;
+                    t.1 += right;
+                }
+            }
             if graph[i].is_some_and(|c| c >= 0.95) && odds[i] < 0.0 && odds[i] >= -3.0 {
                 // By rule and by how much the model is against: -1…0, -2…-1, -3…-2.
                 let bin = ["-1…0", "-2…-1", "-3…-2"][((-odds[i]).floor() as usize).min(2)];
@@ -113,8 +132,13 @@ fn main() {
                     let floors = [("subordinate first", -3.0), ("relative", -2.0), ("said", -2.0),
                                   ("gerund", -2.0), ("participle after", -1.0), ("ccomp", -1.0),
                                   ("parenthetical", -1.0)];
+                    let less = [("subordinate", 0.6, 1.0), ("subordinate first", 0.6, 1.0),
+                                ("address", 0.6, 0.0), ("address", 0.9, -1.0)];
                     let trusted = graph[i].is_some_and(|c| c >= 0.95)
-                        && floors.iter().any(|&(r, f)| r == rule[i] && odds[i] >= f);
+                        && floors.iter().any(|&(r, f)| r == rule[i] && odds[i] >= f)
+                        || graph[i].is_some_and(|c| {
+                            less.iter().any(|&(r, gg, o)| r == rule[i] && c >= gg && odds[i] >= o)
+                        });
                     if put || partner || trusted || sure {
                         paired[k][j].0 += 1;
                         paired[k][j].1 += right;
@@ -135,6 +159,10 @@ fn main() {
         t * 1e3 / sentences.max(1) as f64
     );
     println!("the comma model alone (odds ≥ {COMMA_SURE}): {}", pct(model));
+    println!("the graph less sure, by rule:");
+    for ((r, k), (n, ok)) in &less {
+        println!("  {r:<22} {k:<20} {n:>5} {:>5.1}%", 100.0 * *ok as f64 / (*n).max(1) as f64);
+    }
     println!("the graph sure (≥ 0.95), the model against (odds -3…0), by rule and odds:");
     for ((r, bin), (n, ok)) in &band {
         println!("  {r:<22} {bin:<6} {n:>5} {:>5.1}%", 100.0 * *ok as f64 / (*n).max(1) as f64);
