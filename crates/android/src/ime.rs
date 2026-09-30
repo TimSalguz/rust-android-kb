@@ -1075,6 +1075,20 @@ impl<D: AsRef<[u8]>> Ime<D> {
         REDRAW | RELAYOUT | HAPTIC
     }
 
+    /// What holding `key` gives: its own second character — the emoji held
+    /// on Enter instead of the comma, if so set.
+    fn alt_of(key: &Key, emoji_on_enter: bool) -> Option<char> {
+        if emoji_on_enter {
+            if key.action == Action::Enter {
+                return Some(EMOJI_KEY);
+            }
+            if key.alt == Some(EMOJI_KEY) {
+                return None;
+            }
+        }
+        key.alt
+    }
+
     fn relayout(&mut self) {
         if self.panel.is_some() {
             // The panel's page over the letter rows, its keys below.
@@ -2397,7 +2411,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
                         p.done = true;
                         self.timer = Timer::Repeat(id);
                         flags |= OUTPUT | timer_flag(REPEAT_START_MS);
-                    } else if self.keys[k].alt.is_some() {
+                    } else if Self::alt_of(&self.keys[k], self.settings.emoji_on_enter).is_some() {
                         self.timer = Timer::LongPress(id);
                         flags |= timer_flag(LONG_PRESS_MS);
                     } else if self.keys[k].action == Action::Space {
@@ -2712,7 +2726,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
                     });
                     return REDRAW | HAPTIC;
                 }
-                let Some(alt) = self.keys[k].alt else {
+                let Some(alt) = Self::alt_of(&self.keys[k], self.settings.emoji_on_enter) else {
                     return 0;
                 };
                 p.done = true;
@@ -5755,15 +5769,17 @@ impl<D: AsRef<[u8]>> Ime<D> {
             } else {
                 pal.key
             };
-            rect(
-                &mut ops,
-                key.x + gx,
-                key.y + gy,
-                key.w - 2.0 * gx,
-                key.h - 2.0 * gy,
-                bg,
-                RADIUS_DP * dp,
-            );
+            if pressed || accent || !self.settings.borderless {
+                rect(
+                    &mut ops,
+                    key.x + gx,
+                    key.y + gy,
+                    key.w - 2.0 * gx,
+                    key.h - 2.0 * gy,
+                    bg,
+                    RADIUS_DP * dp,
+                );
+            }
             let (cx, cy) = key.center();
             if let Action::Column(col) = key.action {
                 let letters = &layout::columns(self.lang)[col as usize].0;
@@ -5802,7 +5818,8 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 pal.text
             };
             text(&mut ops, &mut texts, label, cx, cy, size, fg, bold);
-            if let Some(alt) = key.alt {
+            // The emoji's own colors would stand out of the theme: no hint for them.
+            if let Some(alt) = Self::alt_of(key, self.settings.emoji_on_enter).filter(|&a| a != EMOJI_KEY) {
                 let hint = (key.x + key.w - gx - 7.0 * dp, key.y + gy + 9.0 * dp);
                 text(
                     &mut ops,
@@ -6290,6 +6307,27 @@ mod tests {
         assert_eq!(k.slots[1].as_deref(), Some("быть"), "{:?}", k.slots);
         type_str(&mut k, "ы");
         assert_eq!(k.slots[1].as_deref(), Some("быть"), "{:?}", k.slots);
+    }
+
+    #[test]
+    fn the_emoji_can_move_to_holding_enter() {
+        let mut k = ime(WORDS);
+        k.set_settings(Settings {
+            emoji_on_enter: true,
+            ..Settings::default()
+        });
+        k.start_input("", 1);
+        let (x, y) = k.key_center(Action::Char(',')).unwrap();
+        k.touch(DOWN, 0, x, y, 1_000);
+        k.timer();
+        k.touch(UP, 0, x, y, 1_600);
+        assert!(k.panel.is_none(), "the comma held is a comma");
+        let (x, y) = k.key_center(Action::Enter).unwrap();
+        k.touch(DOWN, 0, x, y, 2_000);
+        k.timer();
+        k.touch(UP, 0, x, y, 2_600);
+        assert!(k.panel.is_some(), "Enter held: the emoji");
+        assert!(!k.before.contains('\n'), "and no new line");
     }
 
     #[test]

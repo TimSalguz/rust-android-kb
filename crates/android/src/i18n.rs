@@ -73,6 +73,8 @@ const TEXTS: &[(&str, [&str; 6])] = &[
     ("set.theme.system", ["Как в системе", "As the system", "Wie das System", "Comme le système", "Como el sistema", "Como o sistema"]),
     ("set.theme.light", ["Светлая", "Light", "Hell", "Clair", "Claro", "Claro"]),
     ("set.theme.dark", ["Тёмная", "Dark", "Dunkel", "Sombre", "Oscuro", "Escuro"]),
+    ("set.borderless", ["Клавиши без заливки: только буквы на фоне", "Keys without a fill: just the letters on the background", "Tasten ohne Füllung: nur die Buchstaben auf dem Hintergrund", "Touches sans fond : seulement les lettres sur l'arrière-plan", "Teclas sin relleno: solo las letras sobre el fondo", "Teclas sem preenchimento: só as letras sobre o fundo"]),
+    ("set.emoji_on_enter", ["Эмодзи — на зажатие Enter (вместо запятой)", "Emoji on holding Enter (instead of the comma)", "Emoji durch Halten von Enter (statt des Kommas)", "Emoji en maintenant Entrée (au lieu de la virgule)", "Emoji al mantener Intro (en lugar de la coma)", "Emoji ao segurar Enter (em vez da vírgula)"]),
     ("set.theme.black", ["Чёрная (AMOLED)", "Black (AMOLED)", "Schwarz (AMOLED)", "Noir (AMOLED)", "Negro (AMOLED)", "Preto (AMOLED)"]),
     ("set.wallpaper_colors", [
         "Цвета из обоев (Android 12+)",

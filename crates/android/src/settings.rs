@@ -103,6 +103,11 @@ pub struct Settings {
     pub grip_indicator: bool,
     /// Shift taps by where the calibrated grip usually lands.
     pub grip_offsets: bool,
+    /// The emoji on holding Enter instead of the comma.
+    pub emoji_on_enter: bool,
+    /// Keys without a fill of their own: their labels on the keyboard's
+    /// background (Enter and a pressed key still lit).
+    pub borderless: bool,
     /// The cursor put on a word of another script (an English word in a
     /// Russian text) switches the language to it.
     pub lang_from_text: bool,
@@ -150,6 +155,8 @@ impl Default for Settings {
             gesture_pace: true,
             grip_indicator: true,
             grip_offsets: true,
+            emoji_on_enter: false,
+            borderless: false,
             lang_from_text: true,
             arc_layout: false,
             block_offensive: true,
@@ -196,6 +203,14 @@ const FIELDS: &[Field] = &[
     Field {
         key: "theme",
         kind: Kind::Choice(&["system", "light", "dark", "black"]),
+    },
+    Field {
+        key: "borderless",
+        kind: Kind::Bool,
+    },
+    Field {
+        key: "emoji_on_enter",
+        kind: Kind::Bool,
     },
     Field {
         key: "wallpaper_colors",
@@ -356,6 +371,8 @@ impl Settings {
             "gesture_pace" => flag(self.gesture_pace),
             "grip_indicator" => flag(self.grip_indicator),
             "grip_offsets" => flag(self.grip_offsets),
+            "emoji_on_enter" => flag(self.emoji_on_enter),
+            "borderless" => flag(self.borderless),
             "lang_from_text" => flag(self.lang_from_text),
             "arc_layout" => flag(self.arc_layout),
             "block_offensive" => flag(self.block_offensive),
@@ -437,6 +454,8 @@ impl Settings {
             "gesture_pace" => self.gesture_pace = on,
             "grip_indicator" => self.grip_indicator = on,
             "grip_offsets" => self.grip_offsets = on,
+            "emoji_on_enter" => self.emoji_on_enter = on,
+            "borderless" => self.borderless = on,
             "lang_from_text" => self.lang_from_text = on,
             "arc_layout" => self.arc_layout = on,
             "block_offensive" => self.block_offensive = on,
