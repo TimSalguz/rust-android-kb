@@ -52,6 +52,8 @@ pub enum Theme {
     System,
     Light,
     Dark,
+    /// Black, for AMOLED screens: the pixels between the keys off.
+    Black,
 }
 
 /// How the language is switched.
@@ -193,7 +195,7 @@ const FIELDS: &[Field] = &[
     },
     Field {
         key: "theme",
-        kind: Kind::Choice(&["system", "light", "dark"]),
+        kind: Kind::Choice(&["system", "light", "dark", "black"]),
     },
     Field {
         key: "wallpaper_colors",
@@ -316,6 +318,7 @@ impl Settings {
                 Theme::System => "system",
                 Theme::Light => "light",
                 Theme::Dark => "dark",
+                Theme::Black => "black",
             }
             .into(),
             "wallpaper_colors" => flag(self.wallpaper_colors),
@@ -383,6 +386,7 @@ impl Settings {
                     "system" => Theme::System,
                     "light" => Theme::Light,
                     "dark" => Theme::Dark,
+                    "black" => Theme::Black,
                     _ => return false,
                 }
             }

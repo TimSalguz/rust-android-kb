@@ -73,6 +73,7 @@ const TEXTS: &[(&str, [&str; 6])] = &[
     ("set.theme.system", ["Как в системе", "As the system", "Wie das System", "Comme le système", "Como el sistema", "Como o sistema"]),
     ("set.theme.light", ["Светлая", "Light", "Hell", "Clair", "Claro", "Claro"]),
     ("set.theme.dark", ["Тёмная", "Dark", "Dunkel", "Sombre", "Oscuro", "Escuro"]),
+    ("set.theme.black", ["Чёрная (AMOLED)", "Black (AMOLED)", "Schwarz (AMOLED)", "Noir (AMOLED)", "Negro (AMOLED)", "Preto (AMOLED)"]),
     ("set.wallpaper_colors", [
         "Цвета из обоев (Android 12+)",
         "Colors from the wallpaper (Android 12+)",

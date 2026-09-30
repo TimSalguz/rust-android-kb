@@ -229,6 +229,19 @@ const DARK: Palette = Palette {
     text_on_accent: argb(0xFF1B1C1F),
 };
 
+/// For AMOLED screens: a black background, keys barely above it (their
+/// bounds just seen), no wallpaper colors.
+const BLACK: Palette = Palette {
+    bg: argb(0xFF000000),
+    key: argb(0xFF101010),
+    key_special: argb(0xFF080808),
+    key_pressed: argb(0xFF2E2E2E),
+    accent: argb(0xFF8AB4F8),
+    text: argb(0xFFE6E6E6),
+    text_dim: argb(0xFF8A8A8A),
+    text_on_accent: argb(0xFF000000),
+};
+
 const LIGHT: Palette = Palette {
     bg: argb(0xFFE3E5E8),
     key: argb(0xFFFFFFFF),
@@ -1145,6 +1158,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
             Theme::System => self.system_dark,
             Theme::Light => false,
             Theme::Dark => true,
+            Theme::Black => return BLACK,
         };
         match self.wallpaper.filter(|_| self.settings.wallpaper_colors) {
             Some((light, night)) => {
