@@ -80,6 +80,10 @@ impl<D: AsRef<[u8]>> Engine<D> {
     /// as a pair; an open phrase and the kind after it; «и» after an «и»;
     /// at the sentence's start, the pair's kinds there (an address).
     pub fn comma_odds_in(&self, text: &str, a: &str, b: &str) -> Option<f32> {
+        // The pairs were counted in texts mostly without ё: «нашёл» as «нашел».
+        if a.contains('ё') || b.contains('ё') {
+            return self.comma_odds_in(text, &a.replace('ё', "е"), &b.replace('ё', "е"));
+        }
         let m = self.bigrams.as_ref()?;
         let odds = |key: Vec<u8>| m.get(key).map(|v| v as f32 * 0.05 - 6.4);
         let feature = |f: &str| odds([vec![BIGRAM_SEP, 15, 4], f.as_bytes().to_vec()].concat());

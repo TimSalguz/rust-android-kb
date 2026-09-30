@@ -11,6 +11,8 @@ use kbcore::marks::Mark;
 use kbcore::{Config, Engine, Profile};
 
 const COMMA_SURE: f32 = 2.2;
+/// A comma the model is against no more than this goes with the other of its pair.
+const RESCUE: f32 = -2.5;
 
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
@@ -24,6 +26,7 @@ fn main() {
     let odds_levels = [f32::NEG_INFINITY, -2.0, -1.0, 0.0, 1.0];
     let mut table = vec![vec![(0usize, 0usize); odds_levels.len()]; graph_levels.len()];
     let mut union = table.clone();
+    let mut paired = table.clone();
     let mut model = (0usize, 0usize);
     let (mut gold, mut sentences, mut t) = (0usize, 0usize, 0f64);
     for line in std::fs::read_to_string(&a[4]).expect("parses").lines() {
@@ -60,8 +63,10 @@ fn main() {
             text.push(' ');
         }
         let mut graph = vec![None; words.len()];
+        let mut by = vec![None; words.len()];
         for p in put.iter().filter(|p| p.mark == Mark::Comma && p.before > 0) {
             graph[p.before] = Some(p.chance);
+            by[p.before] = Some(p.by);
         }
         for i in 1..words.len() {
             let right = usize::from(has(i));
@@ -82,6 +87,21 @@ fn main() {
                         union[k][j].0 += 1;
                         union[k][j].1 += right;
                     }
+                    // The two commas around a phrase go together: one the
+                    // model lets through takes the other along.
+                    let partner = by_graph
+                        && odds[i] >= RESCUE
+                        && (1..words.len()).any(|x| {
+                            x != i
+                                && by[x].is_some()
+                                && by[x] == by[i]
+                                && graph[x].is_some_and(|c| c >= g)
+                                && odds[x] >= m
+                        });
+                    if put || partner || sure {
+                        paired[k][j].0 += 1;
+                        paired[k][j].1 += right;
+                    }
                 }
             }
         }
@@ -101,6 +121,7 @@ fn main() {
     for (title, table) in [
         ("the graph (sure ≥ g) and the model's odds ≥ m", &table),
         ("the same, or the model sure (as the keyboard puts them)", &union),
+        ("the same, or the other comma of its pair let through (odds ≥ -2.5)", &paired),
     ] {
         println!("{title} — put, right, found:");
         print!("  g \\ m ");

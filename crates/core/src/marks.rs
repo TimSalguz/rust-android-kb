@@ -29,6 +29,9 @@ pub struct Placed {
     pub mark: Mark,
     pub chance: f32,
     pub rule: &'static str,
+    /// The word (0-based) whose link puts it: the two commas around a
+    /// phrase share it.
+    pub by: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -459,6 +462,7 @@ pub fn place(
                 mark,
                 chance: chance_by[by - 1].unwrap_or(s.sure[by - 1]),
                 rule,
+                by: by - 1,
             })
         })
         .collect();
@@ -496,6 +500,7 @@ fn dashes(s: &Read) -> Vec<Placed> {
                 mark: Mark::Dash,
                 chance: s.sure[i - 1],
                 rule: if nominal { "zero copula" } else { "infinitives" },
+                by: i - 1,
             });
         }
     }

@@ -230,7 +230,7 @@ const DARK: Palette = Palette {
 };
 
 /// For AMOLED screens: a black background, keys barely above it (their
-/// bounds just seen), no wallpaper colors.
+/// bounds just seen); with the wallpaper's colors, their darkest tint.
 const BLACK: Palette = Palette {
     bg: argb(0xFF000000),
     key: argb(0xFF101010),
@@ -241,6 +241,13 @@ const BLACK: Palette = Palette {
     text_dim: argb(0xFF8A8A8A),
     text_on_accent: argb(0xFF000000),
 };
+
+/// A color's channels times `f` (its alpha kept).
+fn scaled(c: i32, f: f32) -> i32 {
+    let c = c as u32;
+    let ch = |shift: u32| ((((c >> shift) & 0xFF) as f32 * f).round() as u32).min(255) << shift;
+    ((c & 0xFF00_0000) | ch(16) | ch(8) | ch(0)) as i32
+}
 
 const LIGHT: Palette = Palette {
     bg: argb(0xFFE3E5E8),
@@ -313,6 +320,12 @@ const COMMA_SURE: f32 = 2.2;
 /// ([`COMMA_SURE`]) the keyboard finds 39% of the commas (27% without).
 const PROOF_SURE: f32 = 0.8;
 const PROOF_ODDS: f32 = 0.0;
+/// The other comma of a phrase's pair goes along when the model is against
+/// it no more than this: 95.5% right, 41.5% found (without: 96.4%, 38.9%).
+const PROOF_RESCUE: f32 = -2.5;
+/// And when the other stands in the text already (typed, or put in as
+/// typed): the phrase is open, only a firm «no» of the model keeps it out.
+const PROOF_OPENED: f32 = -5.0;
 
 /// A text just copied, offered in the strip (a tap pastes it) for this long.
 const CLIP_OFFER_MS: i64 = 90_000;
@@ -634,6 +647,10 @@ pub struct Ime<D: AsRef<[u8]>> {
     /// ⌫ was used inside the word: show and keep exactly what was typed until
     /// the next letter (live correction pauses while the user edits).
     editing: bool,
+    /// Live correction: the user turned its fix down for this word (⌫ while
+    /// the fix showed, or the typed word picked on the left) — the rest of
+    /// the word shows and goes in as typed.
+    live_off: bool,
     /// The last thing committed is a space we inserted after punctuation.
     auto_space: bool,
     /// The start of the text after the cursor (mid-text: a space there is
@@ -956,6 +973,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
             before: String::new(),
             suggest: true,
             editing: false,
+            live_off: false,
             auto_space: false,
             after: String::new(),
             private_field: false,
@@ -1158,7 +1176,20 @@ impl<D: AsRef<[u8]>> Ime<D> {
             Theme::System => self.system_dark,
             Theme::Light => false,
             Theme::Dark => true,
-            Theme::Black => return BLACK,
+            Theme::Black => {
+                // Black under the wallpaper's night colors: the keys in its
+                // darkest tint, the accent and text its own.
+                return match self.wallpaper.filter(|_| self.settings.wallpaper_colors) {
+                    Some((_, night)) => Palette {
+                        bg: BLACK.bg,
+                        key: night.bg,
+                        key_special: scaled(night.bg, 0.5),
+                        key_pressed: night.key,
+                        ..night
+                    },
+                    None => BLACK,
+                };
+            }
         };
         match self.wallpaper.filter(|_| self.settings.wallpaper_colors) {
             Some((light, night)) => {
@@ -3004,6 +3035,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
             if self.word.is_empty() {
                 self.clean = true;
                 self.restored = false;
+                self.live_off = false;
             } else if self.editing && !self.settings.one_row {
                 // Typing on after ⌫: the letters left on screen were seen and
                 // kept. Erasing several, or going on with a word brought back
@@ -3130,6 +3162,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
 
     /// The cursor leaves the word: what editing it showed no longer applies.
     fn leave_word(&mut self) {
+        self.live_off = false;
         self.drawn = None;
         self.pair_undo = None;
         self.rejected.clear();
@@ -3155,7 +3188,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
         let chosen = self.chosen.take();
         let fixed = match (
             &self.autocorrect,
-            correct && !self.editing && !typed.ends_with('-') && !insisted,
+            correct && !self.editing && !self.live_off && !typed.ends_with('-') && !insisted,
         ) {
             _ if chosen.is_some() => chosen.unwrap_or_default(),
             (Some(a), true) => self.cased(&typed, a),
@@ -3170,6 +3203,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
         let yo = self.settings.yo
             && correct
             && !self.editing
+            && !self.live_off
             && !insisted
             && !self
                 .rejected
@@ -3432,22 +3466,51 @@ impl<D: AsRef<[u8]>> Ime<D> {
         let Some((put, _)) = self.engine.sentence_marks(&words) else {
             return;
         };
+        // Each comma the graph is sure of: where, which link puts it, whether
+        // a mark stands there already, the comma model's odds.
+        struct Cand {
+            pos: usize,
+            by: usize,
+            there: bool,
+            odds: f32,
+            pair: (String, String),
+        }
+        let cands: Vec<Cand> = put
+            .iter()
+            .filter(|p| p.mark == Mark::Comma && p.before > 0 && p.chance >= PROOF_SURE)
+            .filter_map(|p| {
+                let (prev, next) = (&sent[p.before - 1], &sent[p.before]);
+                let pair = (prev.text.to_lowercase(), next.text.to_lowercase());
+                if self.commas_rejected.contains(&pair) {
+                    return None;
+                }
+                let odds = self.engine.comma_odds_in(&text[..prev.end], &pair.0, &pair.1)?;
+                Some(Cand {
+                    pos: prev.end,
+                    by: p.by,
+                    there: !next.before.is_empty(),
+                    odds,
+                    pair,
+                })
+            })
+            .collect();
+        // A comma goes in when the model is not against it — or, the two
+        // around a phrase going together, when the other of its pair stands
+        // or goes in and the model is not much against it («Я, будучи …
+        // сотрудником, нашёл»).
         let mut at: Vec<(usize, (String, String))> = Vec::new();
-        for p in put {
-            if p.mark != Mark::Comma || p.before == 0 || p.chance < PROOF_SURE {
+        for c in &cands {
+            if c.there || at.iter().any(|(pos, _)| *pos == c.pos) {
                 continue;
             }
-            let (prev, next) = (&sent[p.before - 1], &sent[p.before]);
-            if !next.before.is_empty() || at.iter().any(|(pos, _)| *pos == prev.end) {
-                continue; // a mark stands there already
-            }
-            let pair = (prev.text.to_lowercase(), next.text.to_lowercase());
-            if self.commas_rejected.contains(&pair) {
-                continue;
-            }
-            let odds = self.engine.comma_odds_in(&text[..prev.end], &pair.0, &pair.1);
-            if odds.is_some_and(|o| o >= PROOF_ODDS) {
-                at.push((prev.end, pair));
+            let pair_of = |o: &&Cand| o.pos != c.pos && o.by == c.by;
+            let opened = cands.iter().filter(pair_of).any(|o| o.there);
+            let partner = cands.iter().filter(pair_of).any(|o| o.odds >= PROOF_ODDS);
+            if c.odds >= PROOF_ODDS
+                || c.odds >= PROOF_RESCUE && partner
+                || c.odds >= PROOF_OPENED && opened
+            {
+                at.push((c.pos, c.pair.clone()));
             }
         }
         if at.is_empty() {
@@ -3504,7 +3567,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
         // A drawn word isn't typed clean (no rhythm to show): only editing
         // settles it.
         let touched = !self.clean && self.drawn.is_none();
-        touched || self.editing || self.rejected.iter().any(|(t, _)| *t == lower)
+        touched || self.editing || self.live_off || self.rejected.iter().any(|(t, _)| *t == lower)
     }
 
     /// `typed` went into the text as `committed`, then `sep` (a space, comma
@@ -4037,6 +4100,10 @@ impl<D: AsRef<[u8]>> Ime<D> {
             return;
         }
         if !self.word.is_empty() {
+            // The live fix was on screen: ⌫ turns it down for the whole word.
+            if self.settings.live_correction && self.shown != self.word {
+                self.live_off = true;
+            }
             self.chosen = None;
             self.word.pop();
             self.hints.pop();
@@ -4715,6 +4782,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
             Some(a) if self.settings.one_row => self.cased(&self.word, a),
             Some(a)
                 if self.settings.live_correction
+                    && !self.live_off
                     && !self.engine.is_prefix(&self.word.to_lowercase()) =>
             {
                 self.cased(&self.word, a)
@@ -4762,6 +4830,14 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 ("typed", jstr(&self.word)),
             ],
         );
+        // Live correction, the typed word picked on the left: the fix goes,
+        // the word stays open — the next letters go on with it.
+        if i == 0 && self.settings.live_correction && !self.word.is_empty() && s == self.word {
+            self.live_off = true;
+            self.show();
+            self.update_slots();
+            return;
+        }
         if let Some((left, right)) = self.recorrect.take().filter(|_| self.word.is_empty()) {
             // The word the cursor is in, replaced whole.
             self.out.push(Op::Replace(left, right, s.clone()));
@@ -8114,7 +8190,7 @@ mod tests {
     }
 
     #[test]
-    fn backspace_pauses_live_correction_until_the_next_letter() {
+    fn backspace_turns_live_correction_down_for_the_word() {
         let mut k = ime(WORDS);
         k.set_settings(Settings {
             live_correction: true,
@@ -8133,13 +8209,36 @@ mod tests {
         type_str(&mut k, "т");
         assert_eq!(
             k.take_ops().last(),
-            Some(&Op::Composing("привет".into())),
-            "correction resumes"
+            Some(&Op::Composing("привкт".into())),
+            "the fix stays off for the word"
         );
-        type_str(&mut k, "⌫ ");
+        type_str(&mut k, " ");
         assert!(
-            k.take_ops().contains(&Op::Commit("привк".into())),
+            k.take_ops().contains(&Op::Commit("привкт".into())),
             "space keeps what is shown"
+        );
+        // The next word is fixed live again.
+        type_str(&mut k, "привкт");
+        assert_eq!(k.take_ops().last(), Some(&Op::Composing("привет".into())));
+    }
+
+    #[test]
+    fn the_typed_word_picked_on_the_left_goes_on() {
+        let mut k = ime(WORDS);
+        k.set_settings(Settings {
+            live_correction: true,
+            strip: Strip::Full,
+            ..Settings::default()
+        });
+        k.start_input("", 1);
+        type_str(&mut k, "привкт");
+        assert_eq!(k.take_ops().last(), Some(&Op::Composing("привет".into())));
+        k.pick_slot(0);
+        assert_eq!(k.take_ops().last(), Some(&Op::Composing("привкт".into())));
+        type_str(&mut k, "ик ");
+        assert!(
+            k.take_ops().contains(&Op::Commit("привктик".into())),
+            "the letters after go on with the word, as typed"
         );
     }
 
