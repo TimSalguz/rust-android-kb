@@ -97,6 +97,9 @@ pub struct Parser<D: AsRef<[u8]>> {
     later: usize,
     /// How a word waiting hangs on the head still to come (causal field 2).
     wait_rel: Option<[Linear; 2]>,
+    /// Whether a comma stands before a word, from the text without its
+    /// commas (a whole sentence's parser, field + 8).
+    comma: Option<[Linear; 2]>,
     /// A word's relation to its head, from the two: [word, head] → relation.
     rel: [Linear; 2],
     /// The blob copied to 4-aligned memory, when it doesn't lie so.
@@ -140,6 +143,9 @@ pub struct Sentence {
     /// Word i's chances of every relation to its likeliest head (a whole
     /// sentence's graph; empty else).
     pub relation_chances: Vec<Vec<f32>>,
+    /// The chance of a comma before word i (a parser with the comma head;
+    /// empty else).
+    pub commas: Vec<f32>,
 }
 
 /// A sentence's graph, shared.
@@ -174,8 +180,9 @@ impl<D: AsRef<[u8]>> Parser<D> {
             h[9],
         );
         // The causal field: 0 whole sentence, 1 causal, 2 causal and the
-        // waiting word's relation; + 4: the marks read.
-        let (causal, waiting, reads_marks) = (causal & 3 >= 1, causal & 3 == 2, causal & 4 != 0);
+        // waiting word's relation; + 4: the marks read; + 8: the comma head.
+        let (causal, waiting, reads_marks, commas) =
+            (causal & 3 >= 1, causal & 3 == 2, causal & 4 != 0, causal & 8 != 0);
         if heads == 0 || d % heads != 0 {
             return None;
         }
@@ -241,6 +248,7 @@ impl<D: AsRef<[u8]>> Parser<D> {
         let later = vector(d, &mut off);
         let rel = [linear(d, 2 * d, &mut off), linear(n_rel, d, &mut off)];
         let wait_rel = waiting.then(|| [linear(d, d, &mut off), linear(n_rel, d, &mut off)]);
+        let comma = commas.then(|| [linear(d, d, &mut off), linear(1, d, &mut off)]);
         if b.len() != off {
             return None;
         }
@@ -274,6 +282,7 @@ impl<D: AsRef<[u8]>> Parser<D> {
             hd,
             later,
             wait_rel,
+            comma,
             rel,
             marks,
             owned,
@@ -570,6 +579,7 @@ impl<D: AsRef<[u8]>> Parser<D> {
             waiting: read.waiting.clone(),
             relations: Vec::new(),
             relation_chances: Vec::new(),
+            commas: Vec::new(),
         }
     }
 
@@ -614,11 +624,25 @@ impl<D: AsRef<[u8]>> Parser<D> {
                 (k, p[k])
             })
             .collect();
+        let commas = match &self.comma {
+            Some(c) => (1..hs.len())
+                .map(|i| {
+                    let mut a = vec![0f32; self.d];
+                    self.linear(&c[0], &hs[i], &mut a);
+                    a.iter_mut().for_each(|v| *v = v.max(0.0));
+                    let mut o = [0f32; 1];
+                    self.linear(&c[1], &a, &mut o);
+                    1.0 / (1.0 + (-o[0]).exp())
+                })
+                .collect(),
+            None => Vec::new(),
+        };
         Sentence {
             heads,
             waiting: Vec::new(),
             relations,
             relation_chances,
+            commas,
         }
     }
 

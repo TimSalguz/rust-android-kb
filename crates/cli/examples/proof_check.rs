@@ -27,6 +27,10 @@ fn main() {
     let mut table = vec![vec![(0usize, 0usize); odds_levels.len()]; graph_levels.len()];
     let mut union = table.clone();
     let mut paired = table.clone();
+    // The comma head: by itself at each level, and with the rules' policy.
+    let head_levels = [0.5f32, 0.6, 0.7, 0.8, 0.9, 0.95];
+    let mut head_alone = vec![(0usize, 0usize); head_levels.len()];
+    let mut head_with = vec![(0usize, 0usize); head_levels.len()];
     let mut model = (0usize, 0usize);
     // Where the graph is sure (≥ 0.95) and the model mildly against (odds in
     // [-3, 0)): how right each rule is.
@@ -34,6 +38,11 @@ fn main() {
     // Where the graph is less sure (0.6…0.8, or 0.9…0.95), by rule and by
     // whether the model is for (odds ≥ 0) or a little against (-1…0).
     let mut less: std::collections::BTreeMap<(&'static str, &'static str), (usize, usize)> = Default::default();
+    // Each comma of the text the keyboard doesn't put: why (no rule put
+    // one there; the graph under 0.8; the model against it) and how the word
+    // after it hangs in the teacher's parse.
+    let mut lost: std::collections::BTreeMap<(String, String), usize> = Default::default();
+    let mut put_n = 0usize;
     let (mut gold, mut sentences, mut t) = (0usize, 0usize, 0f64);
     for line in std::fs::read_to_string(&a[4]).expect("parses").lines() {
         let f: Vec<&str> = line.split('\t').collect();
@@ -42,6 +51,7 @@ fn main() {
         }
         let words: Vec<&str> = f[1].split(' ').collect();
         let marks: Vec<&str> = f[6].split(' ').collect();
+        let gold_rel: Vec<&str> = f[4].split(' ').map(|r| r.split(':').next().unwrap_or(r)).collect();
         if words.len() != marks.len() || words.len() > places {
             continue;
         }
@@ -69,12 +79,19 @@ fn main() {
             text.push(' ');
         }
         let mut rule = vec![""; words.len()];
+        let mut learned = vec![-1f32; words.len()];
         let mut graph = vec![None; words.len()];
         let mut by = vec![None; words.len()];
         for p in put.iter().filter(|p| p.mark == Mark::Comma && p.before > 0) {
+            if p.rule == "learned" {
+                // The comma head's own: only in its tables.
+                learned[p.before] = p.learned;
+                continue;
+            }
             graph[p.before] = Some(p.chance);
             by[p.before] = Some(p.by);
             rule[p.before] = p.rule;
+            learned[p.before] = p.learned;
         }
         for i in 1..words.len() {
             let right = usize::from(has(i));
@@ -143,6 +160,33 @@ fn main() {
                         paired[k][j].0 += 1;
                         paired[k][j].1 += right;
                     }
+                    if g == 0.8 && m == 0.0 {
+                        let policy = (put || partner || trusted || sure) && rule[i] != "learned";
+                        for (h, &t) in head_levels.iter().enumerate() {
+                            let by_head = learned[i] >= t;
+                            if by_head {
+                                head_alone[h].0 += 1;
+                                head_alone[h].1 += right;
+                            }
+                            if by_head || policy {
+                                head_with[h].0 += 1;
+                                head_with[h].1 += right;
+                            }
+                        }
+                    }
+                    if g == 0.8 && m == 0.0 {
+                        if put || partner || trusted || sure {
+                            put_n += right;
+                        } else if right == 1 {
+                            let why = match graph[i] {
+                                None => "no rule",
+                                Some(c) if c < 0.8 => "graph < 0.8",
+                                Some(_) => "model against",
+                            };
+                            let rel = gold_rel.get(i).copied().unwrap_or("?");
+                            *lost.entry((why.to_string(), rel.to_string())).or_default() += 1;
+                        }
+                    }
                 }
             }
         }
@@ -159,6 +203,23 @@ fn main() {
         t * 1e3 / sentences.max(1) as f64
     );
     println!("the comma model alone (odds ≥ {COMMA_SURE}): {}", pct(model));
+    if head_alone.iter().any(|c| c.0 > 0) {
+        println!("the comma head (≥ t) — by itself, and with the rules' policy — put, right, found:");
+        for (h, t) in head_levels.iter().enumerate() {
+            println!("  {t:>5.2}  {}   {}", pct(head_alone[h]), pct(head_with[h]));
+        }
+    }
+    println!("commas of the text not put ({} put), by why and the next word's relation:", put_n);
+    let mut by_why: std::collections::BTreeMap<&str, usize> = Default::default();
+    for ((w, _), n) in &lost {
+        *by_why.entry(w.as_str()).or_default() += n;
+    }
+    for (w, n) in &by_why {
+        let mut rels: Vec<(&String, &usize)> = lost.iter().filter(|((ww, _), _)| ww == w).map(|((_, r), n)| (r, n)).collect();
+        rels.sort_by(|a, b| b.1.cmp(a.1));
+        let top: Vec<String> = rels.iter().take(8).map(|(r, n)| format!("{r} {n}")).collect();
+        println!("  {w:<14} {n:>5}: {}", top.join(", "));
+    }
     println!("the graph less sure, by rule:");
     for ((r, k), (n, ok)) in &less {
         println!("  {r:<22} {k:<20} {n:>5} {:>5.1}%", 100.0 * *ok as f64 / (*n).max(1) as f64);

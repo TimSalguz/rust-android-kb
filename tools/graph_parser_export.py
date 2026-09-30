@@ -42,6 +42,7 @@ ap.add_argument("--int8", action="store_true", help="matrices in i8, a scale per
 ap.add_argument("--places", type=int, default=12, help="words it reads at most (as trained)")
 ap.add_argument("--d", type=int, default=128)
 ap.add_argument("--layers", type=int, default=4)
+ap.add_argument("--commas", action="store_true", help="the model's comma head was trained (older saves)")
 ap.add_argument("--check")
 ap.add_argument("--dump")
 opts = ap.parse_args()
@@ -80,6 +81,10 @@ if reads_marks:
 waiting = opts.causal and "wait_rel.0.weight" in sd
 if waiting:
     names += ["wait_rel.0.weight", "wait_rel.0.bias", "wait_rel.2.weight", "wait_rel.2.bias"]
+# The comma head (tools/graph_parser.py --commas): where the commas go.
+commas = not opts.causal and "comma.0.weight" in sd and (saved.get("commas") or opts.commas)
+if commas:
+    names += ["comma.0.weight", "comma.0.bias", "comma.2.weight", "comma.2.bias"]
 
 
 def text(s):
@@ -90,7 +95,8 @@ def text(s):
 with open(opts.out + ".part", "wb") as f:
     f.write(b"KBGP" + struct.pack("<11I", 2 if opts.int8 else 1, d, layers, 4, 2 * d, g["D"], g["N_CLASS"], L,
                                   len(grammemes), len(rels),
-                                  (2 if waiting else int(opts.causal)) + (4 if reads_marks else 0)))
+                                  (2 if waiting else int(opts.causal)) + (4 if reads_marks else 0)
+                                  + (8 if commas else 0)))
     for s in grammemes + rels:
         f.write(text(s))
     # Floats start 4-aligned.

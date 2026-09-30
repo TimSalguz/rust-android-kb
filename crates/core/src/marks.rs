@@ -32,6 +32,9 @@ pub struct Placed {
     /// The word (0-based) whose link puts it: the two commas around a
     /// phrase share it.
     pub by: usize,
+    /// A comma: its chance by the parser's comma head (the text read
+    /// without its commas); -1 without one.
+    pub learned: f32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -106,6 +109,8 @@ pub const GERUND_IDIOMS: &[(&str, &str)] = &[
     ("очертя", "голову"), ("переводя", "дыхания"), ("смыкая", "глаз"), ("высунув", "язык"),
     ("сломя", "шею"), ("навострив", "уши"), ("опустив", "руки"),
 ];
+/// The comma head's commas where no rule puts one: from this chance on.
+const LEARNED_LEAST: f32 = 0.3;
 /// The links that set a word apart (an interjection, an aside, an address).
 const APART: &[&str] = &["discourse", "parataxis", "vocative"];
 const SAYING: &[&str] = &[
@@ -503,10 +508,33 @@ pub fn place(
                 chance: chance_by[by - 1].unwrap_or(s.sure[by - 1]),
                 rule,
                 by: by - 1,
+                learned: -1.0,
             })
         })
         .collect();
     out.extend(dashes(&s));
+    // The comma head's say: on each comma the rules put, and a comma of its
+    // own where no rule puts one.
+    if graph.commas.len() == n {
+        for p in out.iter_mut().filter(|p| p.mark == Mark::Comma) {
+            p.learned = graph.commas[p.before];
+        }
+        for j in 1..n {
+            let c = graph.commas[j];
+            // Not before a gerund idiom («сидел сложа руки»).
+            let idiom = j + 1 < n && GERUND_IDIOMS.contains(&(words[j].as_str(), words[j + 1].as_str()));
+            if c >= LEARNED_LEAST && !idiom && !out.iter().any(|p| p.mark == Mark::Comma && p.before == j) {
+                out.push(Placed {
+                    before: j,
+                    mark: Mark::Comma,
+                    chance: c,
+                    rule: "learned",
+                    by: j,
+                    learned: c,
+                });
+            }
+        }
+    }
     out.sort_by_key(|p| p.before);
     (out, end_mark(&s))
 }
@@ -541,6 +569,7 @@ fn dashes(s: &Read) -> Vec<Placed> {
                 chance: s.sure[i - 1],
                 rule: if nominal { "zero copula" } else { "infinitives" },
                 by: i - 1,
+                learned: -1.0,
             });
         }
     }
