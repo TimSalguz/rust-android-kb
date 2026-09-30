@@ -31,6 +31,7 @@ ap.add_argument("out")
 ap.add_argument("--d", type=int, default=128)
 ap.add_argument("--layers", type=int, default=4)
 ap.add_argument("--places", type=int, default=40)
+ap.add_argument("--no-names", action="store_true", help="the parser's heads as they are, no name grammar")
 ap.add_argument("--tree", action="store_true",
                 help="the best tree whose links don't cross (Eisner), on the joint scores")
 ap.add_argument("--joint", action="store_true",
@@ -59,6 +60,7 @@ model.load_state_dict(saved["model"], strict=False)
 model.to(g["dev"]).eval()
 
 WORD = re.compile(r"[^\W\d_]+(?:[-’'][^\W\d_]+)*")
+LATIN = re.compile(r"[a-zà-öø-ÿœ]")
 MARKS = re.compile(r"[,—–:;()«»\"„“”.!?…-]")
 # A sentence ends at . ! ? … (with closing quotes or brackets) before a space
 # and a capital, a dash or an opening quote — not after an initial or a
@@ -83,14 +85,104 @@ def tokens(sent):
     after the last."""
     sent = re.sub(r"\d+(?:[.,:]\d+)*", lambda m: " " * len(m.group(0)), sent)
     words, before, last = [], [], 0
+    caps = []
     for m in WORD.finditer(sent):
         between = "".join(MARKS.findall(sent[last:m.start()])).replace("–", "—").replace("-", "—") \
             .replace("„", "«").replace("“", "»").replace("”", "»")
         words.append(m.group(0).lower().replace("ё", "е"))
+        caps.append(m.group(0)[:1].isupper())
         before.append(between or "_")
         last = m.end()
     tail = "".join(MARKS.findall(sent[last:])) or "_"
+    tokens.caps = caps
     return words, before, tail
+
+
+# ---------------------------------------------------------------- names
+# A person's name: [title] [given name] [patronymic] [surname] — its words in
+# one case («княгиня Анна Михайловна Друбецкая»). Where the case changes a
+# new name begins: «у Анны Павловны | княгине Друбецкой» are two people.
+TITLES = {"князь", "княгиня", "княжна", "граф", "графиня", "барон", "баронесса", "маркиз", "виконт",
+          "царь", "царица", "император", "императрица", "государь", "государыня", "генерал", "полковник",
+          "капитан", "ротмистр", "майор", "поручик", "есаул", "профессор", "доктор", "господин", "госпожа"}
+ALL_CASES = {"nomn", "gent", "datv", "accs", "ablt", "loct"}
+TITLE_STEMS = sorted({t[:-1] if t[-1] in "аяьй" else t for t in TITLES}, key=len, reverse=True)
+
+
+def is_title(word):
+    """A title in any case: «княгине», «князю», «графа»."""
+    return any(word.startswith(st) and len(word) <= len(st) + 3 for st in TITLE_STEMS)
+
+
+def name_cases(word):
+    rs = graph_tags.sets.get(graph_tags.word_set.get(word, ""), [])
+    cs = {("gent" if g == "gen2" else "accs" if g == "acc2" else "loct" if g == "loc2" else g)
+          for r in rs if r[0] == "NOUN" for g in r[1:] if g in CASES}
+    return cs or ALL_CASES  # a name the dictionary doesn't know: any case
+
+
+def name_spans(words, caps):
+    """The names in a sentence: runs of capitalized words (and titles before
+    them) that share a case; each run as (start, end, cases)."""
+    n = len(words)
+    namish = [caps[i] and i > 0 for i in range(n)]
+    for i in range(n - 1):
+        if is_title(words[i]) and namish[i + 1]:
+            namish[i] = True
+    spans, i = [], 0
+    while i < n:
+        if not namish[i]:
+            i += 1
+            continue
+        a, cs = i, name_cases(words[i])
+        i += 1
+        while i < n and namish[i] and not (is_title(words[i]) and i > a) and cs & name_cases(words[i]):
+            cs = cs & name_cases(words[i])
+            i += 1
+        spans.append((a, i, cs))
+    return spans
+
+
+def mend_names(words, caps, pick, p):
+    """A word of one name hanging on another name whose case it can't share
+    goes to its likeliest head outside that name («княгине» → «данное», not
+    «Анны»). `pick` [n+1] heads (1-based words, 0 root), `p` [n+1, ≥n+1]."""
+    spans = name_spans(words, caps)
+    if len(spans) < 2:
+        return 0
+    span_of = {}
+    for k, (a, b, cs) in enumerate(spans):
+        for i in range(a, b):
+            span_of[i] = k
+    mended = 0
+    for i in range(len(words)):
+        h = int(pick[i + 1]) - 1
+        # A participle after a comma goes with the nearest name before it that
+        # agrees with it («у Анны Павловны княгине Друбецкой, просившей»).
+        rs_i = graph_tags.sets.get(graph_tags.word_set.get(words[i], ""), [])
+        if h >= 0 and h in span_of and rs_i and all(r[0] in ("PRTF", "ADJF") for r in rs_i) and h < i:
+            nearer = [k for k, (a, b, cs) in enumerate(spans) if spans[span_of[h]][1] <= a and b <= i]
+            for k in reversed(nearer):
+                a, b, cs = spans[k]
+                head_rs = [r for w in words[a:b] for r in graph_tags.sets.get(graph_tags.word_set.get(w, ""), [])]
+                if not head_rs or agree(rs_i, head_rs):
+                    pick[i + 1] = a + 1
+                    mended += 1
+                    break
+            continue
+        if i not in span_of or h < 0 or h not in span_of or span_of[h] == span_of[i]:
+            continue
+        mine, theirs = spans[span_of[i]], spans[span_of[h]]
+        if mine[2] & theirs[2]:
+            continue
+        banned = set(range(theirs[0], theirs[1])) | {i}
+        order = torch.argsort(p[i + 1, : len(words) + 1], descending=True).tolist()
+        for c in order:
+            if c == 0 or (c - 1) not in banned:
+                pick[i + 1] = c
+                mended += 1
+                break
+    return mended
 
 
 NOUNISH = ("NOUN", "NPRO")
@@ -354,13 +446,16 @@ def pieces(words, before):
 
 
 rows = []  # (line, sentence, words, marks, tail, piece start)
+caps_of = []  # each row's words: capitalized as written
 for ln, par in enumerate(open(opts.text, encoding="utf-8"), 1):
     for k, sent in enumerate(sentences(par.rstrip("\n"))):
         words, before, tail = tokens(sent)
+        caps = tokens.caps
         if not words:
             continue
         for a, b in pieces(words, before):
             rows.append((ln, k, words[a:b], before[a:b], tail if b == len(words) else "_"))
+            caps_of.append(caps[a:b])
 print(f"{len(rows)} sentences (pieces)", file=sys.stderr, flush=True)
 
 with torch.no_grad(), open(opts.out, "w", encoding="utf-8") as out:
@@ -378,10 +473,35 @@ with torch.no_grad(), open(opts.out, "w", encoding="utf-8") as out:
                         s[j, i + 1, bad] = -1e9
         p = torch.softmax(s, -1)
         pick = p.argmax(-1)
-        hp = p.max(-1).values
+        if not opts.no_names:
+            for j, (_, _, w, _, _) in enumerate(chunk):
+                mend_names(w, caps_of[i + j], pick[j], p[j])
+        # A foreign stretch (Latin letters: Tolstoy's French) is one node:
+        # its words hang on its first, as UD writes it (flat:foreign).
+        foreign = []
+        for j, (_, _, w, _, _) in enumerate(chunk):
+            run = []
+            for t, word in enumerate(w + [""]):
+                if word and LATIN.search(word):
+                    run.append(t)
+                    continue
+                if len(run) >= 2:
+                    for q in run[1:]:
+                        pick[j, q + 1] = run[0] + 1
+                        foreign.append((j, q + 1))
+                    if run[0] + 1 <= int(pick[j, run[0] + 1]) <= run[-1] + 1:
+                        # its first word goes outside the stretch
+                        order = torch.argsort(p[j, run[0] + 1, : len(w) + 1], descending=True).tolist()
+                        pick[j, run[0] + 1] = next(c for c in order if not run[0] + 1 <= c <= run[-1] + 1)
+                run = []
+        hp = p.gather(-1, pick.unsqueeze(-1))[..., 0]
         hidx = pick.clamp(max=L - 1)
         rl = model.rel(torch.cat([h, torch.gather(h, 1, hidx.unsqueeze(-1).expand(-1, -1, h.shape[-1]))], -1))
         rp, rk = torch.softmax(rl, -1).max(-1)
+        flat_id = next((k for k, r in rel_name.items() if r == "flat"), None)
+        for j, q in foreign:
+            if flat_id is not None:
+                rk[j, q] = flat_id
         if opts.joint:
             # Every (head, relation) pair: the relation layer's first linear
             # map splits into the word's part and the head's part.
