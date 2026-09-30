@@ -42,6 +42,12 @@ fn main() {
     // h 0.7, v 0.3, and a phrase's other comma along (the head ≥ 0.1 for it).
     let mut headed_pairs = (0usize, 0usize);
     let mut set_phrases = (0usize, 0usize);
+    // The keyboard's commas: with a rule of the graph behind them, and by
+    // the head alone — put, right.
+    let (mut explained, mut head_only) = ((0usize, 0usize), (0usize, 0usize));
+    // The head's own commas, by the teacher's relations around the gap: the
+    // word before's, the word after's — how many, how many right.
+    let mut unexplained: std::collections::BTreeMap<(String, String), (usize, usize)> = Default::default();
     // The other marks, from the text typed with none: by kind and level —
     // put, right; and the text's own count.
     let other = [(Mark::Dash, '—'), (Mark::Colon, ':'), (Mark::OpenQuote, '«'), (Mark::CloseQuote, '»')];
@@ -156,6 +162,21 @@ fn main() {
                 && ["gerund", "participle after", "relative", "said"].contains(&rule[i])
                 && learned[i] >= 0.1
                 && (1..words.len()).any(|x| x != i && by[x].is_some() && by[x] == by[i] && accepted[x]);
+            if accepted[i] {
+                let by_rule = graph[i].is_some_and(|c| c >= 0.5);
+                let t = if by_rule { &mut explained } else { &mut head_only };
+                t.0 += 1;
+                t.1 += right;
+                if !by_rule {
+                    let key = (
+                        gold_rel.get(i - 1).copied().unwrap_or("?").to_string(),
+                        gold_rel.get(i).copied().unwrap_or("?").to_string(),
+                    );
+                    let u = unexplained.entry(key).or_default();
+                    u.0 += 1;
+                    u.1 += right;
+                }
+            }
             if accepted[i] || along {
                 headed_pairs.0 += 1;
                 headed_pairs.1 += right;
@@ -302,6 +323,13 @@ fn main() {
     }
     println!("h 0.7, v 0.3 and a phrase's other comma along (head ≥ 0.1): {}", pct(headed_pairs));
     println!("the set asides' commas put (veto 0.05): {}", pct(set_phrases));
+    println!("the keyboard's commas with a rule behind them: {}; by the head alone: {}", pct(explained), pct(head_only));
+    let mut kinds: Vec<_> = unexplained.iter().collect();
+    kinds.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+    println!("the head's own, by the relations around the gap (before | after): put, right");
+    for ((a, b), (n, ok)) in kinds.iter().take(15) {
+        println!("  {a:>10} | {b:<10} {n:>4} {:>5.1}%", 100.0 * *ok as f64 / (*n).max(1) as f64);
+    }
     println!("a rule's comma (≥ 0.8) the head gives at least t (0.3, 0.4, …, 0.8):");
     for (h, t) in [0.3f32, 0.4, 0.5, 0.6, 0.7, 0.8].iter().enumerate() {
         println!("  {t:>5.2}  {}", pct(both_say[h]));
