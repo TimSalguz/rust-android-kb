@@ -2462,11 +2462,17 @@ mod tests {
                 .with_lemmas(blob())
                 .with_chooser(chooser())
         };
+        // With its whole bound (by default the chooser only re-weighs what
+        // the search found).
         let narrow = make(Config {
             top_k: 1,
+            chooser_bound: 1.0,
             ..Config::default()
         });
-        let wide = make(Config::default());
+        let wide = make(Config {
+            chooser_bound: 1.0,
+            ..Config::default()
+        });
         let sentence = ["я".to_string(), "хочу".to_string(), "пить".to_string()];
         for typed in ["ча", "чм", "чен"] {
             let taps = Evidence::Taps(typed, &[]);

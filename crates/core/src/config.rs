@@ -180,8 +180,8 @@ pub struct Config {
     pub w_chooser: f32,
     /// The most the chooser moves a word's cost either way (nats), and the
     /// share of that the search allows for before it knows the word (1: all
-    /// — no word it would raise is cut; less: faster, a rare such word may
-    /// be cut).
+    /// — no word it would raise is cut; 0: it re-weighs what the search
+    /// found — the same words on the phrase set, a third faster to type).
     pub chooser_clamp: f32,
     pub chooser_bound: f32,
     /// Gesture typing: weights of the full comparison with a word's path —
@@ -291,7 +291,7 @@ impl Config {
             w_lemma: 0.5,
             w_chooser: 1.0,
             chooser_clamp: 2.0,
-            chooser_bound: 1.0,
+            chooser_bound: 0.0,
             gesture_location: 7.0,
             gesture_shape: 6.0,
             gesture_walk: 8.0,

@@ -3508,10 +3508,14 @@ impl<D: AsRef<[u8]>> Ime<D> {
             .and_then(|b| b.strip_suffix(prev.committed.as_str()))
             .unwrap_or("");
         // This word's likeliest readings after `p` there, with their costs.
+        // (Without the chooser: it learned to choose among a word's readings,
+        // not between pairs of words — here it cost the spelling pairs.)
         let after = |p: &str| -> Vec<(f32, String)> {
             let mut cur = plain.to_vec();
-            self.engine
-                .weigh(&self.context_at(&format!("{rest}{p} ")), &mut cur);
+            self.engine.weigh(
+                &self.context_at(&format!("{rest}{p} ")).without_chooser(),
+                &mut cur,
+            );
             cur.into_iter().take(3).map(|c| (c.cost, c.word)).collect()
         };
         let base = base_prev + after(&committed).first()?.0;

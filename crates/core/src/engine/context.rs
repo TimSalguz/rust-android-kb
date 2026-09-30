@@ -51,9 +51,8 @@ pub struct Context {
     clause: Option<Frame>,
     /// The sentence's sense classes, once each.
     topics: Vec<u64>,
-    /// What the chooser read of the sentence, and the most its f may take
-    /// off a word's cost (weighted, over τ).
-    chooser: Option<(std::sync::Arc<crate::chooser::Reading>, f32)>,
+    /// What the chooser read of the sentence.
+    chooser: Option<std::sync::Arc<crate::chooser::Reading>>,
     /// The words are expected before any letter of them (predictions).
     predicting: bool,
 }
@@ -63,6 +62,14 @@ impl Context {
     /// punctuation).
     pub fn prev(&self) -> Option<&str> {
         self.prev.as_deref()
+    }
+
+    /// The place without the chooser: for decisions it wasn't taught (the
+    /// two-word window weighing the pairs of a word re-read).
+    pub fn without_chooser(&self) -> Context {
+        let mut c = self.clone();
+        c.chooser = None;
+        c
     }
 
     /// The place for the words expected before any letter of them: the
@@ -221,7 +228,7 @@ impl<D: AsRef<[u8]>> Engine<D> {
     fn read_sentence(
         &self,
         sentence: &[String],
-    ) -> Option<(std::sync::Arc<crate::chooser::Reading>, f32)> {
+    ) -> Option<std::sync::Arc<crate::chooser::Reading>> {
         let (chooser, lemmas) = (self.chooser.as_ref()?, self.lemmas.as_ref()?);
         let w = self.cfg.w_chooser;
         if w <= 0.0 {
@@ -237,16 +244,13 @@ impl<D: AsRef<[u8]>> Engine<D> {
                 })
                 .collect()
         });
-        let clamp = self.cfg.chooser_clamp.max(0.0);
-        let most = (w * r.most.max(0.0) / chooser.tau()).min(clamp) * self.cfg.chooser_bound;
-        Some((r, most))
+        Some(r)
     }
 
     /// What the chooser takes off a candidate's cost at the place (nats,
     /// weighted; negative: it adds): its f over τ.
     fn chooser_fit(&self, ctx: &Context, c: &Candidate, class: u64) -> f32 {
-        let (Some((r, _)), Some(chooser), Some(lemmas)) =
-            (&ctx.chooser, &self.chooser, &self.lemmas)
+        let (Some(r), Some(chooser), Some(lemmas)) = (&ctx.chooser, &self.chooser, &self.lemmas)
         else {
             return 0.0;
         };
@@ -509,11 +513,15 @@ impl<D: AsRef<[u8]>> Engine<D> {
     /// The most the chooser may take off the cost of a word whose prior is
     /// at least `u` nats (weighted, over τ, within its clamp).
     fn chooser_allowance(&self, ctx: &Context, u: f32) -> f32 {
-        let (Some((r, _)), Some(chooser)) = (&ctx.chooser, &self.chooser) else {
+        let cfg = &self.cfg;
+        let (Some(r), Some(chooser), Some(lemmas)) = (&ctx.chooser, &self.chooser, &self.lemmas)
+        else {
             return 0.0;
         };
-        let cfg = &self.cfg;
-        let most = cfg.w_chooser * chooser.bound(r, u).max(0.0) / chooser.tau();
+        if cfg.chooser_bound <= 0.0 {
+            return 0.0;
+        }
+        let most = cfg.w_chooser * chooser.bound(lemmas, r, u).max(0.0) / chooser.tau();
         most.min(cfg.chooser_clamp.max(0.0)) * cfg.chooser_bound
     }
 

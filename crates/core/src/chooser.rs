@@ -80,10 +80,10 @@ pub struct Reading {
     u: Vec<f32>,
     bh: f32,
     class_dot: Vec<f32>,
-    /// The most the sentence gives any lemma and class: the part of f the
-    /// features don't bound.
-    sense: f32,
-    pub most: f32,
+    class_max: f32,
+    /// The best lemma's `v·u` — a look through every lemma, so only once a
+    /// search asks for a bound.
+    lemma_max: std::sync::OnceLock<f32>,
 }
 
 /// A sentence's words (lemma rows, classes) and their reading.
@@ -230,7 +230,7 @@ impl<D: AsRef<[u8]>> Chooser<D> {
                 return out;
             }
         }
-        let r = std::sync::Arc::new(self.prepare(lemmas, &self.read(lemmas, words)));
+        let r = std::sync::Arc::new(self.prepare(&self.read(lemmas, words)));
         if let Ok(mut cache) = self.cache.lock() {
             cache.insert(0, (words.to_vec(), r.clone()));
             cache.truncate(CACHED);
@@ -266,7 +266,7 @@ impl<D: AsRef<[u8]>> Chooser<D> {
     /// Ready `h` to score candidates, and bound f: the best lemma, the best
     /// class and the features at their best — what a search allows for
     /// before it knows the word.
-    pub fn prepare<L: AsRef<[u8]>>(&self, lemmas: &Lemmas<L>, h: &[f32]) -> Reading {
+    pub fn prepare(&self, h: &[f32]) -> Reading {
         let (d, dv) = (self.d, self.dv);
         let ws = self.ws();
         let mut u = vec![0f32; dv];
@@ -281,35 +281,32 @@ impl<D: AsRef<[u8]>> Chooser<D> {
                 e.iter().zip(h).map(|(a, b)| a * b).sum()
             })
             .collect();
-        let lemma = (0..=lemmas.unk())
-            .map(|l| lemmas.tgt_dot(l, &u))
-            .fold(f32::MIN, f32::max);
-        let class = class_dot.iter().copied().fold(f32::MIN, f32::max);
-        let lin: f32 = FEATURE_RANGE
-            .iter()
-            .enumerate()
-            .take(self.feats)
-            .map(|(i, &(lo, hi))| {
-                let w = ws[self.feat.0 + i];
-                (w * lo).max(w * hi)
-            })
-            .sum::<f32>()
-            + ws[self.feat.1];
-        let sense = (lemma + bh + class) / (d as f32).sqrt();
+        let class_max = class_dot.iter().copied().fold(f32::MIN, f32::max);
         Reading {
             u,
             bh,
             class_dot,
-            sense,
-            most: sense + lin,
+            class_max,
+            lemma_max: std::sync::OnceLock::new(),
         }
+    }
+
+    /// The most the sentence gives any lemma and class: the part of f the
+    /// features don't bound.
+    fn sense<L: AsRef<[u8]>>(&self, lemmas: &Lemmas<L>, r: &Reading) -> f32 {
+        let lemma = *r.lemma_max.get_or_init(|| {
+            (0..=lemmas.unk())
+                .map(|l| lemmas.tgt_dot(l, &r.u))
+                .fold(f32::MIN, f32::max)
+        });
+        (lemma + r.bh + r.class_max) / (self.d as f32).sqrt()
     }
 
     /// The most f can be for a word whose prior is at least `least` nats:
     /// the features' part bounded by it — the chooser holds rare words back
     /// (its weight on the prior is negative), so where a search's words are
     /// all rare it allows for much less. Never less than f of such a word.
-    pub fn bound(&self, r: &Reading, least: f32) -> f32 {
+    pub fn bound<L: AsRef<[u8]>>(&self, lemmas: &Lemmas<L>, r: &Reading, least: f32) -> f32 {
         let ws = self.ws();
         let prior_lo = (least / 10.0).clamp(0.0, FEATURE_RANGE[1].1);
         let lin: f32 = FEATURE_RANGE
@@ -323,7 +320,7 @@ impl<D: AsRef<[u8]>> Chooser<D> {
             })
             .sum::<f32>()
             + ws[self.feat.1];
-        r.sense + lin
+        self.sense(lemmas, r) + lin
     }
 
     /// What a reading ([`Chooser::reading`]) adds to a candidate's logit:

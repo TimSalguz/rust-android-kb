@@ -28,7 +28,7 @@ fn main() {
         } else {
             words
         };
-        let r = chooser.prepare(&lemmas, &chooser.read(&lemmas, &words));
+        let r = chooser.prepare(&chooser.read(&lemmas, &words));
         let feats: Vec<f32> = f[3].split(',').map(|x| x.parse().unwrap()).collect();
         let got = chooser.score(
             &lemmas,
