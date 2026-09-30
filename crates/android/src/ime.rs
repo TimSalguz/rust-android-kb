@@ -326,6 +326,14 @@ const PROOF_RESCUE: f32 = -2.5;
 /// And when the other stands in the text already (typed, or put in as
 /// typed): the phrase is open, only a firm «no» of the model keeps it out.
 const PROOF_OPENED: f32 = -5.0;
+/// The rules that are right even where the model is a little against them,
+/// when the graph is sure (≥ [`PROOF_SURER`], odds ≥ [`PROOF_MILD`]): on
+/// held-out sentences 71 of 71 such commas stand in the text — a gerund
+/// phrase («Сделав дело, я…»), a participle after its noun, «который»,
+/// «…, сказал он», a clause after a verb («думаю, что»).
+const PROOF_TRUSTED: &[&str] = &["gerund", "participle after", "relative", "said", "ccomp"];
+const PROOF_SURER: f32 = 0.95;
+const PROOF_MILD: f32 = -1.0;
 
 /// A text just copied, offered in the strip (a tap pastes it) for this long.
 const CLIP_OFFER_MS: i64 = 90_000;
@@ -3502,6 +3510,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
         struct Cand {
             pos: usize,
             by: usize,
+            trusted: bool,
             there: bool,
             odds: f32,
             pair: (String, String),
@@ -3519,6 +3528,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 Some(Cand {
                     pos: prev.end,
                     by: p.by,
+                    trusted: PROOF_TRUSTED.contains(&p.rule) && p.chance >= PROOF_SURER,
                     there: !next.before.is_empty(),
                     odds,
                     pair,
@@ -3538,6 +3548,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
             let opened = cands.iter().filter(pair_of).any(|o| o.there);
             let partner = cands.iter().filter(pair_of).any(|o| o.odds >= PROOF_ODDS);
             if c.odds >= PROOF_ODDS
+                || c.trusted && c.odds >= PROOF_MILD
                 || c.odds >= PROOF_RESCUE && partner
                 || c.odds >= PROOF_OPENED && opened
             {
