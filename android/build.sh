@@ -140,10 +140,12 @@ javac --release 11 -Xlint:-options -classpath "$JAR" -d "$OUT/classes" $(find an
 
 echo "== resources + manifest"
 "$BT/aapt2" compile --dir android/res -o "$OUT/res.zip"
+# The assets deflated (the dictionaries 46 → 31 MB): the app copies them out
+# on its first start after an install or update and maps the copies.
 "$BT/aapt2" link -o "$OUT/base.apk" -I "$JAR" --manifest android/AndroidManifest.xml \
     --min-sdk-version "$MIN_SDK" --target-sdk-version "$API" \
     --version-code "$VERSION_CODE" --version-name "$VERSION_NAME" \
-    -A "$OUT/assets" -0 fst "$OUT/res.zip"
+    -A "$OUT/assets" "$OUT/res.zip"
 
 echo "== package"
 cp "$OUT/base.apk" "$OUT/unaligned.apk"

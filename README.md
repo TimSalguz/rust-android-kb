@@ -75,7 +75,8 @@ memory-mapped files. See [`docs/DESIGN.md`](docs/DESIGN.md)
   reads the sentence and re-weighs every reading of a word: words right
   93.74 → 94.39%, next word 17.9 → 20.8% (`kbcore::chooser`).
 - **The sentence's graph:** a student parser on the phone (0.9 MB, i8 weights;
-  taught by Stanza's parses) gives the chance of every link as you type — a
+  taught by Stanza's parses of news, the web and literary prose, with and
+  without punctuation) gives the chance of every link as you type — a
   word waiting for its head says how it will hang on it, so a predicate agrees
   with its real subject (`kbcore::parser`).
 - **Proofreading:** after «.», «?», «!» — or Enter with no mark — the
@@ -148,7 +149,7 @@ tools/eval.py dict.fst --types del --dump del      # show the failures
 ## Android
 
 Download the APK from [Releases](https://github.com/TimSalguz/rust-android-kb/releases)
-(1.0.0 is the first). Releases are signed with the author's release key and
+(the latest is 1.0.1). Releases are signed with the author's release key and
 install over each other; a build signed with another key (a local debug
 build) has to be uninstalled first.
 
@@ -183,8 +184,6 @@ emoji and what was copied lately.
 The detailed plan (in Russian): [`docs/roadmap-model.md`](docs/roadmap-model.md).
 
 Next:
-- the typing parser taught with the marks and literary prose — shipped once
-  the keyboard's rules measure no worse with it;
 - proofreading beyond commas: each word of a finished sentence read again
   with the context on both sides (-тся/-ться, «в течение»), dashes and «?»;
 - the text's graph: names and pronouns across sentences, agreement over the
