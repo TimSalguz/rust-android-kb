@@ -80,7 +80,15 @@ const APART_MORE: &[&str] = &[
     "ну", "да", "нет", "ах", "ох", "эх", "ой", "вот", "наконец", "главное", "действительно",
     "бывает", "ну-ка", "ведь", "впрочем",
 ];
-const INTERJECTIONS: &[&str] = &["ах", "ох", "эх", "ой", "ай", "ух", "увы"];
+const INTERJECTIONS: &[&str] = &[
+    "ах", "ох", "эх", "ой", "ай", "ух", "увы", "о", "ого", "угу", "ага", "эй", "фу", "ура", "хм",
+    "блин", "ба", "эге", "ну-ну",
+];
+/// How sure a known interjection starting the sentence is set apart when the
+/// graph read it otherwise (the comma model has its say in the keyboard).
+const INTERJECTION_FIRST: f32 = 0.85;
+/// The links that set a word apart (an interjection, an aside, an address).
+const APART: &[&str] = &["discourse", "parataxis", "vocative"];
 const SAYING: &[&str] = &[
     "сказа", "говор", "сообщ", "заяв", "отмет", "подчеркн", "добав", "пояснил", "уточн",
     "рассказ", "признал", "написал", "спрос", "ответ", "отвеча", "продолж", "прибав", "повтор",
@@ -298,6 +306,27 @@ pub fn place(
     for (i, &h) in heads.iter().enumerate() {
         kids[h].push(i + 1);
     }
+    // How sure the graph is that a word is set apart: its head, and any of
+    // the links that set it apart (they share the chance between them).
+    let apart: Vec<f32> = (0..n)
+        .map(|i| {
+            let head = graph.heads[i].iter().copied().fold(0.0, f32::max);
+            let rel = match graph.relation_chances.get(i) {
+                Some(p) => p
+                    .iter()
+                    .enumerate()
+                    .filter(|&(k, _)| relations.get(k).is_some_and(|r| APART.contains(&r.as_str())))
+                    .map(|(_, &x)| x)
+                    .sum(),
+                None => graph.relations[i].1,
+            };
+            head * rel
+        })
+        .collect();
+    let interjection: Vec<bool> = (0..n)
+        .map(|i| INTERJECTIONS.contains(&words[i].as_str()) || readings[i].iter().any(|&r| r & INTJ != 0))
+        .collect();
+    let mut chance_by: Vec<Option<f32>> = vec![None; n];
     let tags = (0..n).map(|i| tag(&words[i], &readings[i], rels[i])).collect();
     let s = Read {
         w: words,
@@ -321,7 +350,18 @@ pub fn place(
             set(lo, why, i);
             set(hi + 1, why, i);
         };
-        if b == "advcl" && t.form == Some(Form::Conv) {
+        if i == 1
+            && n > 1
+            && INTERJECTIONS.contains(&word)
+            && s.kids[i].is_empty()
+            && !matches!(b, "case" | "det" | "amod" | "nummod" | "fixed" | "flat" | "compound")
+        {
+            // A known interjection first, whatever the parser made of it: its
+            // other readings («блин» a noun, the subject of «опоздал») are
+            // the grammar's, not the sense's.
+            chance_by[i - 1] = Some(apart[i - 1].max(INTERJECTION_FIRST));
+            set(2, "interjection first", i);
+        } else if b == "advcl" && t.form == Some(Form::Conv) {
             around("gerund");
         } else if b == "acl" && t.form == Some(Form::Part) {
             if lo > head {
@@ -336,7 +376,18 @@ pub fn place(
         } else if (b == "discourse" && INTERJECTIONS.contains(&word))
             || (b == "parataxis" && (PARENTHETICAL.contains(&word) || APART_MORE.contains(&word)))
         {
+            if b == "discourse" {
+                chance_by[i - 1] = Some(apart[i - 1]);
+            }
             around("parenthetical");
+        } else if s.kids[i].is_empty()
+            && matches!(b, "discourse" | "parataxis")
+            && (interjection[i - 1] || lo == 1 && head > 1 && b == "parataxis")
+        {
+            // An interjection («О, а тут…», «Угу, …»), or a word alone at the
+            // sentence's start set apart from what follows («Слушай, ты…»).
+            chance_by[i - 1] = Some(apart[i - 1]);
+            around(if interjection[i - 1] { "interjection" } else { "apart at the start" });
         } else if b == "parataxis" && lo > head && SAYING.iter().any(|p| word.starts_with(p)) {
             around("said");
         } else if b == "parataxis" || b == "appos" {
@@ -406,7 +457,7 @@ pub fn place(
             p.map(|(mark, rule, by)| Placed {
                 before: at - 1,
                 mark,
-                chance: s.sure[by - 1],
+                chance: chance_by[by - 1].unwrap_or(s.sure[by - 1]),
                 rule,
             })
         })

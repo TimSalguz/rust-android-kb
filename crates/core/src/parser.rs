@@ -137,6 +137,9 @@ pub struct Sentence {
     /// Word i's relation to its likeliest head, and how sure (a whole
     /// sentence's graph; empty else).
     pub relations: Vec<(usize, f32)>,
+    /// Word i's chances of every relation to its likeliest head (a whole
+    /// sentence's graph; empty else).
+    pub relation_chances: Vec<Vec<f32>>,
 }
 
 /// A sentence's graph, shared.
@@ -566,6 +569,7 @@ impl<D: AsRef<[u8]>> Parser<D> {
             heads,
             waiting: read.waiting.clone(),
             relations: Vec::new(),
+            relation_chances: Vec::new(),
         }
     }
 
@@ -586,7 +590,7 @@ impl<D: AsRef<[u8]>> Parser<D> {
         let words = &words[words.len().saturating_sub(self.places())..];
         let hs = self.encode(lemmas, words);
         let heads = self.heads_of(&hs);
-        let relations = heads
+        let relation_chances = heads
             .iter()
             .enumerate()
             .map(|(i, row)| {
@@ -600,7 +604,12 @@ impl<D: AsRef<[u8]>> Parser<D> {
                 a.iter_mut().for_each(|v| *v = v.max(0.0));
                 let mut logits = vec![0f32; self.relations.len()];
                 self.linear(&self.rel[1], &a, &mut logits);
-                let p = softmax(&logits);
+                softmax(&logits)
+            })
+            .collect::<Vec<_>>();
+        let relations = relation_chances
+            .iter()
+            .map(|p| {
                 let k = (0..p.len()).max_by(|&a, &b| p[a].total_cmp(&p[b])).unwrap_or(0);
                 (k, p[k])
             })
@@ -609,6 +618,7 @@ impl<D: AsRef<[u8]>> Parser<D> {
             heads,
             waiting: Vec::new(),
             relations,
+            relation_chances,
         }
     }
 
