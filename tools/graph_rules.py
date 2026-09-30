@@ -202,9 +202,10 @@ def mine(g):
                     _, (side, (how, r)), nc, kc, rest_n, rest_k = exc
                     prob = succession(rest_n, rest_k)
                     note = f"unless {side} {'has' if how == 'has' else 'is the object of'} {r} ({kc}/{nc} there)"
+                    unless = (side, how, r)
                 else:
-                    prob, note = succession(n, k), ""
-                kept.append((head, body, support, hc, std, pca, gain, len(bp), prob, note))
+                    prob, note, unless = succession(n, k), "", None
+                kept.append((head, body, support, hc, std, pca, gain, len(bp), prob, note, unless))
     kept.sort(key=lambda x: -x[6])
     return kept
 
@@ -220,10 +221,20 @@ def apply(rules, g, sure=None):
     while changed:
         changed = False
         for head, body, *rest in rules:
-            prob = rest[6]
+            prob, unless = rest[6], rest[8]
+
+            def excepted(x, y, zs):
+                """The rule's exception holds here: it doesn't apply."""
+                if not unless:
+                    return False
+                side, how, r = unless
+                ents = [x] if side == "X" else [y] if side == "Y" else list(zs)
+                table = g.out[r] if how == "has" else g.inn[r]
+                return bool(ents) and all(e in table for e in ents)
             if len(body) == 1:
                 (r, f), = body
-                cands = [((x, y), [((y, r, x) if f else (x, r, y))]) for x, y in g.pairs(r, f) if x != y]
+                cands = [((x, y), [((y, r, x) if f else (x, r, y))]) for x, y in g.pairs(r, f)
+                         if x != y and not excepted(x, y, ())]
             else:
                 (r1, f1), (r2, f2) = body
                 first, second = g.step(r1, f1), g.step(r2, f2)
@@ -231,7 +242,7 @@ def apply(rules, g, sure=None):
                 for x, zs in list(first.items()):
                     for z in zs:
                         for y in second.get(z, ()):
-                            if x != y:
+                            if x != y and not excepted(x, y, (z,)):
                                 cands.append(((x, y), [(z, r1, x) if f1 else (x, r1, z),
                                                        (y, r2, z) if f2 else (z, r2, y)]))
             for (x, y), prem in cands:
@@ -259,7 +270,7 @@ g = Graph(load(opts.facts, only))
 print(f"{len(g.facts)} facts, {len(g.relations)} relations, {len(g.entities)} entities", file=sys.stderr)
 rules = mine(g)
 print("rule\tsupport\thead coverage\tconfidence\tPCA confidence\tbits saved\tprobability\texception")
-for head, body, support, hc, std, pca, gain, nb, prob, note in rules:
+for head, body, support, hc, std, pca, gain, nb, prob, note, unless in rules:
     print(f"{show(head, body)}\t{support}\t{hc:.3f}\t{std:.3f}\t{pca:.3f}\t{gain:.0f}\t{prob:.3f}\t{note}")
 if opts.apply:
     other = Graph(load(opts.apply))
