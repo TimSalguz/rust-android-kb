@@ -30,7 +30,7 @@ fn main() {
     let mut model = (0usize, 0usize);
     // Where the graph is sure (≥ 0.95) and the model mildly against (odds in
     // [-3, 0)): how right each rule is.
-    let mut band: std::collections::BTreeMap<&'static str, (usize, usize)> = Default::default();
+    let mut band: std::collections::BTreeMap<(&'static str, &'static str), (usize, usize)> = Default::default();
     let (mut gold, mut sentences, mut t) = (0usize, 0usize, 0f64);
     for line in std::fs::read_to_string(&a[4]).expect("parses").lines() {
         let f: Vec<&str> = line.split('\t').collect();
@@ -75,8 +75,10 @@ fn main() {
         }
         for i in 1..words.len() {
             let right = usize::from(has(i));
-            if graph[i].is_some_and(|c| c >= 0.95) && (-1.0..0.0).contains(&odds[i]) {
-                let t = band.entry(rule[i]).or_default();
+            if graph[i].is_some_and(|c| c >= 0.95) && odds[i] < 0.0 && odds[i] >= -3.0 {
+                // By rule and by how much the model is against: -1…0, -2…-1, -3…-2.
+                let bin = ["-1…0", "-2…-1", "-3…-2"][((-odds[i]).floor() as usize).min(2)];
+                let t = band.entry((rule[i], bin)).or_default();
                 t.0 += 1;
                 t.1 += right;
             }
@@ -108,9 +110,11 @@ fn main() {
                                 && graph[x].is_some_and(|c| c >= g)
                                 && odds[x] >= m
                         });
+                    let floors = [("subordinate first", -3.0), ("relative", -2.0), ("said", -2.0),
+                                  ("gerund", -2.0), ("participle after", -1.0), ("ccomp", -1.0),
+                                  ("parenthetical", -1.0)];
                     let trusted = graph[i].is_some_and(|c| c >= 0.95)
-                        && ["gerund", "participle after", "relative", "said", "ccomp"].contains(&rule[i])
-                        && odds[i] >= -1.0;
+                        && floors.iter().any(|&(r, f)| r == rule[i] && odds[i] >= f);
                     if put || partner || trusted || sure {
                         paired[k][j].0 += 1;
                         paired[k][j].1 += right;
@@ -131,9 +135,9 @@ fn main() {
         t * 1e3 / sentences.max(1) as f64
     );
     println!("the comma model alone (odds ≥ {COMMA_SURE}): {}", pct(model));
-    println!("the graph sure (≥ 0.95), the model mildly against (odds -1…0), by rule:");
-    for (r, (n, ok)) in &band {
-        println!("  {r:<22} {n:>5} {:>5.1}%", 100.0 * *ok as f64 / (*n).max(1) as f64);
+    println!("the graph sure (≥ 0.95), the model against (odds -3…0), by rule and odds:");
+    for ((r, bin), (n, ok)) in &band {
+        println!("  {r:<22} {bin:<6} {n:>5} {:>5.1}%", 100.0 * *ok as f64 / (*n).max(1) as f64);
     }
     for (title, table) in [
         ("the graph (sure ≥ g) and the model's odds ≥ m", &table),

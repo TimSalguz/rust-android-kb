@@ -87,9 +87,25 @@ const INTERJECTIONS: &[&str] = &[
     "ах", "ох", "эх", "ой", "ай", "ух", "увы", "о", "ого", "угу", "ага", "эй", "фу", "ура", "хм",
     "блин", "ба", "эге", "ну-ну",
 ];
+/// Asides by what they are that start a sentence as asides all but always
+/// («Кстати, …», «Конечно, …»; not «правда», «может», «значит»).
+const ASIDE_FIRST: &[&str] = &[
+    "кстати", "конечно", "наверное", "например", "впрочем", "во-первых", "во-вторых",
+    "в-третьих", "кажется", "пожалуй", "видимо", "разумеется", "по-моему", "по-видимому",
+    "вероятно", "очевидно", "безусловно", "несомненно", "итак", "следовательно", "словом",
+    "по-твоему", "по-вашему", "по-нашему",
+];
 /// How sure a known interjection starting the sentence is set apart when the
 /// graph read it otherwise (the comma model has its say in the keyboard).
 const INTERJECTION_FIRST: f32 = 0.85;
+/// Gerunds grown into adverbs with their word: no commas («сидел сложа
+/// руки», «бежал сломя голову»).
+pub const GERUND_IDIOMS: &[(&str, &str)] = &[
+    ("сложа", "руки"), ("сломя", "голову"), ("покладая", "рук"), ("спустя", "рукава"),
+    ("засучив", "рукава"), ("затаив", "дыхание"), ("разинув", "рот"), ("скрепя", "сердце"),
+    ("очертя", "голову"), ("переводя", "дыхания"), ("смыкая", "глаз"), ("высунув", "язык"),
+    ("сломя", "шею"), ("навострив", "уши"), ("опустив", "руки"),
+];
 /// The links that set a word apart (an interjection, an aside, an address).
 const APART: &[&str] = &["discourse", "parataxis", "vocative"];
 const SAYING: &[&str] = &[
@@ -310,10 +326,17 @@ pub fn place(
         kids[h].push(i + 1);
     }
     // How sure the graph is that a word is set apart: its head, and any of
-    // the links that set it apart (they share the chance between them).
+    // the links that set it apart (they share the chance between them). A
+    // word alone at the sentence's start is set apart after itself whatever
+    // it hangs on: its head doesn't count.
+    let alone_first = |i: usize| i == 0 && !heads.iter().any(|&h| h == 1);
     let apart: Vec<f32> = (0..n)
         .map(|i| {
-            let head = graph.heads[i].iter().copied().fold(0.0, f32::max);
+            let head = if alone_first(i) {
+                1.0
+            } else {
+                graph.heads[i].iter().copied().fold(0.0, f32::max)
+            };
             let rel = match graph.relation_chances.get(i) {
                 Some(p) => p
                     .iter()
@@ -355,7 +378,7 @@ pub fn place(
         };
         if i == 1
             && n > 1
-            && INTERJECTIONS.contains(&word)
+            && (INTERJECTIONS.contains(&word) || ASIDE_FIRST.contains(&word))
             && s.kids[i].is_empty()
             && !matches!(b, "case" | "det" | "amod" | "nummod" | "fixed" | "flat" | "compound")
         {
@@ -363,7 +386,13 @@ pub fn place(
             // other readings («блин» a noun, the subject of «опоздал») are
             // the grammar's, not the sense's.
             chance_by[i - 1] = Some(apart[i - 1].max(INTERJECTION_FIRST));
-            set(2, "interjection first", i);
+            set(2, if ASIDE_FIRST.contains(&word) { "aside first" } else { "interjection first" }, i);
+        } else if b == "advcl"
+            && t.form == Some(Form::Conv)
+            && (i < n && GERUND_IDIOMS.contains(&(word, s.word(i + 1)))
+                || i > 1 && s.word(i - 1) == "не" && i < n && GERUND_IDIOMS.contains(&(word, s.word(i + 1))))
+        {
+            // An idiom: no commas.
         } else if b == "advcl" && t.form == Some(Form::Conv) {
             around("gerund");
         } else if b == "acl" && t.form == Some(Form::Part) {
@@ -373,16 +402,27 @@ pub fn place(
         } else if b == "acl" && s.clause(i) {
             around("relative");
         } else if matches!(b, "advcl" | "ccomp") && s.clause(i) {
-            around(if b == "advcl" { "advcl" } else { "ccomp" });
+            // A clause its conjunction opens («когда», «если», «хотя»):
+            // the surest of them.
+            let joined = s.kids[i]
+                .iter()
+                .any(|&k| s.rel(k) == "mark" && SUBORDINATING.contains(&s.word(k)));
+            around(match (b, joined) {
+                ("advcl", true) if lo == 1 => "subordinate first",
+                ("advcl", true) => "subordinate",
+                ("advcl", false) => "advcl",
+                _ => "ccomp",
+            });
         } else if b == "vocative" {
+            chance_by[i - 1] = Some(apart[i - 1]);
             around("address");
         } else if (b == "discourse" && INTERJECTIONS.contains(&word))
             || (b == "parataxis" && (PARENTHETICAL.contains(&word) || APART_MORE.contains(&word)))
         {
-            if b == "discourse" {
-                chance_by[i - 1] = Some(apart[i - 1]);
-            }
-            around("parenthetical");
+            chance_by[i - 1] = Some(apart[i - 1]);
+            // The words that are asides by what they are («кажется»,
+            // «конечно»), and the ones set apart only now and then («вот»).
+            around(if PARENTHETICAL.contains(&word) { "parenthetical" } else { "apart word" });
         } else if s.kids[i].is_empty()
             && matches!(b, "discourse" | "parataxis")
             && (interjection[i - 1] || lo == 1 && head > 1 && b == "parataxis")

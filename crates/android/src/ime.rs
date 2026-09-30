@@ -338,14 +338,21 @@ const PROOF_RESCUE: f32 = -2.5;
 /// And when the other stands in the text already (typed, or put in as
 /// typed): the phrase is open, only a firm «no» of the model keeps it out.
 const PROOF_OPENED: f32 = -5.0;
-/// The rules that are right even where the model is a little against them,
-/// when the graph is sure (≥ [`PROOF_SURER`], odds ≥ [`PROOF_MILD`]): on
-/// held-out sentences 71 of 71 such commas stand in the text — a gerund
-/// phrase («Сделав дело, я…»), a participle after its noun, «который»,
-/// «…, сказал он», a clause after a verb («думаю, что»).
-const PROOF_TRUSTED: &[&str] = &["gerund", "participle after", "relative", "said", "ccomp"];
+/// The rules that are right even where the comma model is against them,
+/// when the graph is sure (≥ [`PROOF_SURER`]) — how much against each may
+/// be, by their record on held-out sentences (tools/../proof_check): all
+/// right down to the floor but a subordinate clause first (22 of 26) and a
+/// gerund phrase from -1 (18 of 20).
+const PROOF_TRUSTED: &[(&str, f32)] = &[
+    ("subordinate first", -3.0), // «Когда я пришёл, все уже спали»
+    ("relative", -2.0),          // «Город, в котором я родился, …»
+    ("said", -2.0),              // «…, сказал он»
+    ("gerund", -2.0),            // «Прочитав письмо, мама заплакала»
+    ("participle after", -1.0),  // «телефон, забытый кем-то»
+    ("ccomp", -1.0),             // «думаю, что»
+    ("parenthetical", -1.0),     // «Она, кажется, заболела»
+];
 const PROOF_SURER: f32 = 0.95;
-const PROOF_MILD: f32 = -1.0;
 
 /// A text just copied, offered in the strip (a tap pastes it) for this long.
 const CLIP_OFFER_MS: i64 = 90_000;
@@ -3490,6 +3497,11 @@ impl<D: AsRef<[u8]>> Ime<D> {
         if self.commas_rejected.contains(&(a.clone(), b.clone())) {
             return;
         }
+        // A gerund grown into an adverb with its word: no comma («сидел
+        // сложа руки»).
+        if kbcore::marks::GERUND_IDIOMS.iter().any(|(g, _)| *g == b) {
+            return;
+        }
         if !self
             .engine
             .comma_odds_in(head, &a, &b)
@@ -3568,7 +3580,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
             return;
         };
         let sent = &toks[first..];
-        if sent.len() < 3
+        if sent.len() < 2
             || sent.len() > places
             || sent.iter().any(|t| t.text.chars().any(|c| c.is_ascii_alphabetic()))
         {
@@ -3596,7 +3608,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
         struct Cand {
             pos: usize,
             by: usize,
-            trusted: bool,
+            floor: Option<f32>,
             there: bool,
             odds: f32,
             pair: (String, String),
@@ -3614,7 +3626,10 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 Some(Cand {
                     pos: prev.end,
                     by: p.by,
-                    trusted: PROOF_TRUSTED.contains(&p.rule) && p.chance >= PROOF_SURER,
+                    floor: PROOF_TRUSTED
+                        .iter()
+                        .find(|(r, _)| *r == p.rule && p.chance >= PROOF_SURER)
+                        .map(|&(_, f)| f),
                     there: !next.before.is_empty(),
                     odds,
                     pair,
@@ -3625,19 +3640,20 @@ impl<D: AsRef<[u8]>> Ime<D> {
         // around a phrase going together, when the other of its pair stands
         // or goes in and the model is not much against it («Я, будучи …
         // сотрудником, нашёл»).
+        // By itself: the model not against it, or a sure rule's comma the
+        // model is not too much against.
+        let alone = |c: &Cand| c.odds >= PROOF_ODDS || c.floor.is_some_and(|f| c.odds >= f);
         let mut at: Vec<(usize, (String, String))> = Vec::new();
         for c in &cands {
             if c.there || at.iter().any(|(pos, _)| *pos == c.pos) {
                 continue;
             }
             let pair_of = |o: &&Cand| o.pos != c.pos && o.by == c.by;
-            let opened = cands.iter().filter(pair_of).any(|o| o.there);
-            let partner = cands.iter().filter(pair_of).any(|o| o.odds >= PROOF_ODDS);
-            if c.odds >= PROOF_ODDS
-                || c.trusted && c.odds >= PROOF_MILD
-                || c.odds >= PROOF_RESCUE && partner
-                || c.odds >= PROOF_OPENED && opened
-            {
+            // The phrase's other comma stands, or goes in by itself — a
+            // sure rule's pair on a firmer «no» only.
+            let opened = cands.iter().filter(pair_of).any(|o| o.there || alone(o) && c.floor.is_some());
+            let partner = cands.iter().filter(pair_of).any(|o| alone(o));
+            if alone(c) || c.odds >= PROOF_RESCUE && partner || c.odds >= PROOF_OPENED && opened {
                 at.push((c.pos, c.pair.clone()));
             }
         }

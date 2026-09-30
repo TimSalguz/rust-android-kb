@@ -117,6 +117,11 @@ fn main() {
         if parser.exists() {
             engine = engine.open_parser(parser).expect("parser");
         }
+        // And the parser of whole sentences, the proofreading's.
+        let whole = std::path::Path::new(&args[1]).with_file_name("sentence.bin");
+        if whole.exists() {
+            engine = engine.open_sentence_parser(whole).expect("sentence parser");
+        }
     }
     let jitter: f32 = std::env::var("JITTER")
         .ok()

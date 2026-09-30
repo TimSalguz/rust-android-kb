@@ -627,6 +627,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn each_switch_changes_itself_only_and_survives_a_save() {
+        let base = Settings::default();
+        for f in FIELDS.iter().filter(|f| matches!(f.kind, Kind::Bool)) {
+            let was = base.get(f.key).unwrap();
+            let flipped = if was == "1" { "0" } else { "1" };
+            let mut s = Settings::default();
+            assert!(s.set(f.key, flipped), "{} takes a value", f.key);
+            assert_eq!(s.get(f.key).as_deref(), Some(flipped), "{} reads back", f.key);
+            for g in FIELDS.iter().filter(|g| g.key != f.key) {
+                assert_eq!(s.get(g.key), base.get(g.key), "setting {} changed {}", f.key, g.key);
+            }
+            assert_eq!(Settings::parse(&s.to_text()), s, "{} survives a save", f.key);
+        }
+        // A file from an older version (keys missing, one unknown): the
+        // keys there keep their values, the new ones take their defaults.
+        let mut old = Settings::default();
+        old.set("autocorrect", "0");
+        old.set("theme", "dark");
+        let text: String = old
+            .to_text()
+            .lines()
+            .filter(|l| !l.starts_with("borderless=") && !l.starts_with("emoji_on_enter="))
+            .map(|l| format!("{l}\n"))
+            .collect::<String>()
+            + "gone_setting=1\n";
+        assert_eq!(Settings::parse(&text), old);
+    }
+
+    #[test]
     fn every_setting_has_a_label() {
         for f in FIELDS {
             for ui in [Lang::Ru, Lang::En, Lang::De, Lang::Fr, Lang::Es, Lang::Pt] {

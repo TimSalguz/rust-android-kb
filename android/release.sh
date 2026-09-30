@@ -25,6 +25,12 @@ export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-1}
 # Nothing goes out with a failing test.
 cargo test --release -q -p kbcore -p kbime --lib
 nix develop -c android/build.sh
+# Nor with commas that came right before and don't now (tests/commas-ru.tsv).
+cargo build --release -q -p kbime --example typetext
+if ! python3 tools/comma_suite.py > /dev/null; then
+    python3 tools/comma_suite.py | grep -E "NEW|^all" >&2
+    exit 1
+fi
 APK=target/apk/rust-kb-$V.apk
 cp target/apk/rust-kb.apk "$APK"
 git tag -a "v$V" -m "Rust KB $V"
