@@ -171,6 +171,8 @@ Code: MIT OR Apache-2.0, at your option ([`LICENSE-MIT`](LICENSE-MIT),
 is licensed the same way, without any additional terms, unless you say
 otherwise.
 
+The keyboard is free. A way to support it with a donation will come later.
+
 The data built into the app comes from open sources, each under its own
 license (details and attributions: [`data/README.md`](data/README.md) and the
 `data/<language>/README.md` of each language pack):
