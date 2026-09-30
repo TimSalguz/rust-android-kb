@@ -285,6 +285,11 @@ impl Hands {
             '\n' => Action::Enter,
             c => Action::Char(c.to_lowercase().next().unwrap_or(c)),
         };
+        // A letter on a symbol layer: back to the letters first (digits and
+        // marks in a row stay on the symbols, as a person types «18:30»).
+        if c.is_alphabetic() && self.key(action).is_none() {
+            self.tap(Action::Letters, sigma, rng);
+        }
         if c.is_uppercase() {
             self.tap(Action::Shift, sigma, rng);
         }
@@ -292,15 +297,10 @@ impl Hands {
             return;
         }
         // Another layer: the symbols, then the second page of them.
-        let letters = self.key(Action::Char('а')).is_some();
-        self.tap(Action::Symbols, sigma, rng);
-        let found = self.tap(action, sigma, rng)
+        let found = (self.tap(Action::Symbols, sigma, rng) && self.tap(action, sigma, rng))
             || (self.tap(Action::Symbols2, sigma, rng) && self.tap(action, sigma, rng));
         if !found {
             eprintln!("no key for {c:?}");
-        }
-        if letters && self.key(Action::Char('а')).is_none() {
-            self.tap(Action::Letters, sigma, rng);
         }
     }
 

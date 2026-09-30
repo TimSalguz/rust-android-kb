@@ -1917,20 +1917,24 @@ impl<D: AsRef<[u8]>> Ime<D> {
             return t;
         };
         // ?123 hit on its top edge or its upper right corner in the middle
-        // of a word: the finger reaching for я came down short. (Not its
-        // upper half: a tap a little above the middle is ?123 meant.)
+        // of a word: the finger reaching for я came down short — when the
+        // word goes on with it («пр» → «пря…»; not «ок» → «окя»: «ок?»).
+        // (Not its upper half: a tap a little above the middle is ?123.)
         let symbols = &self.keys[k];
         if symbols.action == Action::Symbols && self.suggest && !self.word.is_empty() {
             let (lx, ly) = symbols.local(x, y);
             if ly < -0.3 * symbols.h || (lx > 0.25 * symbols.w && ly < -0.1 * symbols.h) {
-                return self
+                let letter = self
                     .keys
                     .iter()
                     .enumerate()
                     .filter(|(i, b)| *i != k && matches!(b.action, Action::Char(_)))
-                    .min_by(|a, b| a.1.dist2(x, y).total_cmp(&b.1.dist2(x, y)))
-                    .map(|(i, _)| Target::Key(i))
-                    .or(t);
+                    .min_by(|a, b| a.1.dist2(x, y).total_cmp(&b.1.dist2(x, y)));
+                if let Some((i, Action::Char(c))) = letter.map(|(i, b)| (i, b.action)) {
+                    if self.engine.is_prefix(&format!("{}{c}", self.word)) {
+                        return Some(Target::Key(i));
+                    }
+                }
             }
         }
         let enter = &self.keys[k];
@@ -7200,7 +7204,7 @@ mod tests {
 
     #[test]
     fn symbols_hit_on_the_edge_mid_word_is_the_letter_reached_for() {
-        let mut k = ime(WORDS);
+        let mut k = ime(&[("прямо", 3000), ("привет", 5000)]);
         k.start_input("", 1);
         type_str(&mut k, "пр");
         let sym = k
@@ -7237,6 +7241,25 @@ mod tests {
         k.touch(DOWN, 0, sym.x + sym.w * 0.5, sym.y + sym.h * 0.35, t);
         k.touch(UP, 0, sym.x + sym.w * 0.5, sym.y + sym.h * 0.35, t + 60);
         assert_eq!(k.word, "пр");
+        assert_eq!(k.layer, Layer::Symbols);
+    }
+
+    #[test]
+    fn symbols_hit_on_the_edge_after_a_word_that_cannot_go_on_is_the_symbols() {
+        let mut k = ime(WORDS);
+        k.start_input("", 1);
+        type_str(&mut k, "привет");
+        let sym = k
+            .keys
+            .iter()
+            .find(|b| b.action == Action::Symbols)
+            .unwrap()
+            .clone();
+        // «приветя…» is no word: «привет?» it is.
+        let t = now();
+        k.touch(DOWN, 0, sym.x + sym.w * 0.6, sym.y + sym.h * 0.1, t);
+        k.touch(UP, 0, sym.x + sym.w * 0.6, sym.y + sym.h * 0.1, t + 60);
+        assert_eq!(k.word, "привет");
         assert_eq!(k.layer, Layer::Symbols);
     }
 
