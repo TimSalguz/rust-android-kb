@@ -53,6 +53,7 @@ const TEXTS: &[(&str, [&str; 6])] = &[
     ("cal.more", ["Мало — закрасьте побольше", "Too little — paint more", "Zu wenig — mehr ausmalen", "Trop peu — coloriez davantage", "Muy poco — pinta más", "Pouco — pinte mais"]),
     ("cal.area", ["{}: закрасьте, куда удобно достаёт палец", "{}: paint where the thumb comfortably reaches", "{}: ausmalen, wohin der Daumen bequem reicht", "{} : coloriez là où le pouce atteint sans effort", "{}: pinta hasta donde llega cómodo el pulgar", "{}: pinte onde o polegar alcança com conforto"]),
     ("cal.done", ["Готово", "Done", "Fertig", "Terminé", "Listo", "Pronto"]),
+    ("emoji.search", ["Поиск эмодзи", "Search emoji", "Emoji suchen", "Chercher un emoji", "Buscar emoji", "Buscar emoji"]),
     ("arc.need_calibration", ["Сначала калибровка хвата — в настройках", "Calibrate the grip first — in the settings", "Erst den Griff kalibrieren — in den Einstellungen", "Calibrez d'abord la prise — dans les réglages", "Primero calibra el agarre — en los ajustes", "Primeiro calibre a pegada — nos ajustes"]),
     ("cal.skip", ["Пропустить", "Skip", "Überspringen", "Passer", "Omitir", "Pular"]),
     ("cal.cancel", ["Отмена", "Cancel", "Abbrechen", "Annuler", "Cancelar", "Cancelar"]),

@@ -14,7 +14,7 @@ import android.view.WindowInsets;
 final class KeyboardView extends View {
     // Draw-list opcodes (crates/android/src/ime.rs), 7 ints per op.
     private static final int OP_RECT = 1, OP_TEXT = 2, OP_ROTATE = 3, OP_RESTORE = 4, OP_ICON = 5;
-    private static final int ICON_SMILE = 1;
+    private static final int ICON_SMILE = 1, ICON_SEARCH = 2;
     // Touch actions understood by the core.
     private static final int DOWN = 0, MOVE = 1, UP = 2, CANCEL = 3;
 
@@ -88,6 +88,15 @@ final class KeyboardView extends View {
                 canvas.drawCircle(cx + r * 0.36f, cy - r * 0.22f, r * 0.12f, fill);
                 rect.set(cx - r * 0.5f, cy - r * 0.5f, cx + r * 0.5f, cy + r * 0.5f);
                 canvas.drawArc(rect, 25, 130, false, line);
+            } else if (ops[i] == OP_ICON && ops[i + 5] == ICON_SEARCH) {
+                // A lens: a ring up and left, its handle down to the right.
+                float cx = ops[i + 1], cy = ops[i + 2], r = ops[i + 3] / 2f;
+                line.setColor(ops[i + 4]);
+                line.setStrokeWidth(Math.max(1f, r * 0.2f));
+                float lx = cx - r * 0.15f, ly = cy - r * 0.15f, lr = r * 0.6f;
+                canvas.drawCircle(lx, ly, lr, line);
+                float d = lr * 0.7071f;
+                canvas.drawLine(lx + d, ly + d, cx + r * 0.85f, cy + r * 0.85f, line);
             }
         }
     }

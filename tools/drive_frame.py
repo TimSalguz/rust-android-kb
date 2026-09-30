@@ -94,15 +94,22 @@ for op in ops:
         w = k.textlength(t, font=ft)
         k.text((cx - w / 2, base), t, font=ft, fill=argb(color), anchor="ls")
     elif op[0] == OP_ICON:
-        # The smile: a ring, two eyes, a mouth (as KeyboardView draws it).
+        # The smile (a ring, two eyes, a mouth) or the lens, as KeyboardView
+        # draws them.
         _, cx, cy, size, color, _icon, _ = op
         r = size / 2
         c = argb(color)
         lw = max(1, round(r * 0.16))
+        if _icon == 2:
+            lx, ly, lr = cx - r * 0.15, cy - r * 0.15, r * 0.6
+            k.ellipse([lx - lr, ly - lr, lx + lr, ly + lr], outline=c, width=max(1, round(r * 0.2)))
+            k.line([(lx + lr * 0.7071, ly + lr * 0.7071), (cx + r * 0.85, cy + r * 0.85)], fill=c, width=max(1, round(r * 0.2)))
+            continue
         k.ellipse([cx - r, cy - r, cx + r, cy + r], outline=c, width=lw)
         for dx in (-0.36, 0.36):
             e = r * 0.12
             k.ellipse([cx + dx * r - e, cy - 0.22 * r - e, cx + dx * r + e, cy - 0.22 * r + e], fill=c)
-        k.arc([cx - r * 0.5, cy - r * 0.5, cx + r * 0.5, cy + r * 0.5], 25, 155, fill=c, width=lw)
+        if _icon == 1:
+            k.arc([cx - r * 0.5, cy - r * 0.5, cx + r * 0.5, cy + r * 0.5], 25, 155, fill=c, width=lw)
 img.alpha_composite(kb, (0, FIELD_H))
 img.convert("RGB").save(sys.argv[2])

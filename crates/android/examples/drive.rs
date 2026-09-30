@@ -22,6 +22,8 @@
 //!   swipeup       swipe up on the space bar (the next variant)
 //!   at x y        a tap at that point of the keyboard (px)
 //!   wait ms       nothing for ms
+//!   emoji         hold the comma (the emoji panel)
+//!   key k         tap the key `search` (the panel's 🔍), `enter`, `letters`
 //!
 //! The field acts as Android's editor does for an input connection: commit,
 //! composing text, deletes around the cursor; after each batch of edits
@@ -431,6 +433,27 @@ fn main() {
                     hands.touch(DOWN, x, y);
                     hands.pass(hands.t + rest.parse::<i64>().unwrap_or(600));
                     hands.touch(UP, x, y);
+                }
+            }
+            "emoji" => {
+                // Hold the comma: the emoji panel.
+                if let Some((x, y)) = hands.key(Action::Char(',')) {
+                    hands.pass(hands.t + 200);
+                    hands.touch(DOWN, x, y);
+                    hands.pass(hands.t + 700);
+                    hands.touch(UP, x, y);
+                }
+            }
+            "key" => {
+                let action = match rest {
+                    "search" => Some(Action::EmojiSearch),
+                    "enter" => Some(Action::Enter),
+                    "letters" => Some(Action::Letters),
+                    _ => None,
+                };
+                match action.and_then(|a| hands.key(a)) {
+                    Some((x, y)) => hands.tap_at(x, y, 300),
+                    None => eprintln!("no key {rest:?}"),
                 }
             }
             "cursor" => match hands.place(rest) {

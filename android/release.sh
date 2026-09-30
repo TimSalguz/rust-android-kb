@@ -22,6 +22,8 @@ fi
 export VERSION_NAME=$V VERSION_CODE=$((MAJOR * 10000 + MINOR * 100 + PATCH))
 export KEYSTORE=$KEYS/release.jks KEYSTORE_PASS=file:$KEYS/release.pass KEY_ALIAS=rust-kb
 export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-1}
+# Nothing goes out with a failing test.
+cargo test --release -q -p kbcore -p kbime --lib
 nix develop -c android/build.sh
 APK=target/apk/rust-kb-$V.apk
 cp target/apk/rust-kb.apk "$APK"

@@ -124,6 +124,9 @@ pub enum Action {
     Column(u8),
     /// The emoji panel's page back (-1) or on (1).
     Page(i8),
+    /// The emoji panel: search the emoji by name (the letters type the
+    /// query, the strip shows what it finds).
+    EmojiSearch,
 }
 
 /// The comma's long-press: the emoji panel (drawn as its hint).
@@ -462,8 +465,9 @@ pub fn build_compact(lang: Lang, width: f32, top: f32, row_h: f32, lang_key: boo
 pub fn build_panel_row(width: f32, top: f32, row_h: f32) -> Vec<Key> {
     let row = [
         (1.5, Action::Letters),
+        (1.0, Action::EmojiSearch),
         (1.0, Action::Page(-1)),
-        (4.0, Action::Space),
+        (3.0, Action::Space),
         (1.0, Action::Page(1)),
         (1.5, Action::Backspace),
         (1.0, Action::Enter),

@@ -268,6 +268,11 @@ pub const OP_RESTORE: i32 = 4;
 pub const OP_ICON: i32 = 5; // center x, center y, size, color, icon: a line drawing in one color
 /// [`OP_ICON`]'s icons.
 pub const ICON_SMILE: i32 = 1;
+pub const ICON_SEARCH: i32 = 2;
+/// The emoji search's strip: the query on this share of it, the emoji found
+/// in this many cells after it.
+const QUERY_SHARE: f32 = 0.3;
+const SEARCH_CELLS: usize = 7;
 
 /// A text operation for the editor.
 #[derive(Clone, Debug, PartialEq)]
@@ -300,6 +305,10 @@ enum Shift {
 enum Target {
     Key(usize),
     Slot(usize),
+    /// The emoji search's query in the strip (a tap ends the search)…
+    Query,
+    /// …and an emoji it found.
+    Found(usize),
     /// The emoji and clipboard panel, above its bottom row.
     Panel(Hit),
 }
@@ -635,6 +644,8 @@ pub struct Ime<D: AsRef<[u8]>> {
     /// The commas a finished sentence's proofreading just put in (⌫ takes
     /// them out).
     proof_undo: Option<ProofUndo>,
+    /// The emoji search's query while it is open: the letters type it.
+    emoji_search: Option<String>,
     /// `before` begins where the field does (the editor sent less than it
     /// was asked for, and nothing has been cut since).
     whole: bool,
@@ -972,6 +983,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
             rejected: Vec::new(),
             comma_undo: None,
             proof_undo: None,
+            emoji_search: None,
             whole: false,
             commas_rejected: Vec::new(),
             erased: 0,
@@ -1789,6 +1801,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
         self.written.clear();
         self.comma_undo = None;
         self.proof_undo = None;
+        self.emoji_search = None;
         self.commas_rejected.clear();
         self.recorrect = None;
         self.lang_for_field();
@@ -2006,6 +2019,14 @@ impl<D: AsRef<[u8]>> Ime<D> {
             if y < frame.page_bottom {
                 return frame.hit(panel.tab, x, y).map(Target::Panel);
             }
+        }
+        if self.emoji_search.is_some() && y < self.strip_h() {
+            let qw = self.width * QUERY_SHARE;
+            if x < qw {
+                return Some(Target::Query);
+            }
+            let cell = ((x - qw) / ((self.width - qw) / SEARCH_CELLS as f32)).floor() as usize;
+            return (cell < self.stash.found.len().min(SEARCH_CELLS)).then_some(Target::Found(cell));
         }
         if y < self.strip_h() {
             let slot = ((x / self.width) * 3.0).floor().clamp(0.0, 2.0) as usize;
@@ -2269,6 +2290,8 @@ impl<D: AsRef<[u8]>> Ime<D> {
             },
             Some(Target::Slot(i)) => format!("slot{i}"),
             Some(Target::Panel(h)) => format!("{h:?}").to_lowercase(),
+            Some(Target::Query) => "query".into(),
+            Some(Target::Found(i)) => format!("found{i}"),
             None => String::new(),
         }
     }
@@ -2776,7 +2799,20 @@ impl<D: AsRef<[u8]>> Ime<D> {
     }
 
     fn activate(&mut self, target: Target) {
+        if let (Some(_), Target::Key(k)) = (&self.emoji_search, target) {
+            match self.keys[k].action {
+                Action::Space => return self.search_type(' '),
+                Action::Enter => return self.end_search(false),
+                _ => {}
+            }
+        }
         match target {
+            Target::Query => self.end_search(true),
+            Target::Found(i) => {
+                if let Some(e) = self.stash.found.get(i).cloned() {
+                    self.type_emoji(&e);
+                }
+            }
             Target::Slot(i) => self.pick_slot(i),
             Target::Panel(h) => self.panel_tap(h),
             Target::Key(k) => match self.keys[k].action {
@@ -2826,6 +2862,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
                     self.relayout();
                 }
                 Action::Page(step) => self.flip_page(step as i32),
+                Action::EmojiSearch => self.start_search(),
             },
         }
     }
@@ -2838,6 +2875,49 @@ impl<D: AsRef<[u8]>> Ime<D> {
             tabs_h: self.strip_h(),
             page_bottom: self.strip_h() + 3.0 * self.row_h(),
         }
+    }
+
+    /// The panel's 🔍: the letters come back to type the query, the strip
+    /// shows the emoji it finds (as Gboard does).
+    fn start_search(&mut self) {
+        if !self.word.is_empty() {
+            self.commit_word(false);
+        }
+        self.stash.settle();
+        self.panel = None;
+        self.emoji_search = Some(String::new());
+        self.stash.found.clear();
+        self.layer = Layer::Letters;
+        self.relayout();
+    }
+
+    fn search_type(&mut self, c: char) {
+        if let Some(q) = self.emoji_search.as_mut() {
+            if c.is_alphanumeric() || c == ' ' || c == '-' {
+                q.extend(c.to_lowercase());
+            }
+        }
+        self.search_found();
+    }
+
+    fn search_found(&mut self) {
+        let q = self.emoji_search.clone().unwrap_or_default();
+        self.stash.found = panel::search(self.lang, q.trim(), self.emoji_max)
+            .into_iter()
+            .map(String::from)
+            .collect();
+    }
+
+    /// The search done: back to the panel (a tap on the query), or to the
+    /// letters (Enter).
+    fn end_search(&mut self, to_panel: bool) {
+        self.emoji_search = None;
+        self.stash.found.clear();
+        self.stash.settle();
+        if to_panel {
+            self.panel = Some(Panel::new(&self.stash));
+        }
+        self.relayout();
     }
 
     /// Hold the comma: the emoji (the recent ones first, if any).
@@ -3004,6 +3084,9 @@ impl<D: AsRef<[u8]>> Ime<D> {
     }
 
     fn type_char(&mut self, c: char) {
+        if self.emoji_search.is_some() {
+            return self.search_type(c);
+        }
         self.type_char_now(c);
         if matches!(c, '.' | '!' | '?') {
             self.proofread(false);
@@ -4090,6 +4173,10 @@ impl<D: AsRef<[u8]>> Ime<D> {
     }
 
     fn backspace(&mut self) {
+        if let Some(q) = self.emoji_search.as_mut() {
+            q.pop();
+            return self.search_found();
+        }
         // Right after a drawn word went in with its space (nothing since).
         let after_drawn = std::mem::take(&mut self.auto_space);
         self.variants_shown = false;
@@ -5428,6 +5515,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
             .into(),
             Action::Backspace => "⌫".into(),
             Action::Page(step) => if step < 0 { "‹" } else { "›" }.into(),
+            Action::EmojiSearch => String::new(),
             Action::Space if self.panel.is_some() => self.panel.map_or_else(String::new, |p| {
                 format!(
                     "{} {}/{}",
@@ -5661,7 +5749,25 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 );
             }
         }
-        let slots: &[Option<String>] = if prompt.is_some() || self.panel.is_some() {
+        if let Some(q) = &self.emoji_search {
+            // The query in its box (a lens before it), the emoji it finds after.
+            let qw = self.width * QUERY_SHARE;
+            rect(&mut ops, 6.0 * dp, strip_mid - 15.0 * dp, qw - 12.0 * dp, 30.0 * dp, pal.key_special, 15.0 * dp);
+            ops.extend([OP_ICON, (20.0 * dp) as i32, strip_mid as i32, (14.0 * dp) as i32, pal.text_dim, ICON_SEARCH, 0]);
+            let (line, color) = if q.is_empty() {
+                (t(self.ui, "emoji.search").to_string(), pal.text_dim)
+            } else {
+                (format!("{q}│"), pal.text)
+            };
+            let size = (15.0 * dp).min((qw - 40.0 * dp) / (line.chars().count() as f32 * 0.55).max(1.0));
+            text(&mut ops, &mut texts, line, (qw + 22.0 * dp) / 2.0, strip_mid, size, color, false);
+            let cw = (self.width - qw) / SEARCH_CELLS as f32;
+            for (i, e) in self.stash.found.iter().take(SEARCH_CELLS).enumerate() {
+                let cx = qw + (i as f32 + 0.5) * cw;
+                text(&mut ops, &mut texts, e.clone(), cx, strip_mid, (22.0 * dp).min(cw * 0.7), pal.text, false);
+            }
+        }
+        let slots: &[Option<String>] = if prompt.is_some() || self.panel.is_some() || self.emoji_search.is_some() {
             &[]
         } else {
             &self.slots
@@ -5832,6 +5938,9 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 pal.text
             };
             text(&mut ops, &mut texts, label, cx, cy, size, fg, bold);
+            if key.action == Action::EmojiSearch {
+                ops.extend([OP_ICON, cx as i32, cy as i32, (18.0 * dp) as i32, fg, ICON_SEARCH, 0]);
+            }
             let alt = Self::alt_of(key, self.settings.emoji_on_enter);
             if alt == Some(EMOJI_KEY) {
                 // The emoji held here: a smile drawn in the hints' color (an
@@ -6355,6 +6464,30 @@ mod tests {
         k.touch(UP, 0, x, y, 2_600);
         assert!(k.panel.is_some(), "Enter held: the emoji");
         assert!(!k.before.contains('\n'), "and no new line");
+    }
+
+    #[test]
+    fn the_emoji_search_takes_the_letters_and_types_what_it_finds() {
+        let mut k = ime(WORDS);
+        k.start_input("привет ", 1);
+        k.open_panel();
+        k.activate(Target::Key(
+            k.keys.iter().position(|q| q.action == Action::EmojiSearch).unwrap(),
+        ));
+        assert!(k.panel.is_none() && k.emoji_search.is_some());
+        type_str(&mut k, "огон");
+        assert_eq!(k.emoji_search.as_deref(), Some("огон"));
+        assert!(k.stash.found.iter().any(|e| e == "🔥"), "{:?}", k.stash.found);
+        assert_eq!(k.before, "привет ", "the query stays out of the text");
+        type_str(&mut k, "⌫");
+        assert_eq!(k.emoji_search.as_deref(), Some("ого"));
+        type_str(&mut k, "нь");
+        let at = k.stash.found.iter().position(|e| e == "🔥").unwrap();
+        k.activate(Target::Found(at));
+        assert_eq!(k.before, "привет 🔥");
+        // A tap on the query: back to the panel.
+        k.activate(Target::Query);
+        assert!(k.emoji_search.is_none() && k.panel.is_some());
     }
 
     #[test]
@@ -8659,9 +8792,12 @@ mod tests {
         let (ops, texts) = k.draw();
         assert_eq!(ops.len() % 7, 0);
         for op in ops.chunks(7) {
-            assert!(op[0] == OP_RECT || op[0] == OP_TEXT);
+            assert!(matches!(op[0], OP_RECT | OP_TEXT | OP_ROTATE | OP_RESTORE | OP_ICON));
             if op[0] == OP_TEXT {
                 assert!((op[5] as usize) < texts.len());
+            }
+            if op[0] == OP_ICON {
+                assert!(matches!(op[5], ICON_SMILE | ICON_SEARCH));
             }
         }
     }
