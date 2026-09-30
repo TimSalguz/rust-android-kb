@@ -669,6 +669,7 @@ impl<D: AsRef<[u8]>> Engine<D> {
             lemma: self.lemma(word).unwrap_or(lemmas.unk()),
             class: self.word_class(word).unwrap_or(0) as u32,
             grammemes: self.readings(word).iter().fold(0, |a, r| a | r),
+            marks: 0,
         })
     }
 

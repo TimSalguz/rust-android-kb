@@ -19,24 +19,41 @@ fn main() {
     let (parser, lemmas) = (engine.parser().unwrap(), engine.lemma_vectors().unwrap());
     let mut worst = 0f32;
     let mut n = 0;
-    let mut last = (String::new(), Vec::new());
+    let mut last = (String::new(), kbcore::parser::Sentence::default());
+    let (mut rels, mut rels_same) = (0, 0);
+    // A word may bring the marks before it: «,что».
+    let word = |w: &str| {
+        let bare = w.trim_start_matches(|c: char| !c.is_alphabetic());
+        let mut x = engine.parser_word(bare).unwrap();
+        x.marks = kbcore::parser::marks_of(&w[..w.len() - bare.len()]);
+        x
+    };
     for line in std::fs::read_to_string(&a[4]).expect("file").lines() {
         let f: Vec<&str> = line.split('\t').collect();
         if f[0] != last.0 {
-            let words: Vec<_> = f[0]
-                .split(' ')
-                .map(|w| engine.parser_word(w).unwrap())
-                .collect();
-            last = (f[0].to_string(), parser.parse(lemmas, &words));
+            let words: Vec<_> = f[0].split(' ').map(word).collect();
+            let g = if parser.causal() {
+                kbcore::parser::Sentence {
+                    heads: parser.parse(lemmas, &words),
+                    ..Default::default()
+                }
+            } else {
+                parser.parse_full(lemmas, &words)
+            };
+            last = (f[0].to_string(), g);
         }
         let i: usize = f[1].parse().unwrap();
         let want: Vec<f32> = f[2].split(' ').map(|x| x.parse().unwrap()).collect();
-        for (g, w) in last.1[i].iter().zip(&want) {
+        for (g, w) in last.1.heads[i].iter().zip(&want) {
             worst = worst.max((g - w).abs());
             n += 1;
         }
+        if let (Some(r), Some(&(got, _))) = (f.get(3), last.1.relations.get(i)) {
+            rels += 1;
+            rels_same += usize::from(r.parse::<usize>().ok() == Some(got));
+        }
     }
-    println!("{n} chances, largest difference {worst:.5}");
+    println!("{n} chances, largest difference {worst:.5}; relations the same {rels_same} of {rels}");
     // The sentences read word by word, as the keyboard does (each start
     // read once, the rest from the cache): the same graphs.
     let mut worst = 0f32;

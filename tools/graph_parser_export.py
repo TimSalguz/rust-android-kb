@@ -39,12 +39,16 @@ ap.add_argument("model")
 ap.add_argument("--causal", action="store_true")
 ap.add_argument("--out", required=True)
 ap.add_argument("--int8", action="store_true", help="matrices in i8, a scale per row")
+ap.add_argument("--places", type=int, default=12, help="words it reads at most (as trained)")
+ap.add_argument("--d", type=int, default=128)
+ap.add_argument("--layers", type=int, default=4)
 ap.add_argument("--check")
 ap.add_argument("--dump")
 opts = ap.parse_args()
 
 src = open(f"{ROOT}/tools/graph_parser.py", encoding="utf-8").read().split("\ntrain = read(")[0]
-sys.argv = ["graph_parser.py"] + (["--causal"] if opts.causal else [])
+sys.argv = ["graph_parser.py", "--places", str(opts.places), "--d", str(opts.d), "--layers", str(opts.layers)] \
+    + (["--causal"] if opts.causal else [])
 g = {"__file__": f"{ROOT}/tools/graph_parser.py", "__name__": "graph_parser"}
 exec(compile(src, "graph_parser.py", "exec"), g)
 saved = torch.load(opts.model, map_location="cpu")
@@ -67,8 +71,9 @@ for i in range(layers):
 names += ["norm.weight", "norm.bias", "dep.0.weight", "dep.0.bias", "dep.2.weight", "dep.2.bias",
           "hd.0.weight", "hd.0.bias", "hd.2.weight", "hd.2.bias", "later",
           "rel.0.weight", "rel.0.bias", "rel.2.weight", "rel.2.bias"]
-if "marks.weight" in sd:
-    sys.exit("a parser that reads the marks: kbcore::parser doesn't read them yet — no blob")
+reads_marks = "marks.weight" in sd
+if reads_marks:
+    names.insert(names.index("gram.bias") + 1, "marks.weight")
 waiting = opts.causal and "wait_rel.0.weight" in sd
 if waiting:
     names += ["wait_rel.0.weight", "wait_rel.0.bias", "wait_rel.2.weight", "wait_rel.2.bias"]
@@ -81,7 +86,8 @@ def text(s):
 
 with open(opts.out + ".part", "wb") as f:
     f.write(b"KBGP" + struct.pack("<11I", 2 if opts.int8 else 1, d, layers, 4, 2 * d, g["D"], g["N_CLASS"], L,
-                                  len(grammemes), len(rels), 2 if waiting else int(opts.causal)))
+                                  len(grammemes), len(rels),
+                                  (2 if waiting else int(opts.causal)) + (4 if reads_marks else 0)))
     for s in grammemes + rels:
         f.write(text(s))
     # Floats start 4-aligned.
@@ -110,15 +116,22 @@ if opts.check:
             words = line.split()[: L - 1]
             if not words:
                 continue
-            t = g["tensors"]([(words, [0] * len(words), [0] * len(words))])
+            # A word may bring the marks before it: «,что» (a comma, then «что»).
+            marks = [w[: len(w) - len(w.lstrip(",—:;()«»\"!?.…"))] or "_" for w in words]
+            words = [w.lstrip(",—:;()«»\"!?.…") for w in words]
+            n = len(words)
+            t = [x.long() if x.dtype == torch.int32 else x for x in g["tensors"]([(words, [0] * n, [0] * n, marks)])]
             # The grammeme sets as numbered here (the saved table numbers the
             # training's).
             model.bag_rows = torch.tensor(g["np"].stack(g["bag_rows"]))
             with torch.no_grad():
-                s, _ = model(*t[:4])
+                s, h = model(*t[:4], t[6])
                 p = torch.softmax(s[0], -1)
+                pick = p.argmax(-1).clamp(max=L - 1)
+                rel = model.rel(torch.cat([h[0], h[0][pick]], -1)).argmax(-1)
             for i, w in enumerate(words):
-                row = " ".join(f"{float(x):.5f}" for x in p[i + 1][: len(words) + 1])
+                row = " ".join(f"{float(x):.5f}" for x in p[i + 1][: n + 1])
                 later = f" {float(p[i + 1][-1]):.5f}" if opts.causal else ""
-                out.write(f"{' '.join(words)}\t{i}\t{row}{later}\n")
+                out.write(f"{' '.join(m.replace('_', '') + x for m, x in zip(marks, words))}\t{i}\t{row}{later}"
+                          f"\t{int(rel[i + 1])}\n")
     print(f"wrote {opts.dump}")

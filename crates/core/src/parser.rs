@@ -27,6 +27,27 @@ pub struct Word {
     pub class: u32,
     /// The grammemes of all its readings ([`crate::gram::bit`]).
     pub grammemes: u64,
+    /// The marks before it, a bit per kind ([`MARK_KINDS`]): read by a
+    /// parser that learned them.
+    pub marks: u16,
+}
+
+/// The kinds of marks a word may have before it, in the parser's order
+/// (tools/graph_parser.py).
+pub const MARK_KINDS: [char; 13] = [',', '—', ':', ';', '(', ')', '«', '»', '"', '.', '?', '!', '…'];
+
+/// The marks in `text` (the text between the word before and this one), as
+/// a word's `marks`: «, —» → comma and dash.
+pub fn marks_of(text: &str) -> u16 {
+    text.chars()
+        .map(|c| match c {
+            '–' | '-' => '—',
+            '„' => '«',
+            '“' | '”' => '»',
+            c => c,
+        })
+        .filter_map(|c| MARK_KINDS.iter().position(|&k| k == c))
+        .fold(0, |a, k| a | 1 << k)
 }
 
 /// A weight matrix in the blob: `rows × cols` f32 (version 1) or i8 with a
@@ -65,6 +86,8 @@ pub struct Parser<D: AsRef<[u8]>> {
     lemma: Linear,
     class: Mat,
     gram: Linear,
+    /// The marks' projection (a parser that reads them).
+    marks: Option<Mat>,
     pos: Mat,
     root: usize,
     layers: Vec<Layer>,
@@ -74,6 +97,8 @@ pub struct Parser<D: AsRef<[u8]>> {
     later: usize,
     /// How a word waiting hangs on the head still to come (causal field 2).
     wait_rel: Option<[Linear; 2]>,
+    /// A word's relation to its head, from the two: [word, head] → relation.
+    rel: [Linear; 2],
     /// The blob copied to 4-aligned memory, when it doesn't lie so.
     owned: Option<Vec<u32>>,
     /// Sentences read lately, word by word (a sentence doesn't change while
@@ -109,6 +134,9 @@ pub struct Sentence {
     /// Word i's chances of each relation ([`Parser::relations`]) to a head
     /// still to come (empty: the parser doesn't tell).
     pub waiting: Vec<Vec<f32>>,
+    /// Word i's relation to its likeliest head, and how sure (a whole
+    /// sentence's graph; empty else).
+    pub relations: Vec<(usize, f32)>,
 }
 
 /// A sentence's graph, shared.
@@ -142,7 +170,9 @@ impl<D: AsRef<[u8]>> Parser<D> {
             h[8],
             h[9],
         );
-        let (causal, waiting) = (causal >= 1, causal == 2);
+        // The causal field: 0 whole sentence, 1 causal, 2 causal and the
+        // waiting word's relation; + 4: the marks read.
+        let (causal, waiting, reads_marks) = (causal & 3 >= 1, causal & 3 == 2, causal & 4 != 0);
         if heads == 0 || d % heads != 0 {
             return None;
         }
@@ -188,6 +218,7 @@ impl<D: AsRef<[u8]>> Parser<D> {
         let lemma = linear(d, dv, &mut off);
         let class = matrix(classes, d, &mut off);
         let gram_w = linear(d, n_gram, &mut off);
+        let marks = reads_marks.then(|| matrix(d, MARK_KINDS.len(), &mut off));
         let pos = matrix(places, d, &mut off);
         let root = vector(d, &mut off);
         let mut layers = Vec::new();
@@ -205,7 +236,7 @@ impl<D: AsRef<[u8]>> Parser<D> {
         let dep = [linear(d, d, &mut off), linear(d, d, &mut off)];
         let hd = [linear(d, d, &mut off), linear(d, d, &mut off)];
         let later = vector(d, &mut off);
-        let _rel = [linear(d, 2 * d, &mut off), linear(n_rel, d, &mut off)];
+        let rel = [linear(d, 2 * d, &mut off), linear(n_rel, d, &mut off)];
         let wait_rel = waiting.then(|| [linear(d, d, &mut off), linear(n_rel, d, &mut off)]);
         if b.len() != off {
             return None;
@@ -240,6 +271,8 @@ impl<D: AsRef<[u8]>> Parser<D> {
             hd,
             later,
             wait_rel,
+            rel,
+            marks,
             owned,
             cache: std::sync::Mutex::new(Vec::new()),
         })
@@ -296,6 +329,19 @@ impl<D: AsRef<[u8]>> Parser<D> {
         }
     }
 
+    /// Column `k` of a matrix of `out.len()` rows, as f32.
+    fn column(&self, m: &Mat, k: usize, out: &mut [f32]) {
+        for (r, o) in out.iter_mut().enumerate() {
+            *o = match m.scales {
+                None => self.floats(m.at + 4 * (r * m.cols + k), 1)[0],
+                Some(s) => {
+                    let q = self.bytes()[m.at + r * m.cols + k] as i8 as f32;
+                    self.floats(s + 4 * r, 1)[0] * q
+                }
+            };
+        }
+    }
+
     fn linear(&self, (m, b): &Linear, x: &[f32], out: &mut [f32]) {
         let n = x.len();
         let bias = self.floats(*b, out.len());
@@ -346,10 +392,7 @@ impl<D: AsRef<[u8]>> Parser<D> {
     pub fn parse_cached<L: AsRef<[u8]>>(&self, lemmas: &Lemmas<L>, words: &[Word]) -> Graph {
         let words = &words[words.len().saturating_sub(self.places())..];
         if !self.causal {
-            return std::sync::Arc::new(Sentence {
-                heads: self.parse(lemmas, words),
-                waiting: Vec::new(),
-            });
+            return std::sync::Arc::new(self.parse_full(lemmas, words));
         }
         let common = |r: &Read| r.words.iter().zip(words).take_while(|(a, b)| a == b).count();
         let mut read = {
@@ -416,6 +459,14 @@ impl<D: AsRef<[u8]>> Parser<D> {
             .collect();
         let mut gx = vec![0f32; d];
         self.linear(&self.gram, &bag, &mut gx);
+        if let Some(m) = &self.marks {
+            // The marks' projection has no bias: a column per kind.
+            let mut col = vec![0f32; d];
+            for k in (0..MARK_KINDS.len()).filter(|k| w.marks & 1 << k != 0) {
+                self.column(m, k, &mut col);
+                x.iter_mut().zip(&col).for_each(|(a, b)| *a += b);
+            }
+        }
         let c = (w.class as usize).min(self.classes - 1);
         let (mut cx, mut px) = (vec![0f32; d], vec![0f32; d]);
         self.row(&self.class, c, &mut cx);
@@ -514,6 +565,7 @@ impl<D: AsRef<[u8]>> Parser<D> {
         Sentence {
             heads,
             waiting: read.waiting.clone(),
+            relations: Vec::new(),
         }
     }
 
@@ -523,6 +575,45 @@ impl<D: AsRef<[u8]>> Parser<D> {
     /// words after i nothing. Only the last [`Parser::places`] words are read.
     pub fn parse<L: AsRef<[u8]>>(&self, lemmas: &Lemmas<L>, words: &[Word]) -> Vec<Vec<f32>> {
         let words = &words[words.len().saturating_sub(self.places())..];
+        let hs = self.encode(lemmas, words);
+        self.heads_of(&hs)
+    }
+
+    /// The whole sentence's graph (a parser of whole sentences): each word's
+    /// chances of its heads, and its relation to the likeliest one with that
+    /// relation's chance.
+    pub fn parse_full<L: AsRef<[u8]>>(&self, lemmas: &Lemmas<L>, words: &[Word]) -> Sentence {
+        let words = &words[words.len().saturating_sub(self.places())..];
+        let hs = self.encode(lemmas, words);
+        let heads = self.heads_of(&hs);
+        let relations = heads
+            .iter()
+            .enumerate()
+            .map(|(i, row)| {
+                let h = (0..row.len())
+                    .max_by(|&a, &b| row[a].total_cmp(&row[b]))
+                    .unwrap_or(0)
+                    .min(hs.len() - 1);
+                let x: Vec<f32> = hs[i + 1].iter().chain(&hs[h]).copied().collect();
+                let mut a = vec![0f32; self.d];
+                self.linear(&self.rel[0], &x, &mut a);
+                a.iter_mut().for_each(|v| *v = v.max(0.0));
+                let mut logits = vec![0f32; self.relations.len()];
+                self.linear(&self.rel[1], &a, &mut logits);
+                let p = softmax(&logits);
+                let k = (0..p.len()).max_by(|&a, &b| p[a].total_cmp(&p[b])).unwrap_or(0);
+                (k, p[k])
+            })
+            .collect();
+        Sentence {
+            heads,
+            waiting: Vec::new(),
+            relations,
+        }
+    }
+
+    /// The tokens' states after the layers, normed: the root, then the words.
+    fn encode<L: AsRef<[u8]>>(&self, lemmas: &Lemmas<L>, words: &[Word]) -> Vec<Vec<f32>> {
         let (d, n) = (self.d, words.len());
         let mut xs: Vec<Vec<f32>> = Vec::with_capacity(n + 1);
         xs.push(self.root_input());
@@ -580,7 +671,12 @@ impl<D: AsRef<[u8]>> Parser<D> {
             }
             xs = next;
         }
-        let hs: Vec<Vec<f32>> = xs.iter().map(|x| self.layer_norm(self.norm, x)).collect();
+        xs.iter().map(|x| self.layer_norm(self.norm, x)).collect()
+    }
+
+    /// Each word's chances of its heads, from the tokens' states.
+    fn heads_of(&self, hs: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        let (d, n) = (self.d, hs.len() - 1);
         let deps: Vec<Vec<f32>> = hs.iter().map(|h| self.mlp(&self.dep, h)).collect();
         let heads: Vec<Vec<f32>> = hs.iter().map(|h| self.mlp(&self.hd, h)).collect();
         let sd = (d as f32).sqrt();

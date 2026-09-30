@@ -15,6 +15,7 @@ pub mod gesture;
 pub mod gram;
 pub mod keyboard;
 pub mod lemmas;
+pub mod marks;
 pub mod parser;
 pub mod store;
 

@@ -136,13 +136,15 @@ L = args.places + 1  # the root and the words
 
 
 def tensors(rows):
+    # 32-bit on the host (half the memory of long sentences); `batch` makes
+    # them long on the device.
     n = len(rows)
-    lem = torch.full((n, L), UNK, dtype=torch.long)
-    cls = torch.zeros((n, L), dtype=torch.long)
-    bags = torch.zeros((n, L), dtype=torch.long)
+    lem = torch.full((n, L), UNK, dtype=torch.int32)
+    cls = torch.zeros((n, L), dtype=torch.int32)
+    bags = torch.zeros((n, L), dtype=torch.int32)
     mask = torch.ones((n, L), dtype=torch.bool)
-    head = torch.zeros((n, L), dtype=torch.long)
-    rel = torch.zeros((n, L), dtype=torch.long)
+    head = torch.zeros((n, L), dtype=torch.int32)
+    rel = torch.zeros((n, L), dtype=torch.int32)
     marks = torch.zeros((n, L, N_MARKS), dtype=torch.bool)
     mask[:, 0] = False
     for i, (words, heads, rels, before) in enumerate(rows):
@@ -158,6 +160,11 @@ def tensors(rows):
                 if k is not None:
                     marks[i, j + 1, k] = True
     return lem, cls, bags, mask, head, rel, marks
+
+
+def batch(t, idx):
+    """Rows `idx` of tensors `t` on the device, indices as long."""
+    return [x[idx].to(dev).long() if x.dtype == torch.int32 else x[idx].to(dev) for x in t]
 
 
 def drop_marks(marks):
@@ -232,7 +239,7 @@ def evaluate(model, t, marks=True):
     conf, hit = [], []
     with torch.no_grad():
         for i in range(0, t[0].shape[0], 2048):
-            b = [x[i:i + 2048].to(dev) for x in t]
+            b = batch(t, slice(i, i + 2048))
             lem, cls, bags, mask, head, rel, mk = b
             s, h = model(lem, cls, bags, mask, mk if marks else torch.zeros_like(mk))
             g = gold_heads(head)
@@ -268,18 +275,20 @@ valid = read(f"{args.parse}/valid.tsv")
 log(f"{len(train)} training sentences, {len(valid)} held out, {len(RELS)} relations, {len(G)} grammemes; {dev}")
 tt = tensors(train)
 vt = tensors(valid)
+n_train = len(train)
+del train, valid  # the tensors hold them now
 log("tensors ready")
 model = Parser(args.d, args.layers).to(dev)
 opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr, weight_decay=1e-4)
-steps = args.epochs * math.ceil(len(train) / args.batch)
+steps = args.epochs * math.ceil(n_train / args.batch)
 sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=args.lr, total_steps=steps)
 ce = nn.CrossEntropyLoss(reduction="none")
 for epoch in range(1, args.epochs + 1):
-    perm = torch.randperm(len(train))
+    perm = torch.randperm(n_train)
     total = 0.0
     for i in range(0, len(perm), args.batch):
         idx = perm[i:i + args.batch]
-        lem, cls, bags, mask, head, rel, mk = [x[idx].to(dev) for x in tt]
+        lem, cls, bags, mask, head, rel, mk = batch(tt, idx)
         s, h = model(lem, cls, bags, mask, drop_marks(mk))
         g = gold_heads(head)
         real = ~mask
@@ -298,7 +307,7 @@ for epoch in range(1, args.epochs + 1):
         opt.step()
         sched.step()
         total += loss.item() * len(idx)
-    log(f"epoch {epoch}: loss {total / len(train):.4f}")
+    log(f"epoch {epoch}: loss {total / n_train:.4f}")
     print(f"epoch {epoch} ({'as typed' if args.causal else 'whole sentence'}): with the marks "
           f"{evaluate(model, vt)}; without {evaluate(model, vt, marks=False)}", flush=True)
 params = sum(p.numel() for p in model.parameters() if p.requires_grad)
