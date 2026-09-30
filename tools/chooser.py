@@ -42,7 +42,7 @@ import torch.nn as nn
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CTX = 12
 K = 8
-FEATS = 3
+FEATS = 4
 # An edit counts up to this much in the features (the search's bound on f).
 EDIT_CAP = 10.0
 
@@ -169,10 +169,11 @@ def read(path, limit=0):
 
     def close():
         heads = parses.get(" ".join(sentence))
-        for t in range(len(sentence)):
-            r = rows[start + t]
-            ok = heads is not None and len(heads) == len(sentence)
-            rows[start + t] = r[:5] + (t, links(heads, t) if ok else None, r[5])
+        ok = heads is not None and len(heads) == len(sentence)
+        for i in range(start, len(rows)):
+            r = rows[i]
+            t = r[6]
+            rows[i] = r[:5] + (t, links(heads, t) if ok and t < len(heads) else None, r[5])
 
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -182,11 +183,13 @@ def read(path, limit=0):
                 continue
             noise, before, meant, typed, cands = p
             roles = [int(x) for x in role_line.split()][-CTX:]
-            if not before.strip():
+            if not before.strip() and typed:
                 if sentence:
                     close()
                 sentence, start = [], len(rows)
-            sentence.append(meant)
+            pos = len(sentence)
+            if typed:
+                sentence.append(meant)
             sent = before
             for ch in ".!?":
                 sent = sent.split(ch)[-1]
@@ -196,7 +199,7 @@ def read(path, limit=0):
                 w, cost, edit = c.rsplit(":", 2)
                 cs.append((w, float(cost), float(edit)))
             label = next((i for i, c in enumerate(cs) if fold(c[0]) == fold(meant)), -1)
-            rows.append((noise, words, typed, cs, label, roles))
+            rows.append((noise, words, typed, cs, label, roles, pos))
             if limit and len(rows) >= limit:
                 break
     if sentence:
@@ -243,7 +246,8 @@ def tensors(rows):
         for j, (w, c, e) in enumerate(cs):
             kl[i, j] = lemma(w)
             kc[i, j] = class_of.get(w, 0)
-            kf[i, j] = torch.tensor([min(e, EDIT_CAP), unigram(w) / 10, float(w not in lemma_of)])
+            kf[i, j] = torch.tensor([min(e, EDIT_CAP), unigram(w) / 10, float(w not in lemma_of),
+                                     float(typed == "")])
             cost[i, j] = c
             km[i, j] = False
         y[i] = max(label, 0)
@@ -318,8 +322,8 @@ def evaluate(model, rows, t):
     pick = p.argmax(1)
     by = {}
     ll, hits, conf = 0.0, [], []
-    for i, (noise, _, _, cs, label, *_) in enumerate(rows):
-        s = by.setdefault(noise, [0, 0, 0, 0, 0])
+    for i, (noise, _, typed, cs, label, *_) in enumerate(rows):
+        s = by.setdefault(noise + ("" if typed else " next"), [0, 0, 0, 0, 0])
         s[0] += 1
         if label < 0:
             continue
@@ -352,7 +356,7 @@ def evaluate(model, rows, t):
         lines.append(f"  the word's link before it found: {hit / max(tot, 1):.1%} of {tot}")
     for noise in sorted(by):
         s = by[noise]
-        lines.append(f"  {noise:>7}: {s[0]} words, meant among candidates {s[1] / s[0]:.1%}; "
+        lines.append(f"  {noise:>12}: {s[0]} words, meant among candidates {s[1] / s[0]:.1%}; "
                      f"first: keyboard {s[2] / s[1]:.2%} → chooser {s[3] / s[1]:.2%} "
                      f"(keyboard's right first changed: {s[4]})")
     return "\n".join(lines)

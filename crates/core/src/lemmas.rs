@@ -116,7 +116,7 @@ impl<D: AsRef<[u8]>> Lemmas<D> {
             f32_at(b, self.ctx_scale + 4 * c),
             f32_at(b, self.ctx_logz + 4 * c),
         );
-        let f32s = |at: usize| b[at..at + 4 * v].chunks_exact(4);
+        let f32s = |at: usize| b[at..at + 4 * v].as_chunks::<4>().0.iter();
         let rows = b[self.tgt_vec..self.tgt_vec + v * d]
             .chunks_exact(d)
             .zip(f32s(self.tgt_scale))
@@ -128,7 +128,7 @@ impl<D: AsRef<[u8]>> Lemmas<D> {
                 .zip(w)
                 .map(|(&x, &y)| x as i8 as i32 * y as i8 as i32)
                 .sum();
-            let f = |x: &[u8]| f32::from_le_bytes(x.try_into().unwrap());
+            let f = |x: &[u8; 4]| f32::from_le_bytes(*x);
             let lp = dot as f32 * su * f(sw) + f(bias) + f(logp) - lz;
             if n == 0 || (best.len() == n && best[n - 1].1 >= lp) {
                 continue;

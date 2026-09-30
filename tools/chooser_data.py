@@ -14,7 +14,10 @@ off by σ = 0.3, 0.4 or 0.5 key widths, or careful (inside the key meant —
 every change a false correction: the chooser must learn to leave those).
 
 Writes `--out/{train,valid}.tsv`: `noise<TAB>text before<TAB>word meant<TAB>
-typed<TAB>word:cost:edit|…` (typetext's DUMP; noise σ, or `careful`).
+typed<TAB>word:cost:edit|…` (typetext's DUMP; noise σ, or `careful`; typed
+empty: the words expected before the word's first letter). The keyboard
+types without its chooser (`w_chooser=0`): the chooser learns what it
+misses.
 """
 import argparse
 import bz2
@@ -58,8 +61,9 @@ print(f"{len(train)} training sentences, {len(valid)} validation", file=sys.stde
 train, valid = train[: args.n], valid[: args.valid]
 
 assets = f"{ROOT}/target/apk/assets"
-cmd = [f"{ROOT}/target/release/examples/typetext", f"{assets}/dict.fst", f"{assets}/bigrams.fst",
-       f"{assets}/casing.fst"]
+# The keyboard without the chooser: it learns what the keyboard misses.
+typetext = os.environ.get("TYPETEXT", f"{ROOT}/target/release/examples/typetext")
+cmd = [typetext, f"{assets}/dict.fst", f"{assets}/bigrams.fst", f"{assets}/casing.fst"]
 for name, sents in (("valid", valid), ("train", train)):
     procs = []
     per = (len(sents) + args.procs - 1) // args.procs
@@ -67,7 +71,7 @@ for name, sents in (("valid", valid), ("train", train)):
         part = sents[k * per:(k + 1) * per]
         jitter, inside = NOISE[k % len(NOISE)]
         env = dict(os.environ, JITTER=jitter, INSIDE=inside, SEED=str(k + 1),
-                   DUMP=f"{args.out}/{name}.{k}.tsv")
+                   DUMP=f"{args.out}/{name}.{k}.tsv", KB_SET="w_chooser=0")
         lines = f"{args.out}/{name}.{k}.txt"
         with open(lines, "w", encoding="utf-8") as f:
             f.write("\n".join(part) + "\n")

@@ -20,7 +20,8 @@
 //!
 //! `DUMP=file` writes, before each space, what the keyboard read the word
 //! as: `text before<TAB>word meant<TAB>typed<TAB>word:cost:edit|…` (every
-//! candidate, best first) — data for tools/chooser.py.
+//! candidate, best first) — data for tools/chooser.py; and before each
+//! word's first letter what it expected there (typed empty).
 //!
 //! `COMMAS=1` lets the keyboard put in the commas it is sure of.
 //! `SWIPE=σ` draws the words instead (see `common::draw`: corners missed by
@@ -225,7 +226,30 @@ fn main() {
             taps.push((' ', None));
         }
         let mut meant_words = line.split(' ').filter(|w| !w.is_empty());
+        let mut next_words = line.split(' ').filter(|w| !w.is_empty());
+        let mut at_start = true;
         for (c, meant) in taps {
+            // Before a word's first letter: what the keyboard expected there.
+            if at_start && c.is_alphabetic() {
+                if let (Some(d), Some(word)) = (dump.as_mut(), next_words.next()) {
+                    let cands: Vec<String> = ime
+                        .decoded_next()
+                        .iter()
+                        .map(|c| format!("{}:{:.3}:{:.3}", c.word, c.cost, c.edit))
+                        .collect();
+                    if !cands.is_empty() {
+                        writeln!(
+                            d,
+                            "{}\t{}\t\t{}",
+                            field.text,
+                            word.to_lowercase(),
+                            cands.join("|")
+                        )
+                        .ok();
+                    }
+                }
+            }
+            at_start = c == ' ';
             if c == ' ' {
                 if let (Some(d), Some(word)) = (dump.as_mut(), meant_words.next()) {
                     let cands: Vec<String> = ime

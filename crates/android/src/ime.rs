@@ -501,6 +501,9 @@ pub struct Ime<D: AsRef<[u8]>> {
     /// The word being typed read at its place, every candidate (for tools
     /// that learn from the keyboard's choices: `decoded`).
     decoded: Vec<Candidate>,
+    /// The next word expected before any letter of it: every candidate (as
+    /// `decoded`, for tools).
+    decoded_next: Vec<Candidate>,
     /// Read the current word as two (missing or mistyped space).
     split: Option<Split>,
     /// Suggestion strip: left, center, right.
@@ -866,6 +869,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
             now_ms: 0,
             last_cands: Vec::new(),
             decoded: Vec::new(),
+            decoded_next: Vec::new(),
             split: None,
             slots: [None, None, None],
             grips: Grips::default(),
@@ -4636,6 +4640,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
         }
         self.slots = [None, None, None];
         self.predicted.clear();
+        self.decoded_next.clear();
         self.predict_next();
         self.offer_clip();
     }
@@ -4645,11 +4650,11 @@ impl<D: AsRef<[u8]>> Ime<D> {
             return;
         }
         let ctx = self.context_at(&self.before);
+        self.decoded_next = self.engine.decode(&ctx, Evidence::Nothing);
         self.predicted = self
-            .engine
-            .decode(&ctx, Evidence::Nothing)
-            .into_iter()
-            .map(|c| c.word)
+            .decoded_next
+            .iter()
+            .map(|c| c.word.clone())
             .filter(|w| !self.blocked(w, ""))
             .take(3)
             .collect();
@@ -5567,6 +5572,12 @@ impl<D: AsRef<[u8]>> Ime<D> {
     /// (tools: what the keyboard chose among).
     pub fn decoded(&self) -> &[Candidate] {
         &self.decoded
+    }
+
+    /// The next word expected before any letter of it: every candidate, best
+    /// first (tools).
+    pub fn decoded_next(&self) -> &[Candidate] {
+        &self.decoded_next
     }
 
     pub fn key_center(&self, action: Action) -> Option<(f32, f32)> {

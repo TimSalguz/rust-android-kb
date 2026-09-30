@@ -25,8 +25,9 @@ const HEADER: usize = 4 + 9 * 4;
 /// An edit counts up to this much in the features (as tools/chooser.py's
 /// EDIT_CAP): the search's bound on f stays finite.
 pub const EDIT_CAP: f32 = 10.0;
-/// Each feature's range: the edit, the prior nats / 10, no lemma of its own.
-const FEATURE_RANGE: [(f32, f32); 3] = [(0.0, EDIT_CAP), (0.0, 3.0), (0.0, 1.0)];
+/// Each feature's range: the edit, the prior nats / 10, no lemma of its own,
+/// expected before any letter (a prediction).
+const FEATURE_RANGE: [(f32, f32); 4] = [(0.0, EDIT_CAP), (0.0, 3.0), (0.0, 1.0), (0.0, 1.0)];
 
 /// Where one layer's weights start.
 struct Layer {
@@ -136,10 +137,12 @@ impl<D: AsRef<[u8]>> Chooser<D> {
             return None;
         }
         let body = &b[HEADER..];
-        let in_place = cfg!(target_endian = "little") && body.as_ptr() as usize % 4 == 0;
+        let in_place = cfg!(target_endian = "little") && (body.as_ptr() as usize).is_multiple_of(4);
         let owned = (!in_place).then(|| {
-            body.chunks_exact(4)
-                .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            body.as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| f32::from_le_bytes(*c))
                 .collect()
         });
         Some(Chooser {
@@ -166,6 +169,12 @@ impl<D: AsRef<[u8]>> Chooser<D> {
             cache: std::sync::Mutex::new(Vec::new()),
             by_words: std::sync::Mutex::new(Vec::new()),
         })
+    }
+
+    /// Whether it learned to choose among words expected before any letter
+    /// (its fourth feature says so).
+    pub fn predicts(&self) -> bool {
+        self.feats >= 4
     }
 
     /// Words before it the chooser reads (the most recent).

@@ -54,6 +54,8 @@ pub struct Context {
     /// What the chooser read of the sentence, and the most its f may take
     /// off a word's cost (weighted, over τ).
     chooser: Option<(std::sync::Arc<crate::chooser::Reading>, f32)>,
+    /// The words are expected before any letter of them (predictions).
+    predicting: bool,
 }
 
 impl Context {
@@ -63,11 +65,15 @@ impl Context {
         self.prev.as_deref()
     }
 
-    /// The place without the chooser's reading: for what it wasn't taught
-    /// (the words expected before any is typed).
-    pub(crate) fn without_chooser(&self) -> Context {
+    /// The place for the words expected before any letter of them: the
+    /// chooser weighs them as predictions, if it learned to (else not at
+    /// all).
+    pub(crate) fn predicting(&self, chooser_predicts: bool) -> Context {
         let mut c = self.clone();
-        c.chooser = None;
+        c.predicting = true;
+        if !chooser_predicts {
+            c.chooser = None;
+        }
         c
     }
 
@@ -191,6 +197,7 @@ impl<D: AsRef<[u8]>> Engine<D> {
             clause,
             topics,
             chooser,
+            predicting: false,
         }
     }
 
@@ -254,6 +261,7 @@ impl<D: AsRef<[u8]>> Engine<D> {
             } else {
                 1.0
             },
+            if ctx.predicting { 1.0 } else { 0.0 },
         ];
         let f = chooser.score(lemmas, r, l.unwrap_or(unk), class as u32, &feats);
         let clamp = self.cfg.chooser_clamp.max(0.0);
