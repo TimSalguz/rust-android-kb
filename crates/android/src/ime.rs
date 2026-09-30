@@ -386,6 +386,13 @@ const PROOF_VETO: f32 = 0.3;
 /// A set aside of several words («честно говоря», «по слухам») is one by
 /// what it is: only a firm «no» of the head keeps its commas out.
 const PROOF_VETO_SET: f32 = 0.05;
+/// A dash the parser's marks head (with the rules: «Москва — столица») is
+/// this sure of: on held-out sentences typed with no mark 88–89% right, a
+/// fifth of the text's dashes found. Colons and quotes it can't tell yet.
+const PROOF_DASH: f32 = 0.7;
+/// A sentence ended by Enter with no mark, that asks («где ты»): «?» — the
+/// graph says so right 89–91% of the time, for 41–46% of the questions.
+const PROOF_ASK: bool = true;
 /// The rules' commas besides the comma head's (it alone is better: see above).
 const PROOF_RULES: bool = true;
 
@@ -3635,7 +3642,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
             })
             .collect();
         let words: Vec<(&str, &str)> = sent.iter().zip(&marks).map(|(t, m)| (t.text, m.as_str())).collect();
-        let Some((put, _)) = self.engine.sentence_marks(&words) else {
+        let Some((put, end)) = self.engine.sentence_marks(&words) else {
             return;
         };
         // Each comma the graph is sure of: where, which link puts it, whether
@@ -3724,22 +3731,40 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 at.push((c.pos, c.pair.clone()));
             }
         }
-        if at.is_empty() {
+        // What goes in: the commas, then the dashes the graph is sure of
+        // where no mark stands or goes, and — a sentence ended by Enter with
+        // no mark — «?» when it asks.
+        let mut ins: Vec<(usize, &str, Option<(String, String)>)> =
+            at.into_iter().map(|(pos, pair)| (pos, ",", Some(pair))).collect();
+        for p in put.iter().filter(|p| p.mark == Mark::Dash && p.before > 0 && p.learned >= PROOF_DASH) {
+            let (prev, next) = (&sent[p.before - 1], &sent[p.before]);
+            let pair = (prev.text.to_lowercase(), next.text.to_lowercase());
+            if next.before.is_empty()
+                && !ins.iter().any(|(pos, _, _)| *pos == prev.end)
+                && !self.commas_rejected.contains(&pair)
+            {
+                ins.push((prev.end, " —", Some(pair)));
+            }
+        }
+        if by_enter && end == Mark::Question && PROOF_ASK {
+            ins.push((body.len(), "?", None));
+        }
+        if ins.is_empty() {
             return;
         }
-        at.sort_by_key(|(pos, _)| *pos);
-        let from = at[0].0;
+        ins.sort_by_key(|(pos, text, _)| (*pos, *text == " —"));
+        let from = ins[0].0;
         let mut now = String::new();
         let mut last = from;
-        for (pos, _) in &at {
+        for (pos, mark, _) in &ins {
             now.push_str(&text[last..*pos]);
-            now.push(',');
+            now.push_str(mark);
             last = *pos;
         }
         now.push_str(&text[last..]);
         let was = text[from..].to_string();
         let n = was.chars().count();
-        self.log_event("proof", &[("commas", at.len().to_string())]);
+        self.log_event("proof", &[("marks", ins.len().to_string())]);
         self.out.push(Op::Delete(n));
         let keep = self.before.chars().count() - n;
         self.before = self.before.chars().take(keep).collect();
@@ -3749,7 +3774,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
         self.proof_undo = Some(ProofUndo {
             was,
             now,
-            pairs: at.into_iter().map(|(_, pair)| pair).collect(),
+            pairs: ins.into_iter().filter_map(|(_, _, pair)| pair).collect(),
         });
     }
 

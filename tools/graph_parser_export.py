@@ -85,6 +85,10 @@ if waiting:
 commas = not opts.causal and "comma.0.weight" in sd and (saved.get("commas") or opts.commas)
 if commas:
     names += ["comma.0.weight", "comma.0.bias", "comma.2.weight", "comma.2.bias"]
+# The marks head (--marks): each kind of mark before each word.
+marks_head = not opts.causal and "mark_head.0.weight" in sd and bool(saved.get("marks"))
+if marks_head:
+    names += ["mark_head.0.weight", "mark_head.0.bias", "mark_head.2.weight", "mark_head.2.bias"]
 
 
 def text(s):
@@ -96,7 +100,7 @@ with open(opts.out + ".part", "wb") as f:
     f.write(b"KBGP" + struct.pack("<11I", 2 if opts.int8 else 1, d, layers, 4, 2 * d, g["D"], g["N_CLASS"], L,
                                   len(grammemes), len(rels),
                                   (2 if waiting else int(opts.causal)) + (4 if reads_marks else 0)
-                                  + (8 if commas else 0)))
+                                  + (8 if commas else 0) + (16 if marks_head else 0)))
     for s in grammemes + rels:
         f.write(text(s))
     # Floats start 4-aligned.

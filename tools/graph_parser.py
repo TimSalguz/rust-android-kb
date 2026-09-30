@@ -50,6 +50,8 @@ ap.add_argument("--places", type=int, default=12, help="words read at most")
 ap.add_argument("--out")
 ap.add_argument("--commas", action="store_true",
                 help="a head that says where the commas go, from the text without them")
+ap.add_argument("--marks", action="store_true",
+                help="a head that says which marks go before each word, from the text without them")
 args = ap.parse_args()
 dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.manual_seed(1)
@@ -202,12 +204,17 @@ def batch(t, idx):
 def drop_marks(marks, with_which=False):
     """Training: half the sentences lose all their commas (typed without
     them), and any mark goes with a chance of 0.15 — the parser learns to
-    read text with and without them. `with_which`: and which sentences lost
-    their commas."""
+    read text with and without them; with the marks head, a third of the
+    sentences lose every mark. `with_which`: and which sentences lost their
+    commas (or all their marks)."""
     n = marks.shape[0]
     keep = torch.rand(marks.shape, device=marks.device) >= 0.15
     no_commas = torch.rand(n, device=marks.device) < 0.5
     keep[:, :, MARK_KINDS[","]] &= ~no_commas.unsqueeze(-1)
+    if args.marks:
+        bare = torch.rand(n, device=marks.device) < 0.33
+        keep &= ~bare.view(-1, 1, 1)
+        no_commas = no_commas | bare
     return (marks & keep, no_commas) if with_which else marks & keep
 
 
@@ -234,6 +241,9 @@ class Parser(nn.Module):
         # --commas: whether a comma stands before the word (the text read
         # without its commas).
         self.comma = nn.Sequential(nn.Linear(d, d), nn.ReLU(), nn.Linear(d, 1))
+        # --marks: each kind of mark before the word (the text read without
+        # its marks).
+        self.mark_head = nn.Sequential(nn.Linear(d, d), nn.ReLU(), nn.Linear(d, N_MARKS))
 
     def forward(self, lem, cls, bags, mask, marks):
         n = lem.shape[0]
@@ -293,6 +303,36 @@ def comma_eval(model, t):
     model.train()
     return "; ".join(f"≥ {th}: right {ok / max(n, 1):.1%}, found {ok / max(gold_n, 1):.1%}"
                      for th, (n, ok) in counts.items())
+
+
+def marks_eval(model, t):
+    """The marks head on the held-out sentences read without any mark: for
+    each kind, how many it puts are right and how many of the text's it
+    finds, at 0.5 and 0.9."""
+    model.eval()
+    kinds = [",", "—", ":", "«", "»", "(", ")", ";"]
+    counts = {k: {th: [0, 0] for th in (0.5, 0.9)} for k in kinds}
+    gold_n = {k: 0 for k in kinds}
+    with torch.no_grad():
+        for i in range(0, t[0].shape[0], 2048):
+            lem, cls, bags, mask, head, rel, mk = batch(t, slice(i, i + 2048))
+            s, h = model(lem, cls, bags, mask, torch.zeros_like(mk))
+            p = torch.sigmoid(model.mark_head(h))
+            real = ~mask
+            real[:, 0] = False
+            for k in kinds:
+                j = MARK_KINDS[k]
+                gold = mk[:, :, j] & real
+                gold_n[k] += int(gold.sum())
+                for th, c in counts[k].items():
+                    put = (p[:, :, j] >= th) & real
+                    c[0] += int(put.sum())
+                    c[1] += int((put & gold).sum())
+    model.train()
+    return "; ".join(
+        f"{k} ({gold_n[k]}) " + " ".join(f"≥{th}: {ok / max(n, 1):.0%}/{ok / max(gold_n[k], 1):.0%}"
+                                         for th, (n, ok) in counts[k].items())
+        for k in kinds)
 
 
 def evaluate(model, t, marks=True):
@@ -362,6 +402,13 @@ for epoch in range(1, args.epochs + 1):
             wloss = ce(wl.reshape(-1, wl.shape[-1]), rel.reshape(-1)).reshape(rel.shape)
             rloss = rloss + wloss * (g == L)
         loss = ((arc + rloss) * real).sum() / real.sum()
+        if args.marks:
+            # Every kind of mark before each word, in the sentences read
+            # without their commas or all their marks.
+            where = real & no_commas.unsqueeze(-1)
+            mloss = nn.functional.binary_cross_entropy_with_logits(
+                model.mark_head(h), mk.float(), reduction="none").sum(-1)
+            loss = loss + (mloss * where).sum() / where.sum().clamp(min=1)
         if args.commas:
             # Where the commas were, in the sentences read without them (not
             # before the first word).
@@ -382,10 +429,13 @@ for epoch in range(1, args.epochs + 1):
           f"{evaluate(model, vt)}; without {evaluate(model, vt, marks=False)}", flush=True)
     if args.commas:
         print(f"epoch {epoch} commas from the text without them: {comma_eval(model, vt)}", flush=True)
+    if args.marks:
+        print(f"epoch {epoch} marks from the text without any (right/found): {marks_eval(model, vt)}", flush=True)
 params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"{params} parameters (the lemma vectors, {nc}×{D}, shared and frozen)", flush=True)
 if args.out:
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
-    torch.save({"model": model.state_dict(), "rels": RELS, "grammemes": grammemes, "commas": args.commas},
+    torch.save({"model": model.state_dict(), "rels": RELS, "grammemes": grammemes, "commas": args.commas,
+                "marks": args.marks},
                args.out)
     log(f"wrote {args.out}")

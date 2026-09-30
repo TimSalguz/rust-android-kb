@@ -42,6 +42,15 @@ fn main() {
     // h 0.7, v 0.3, and a phrase's other comma along (the head ≥ 0.1 for it).
     let mut headed_pairs = (0usize, 0usize);
     let mut set_phrases = (0usize, 0usize);
+    // The other marks, from the text typed with none: by kind and level —
+    // put, right; and the text's own count.
+    let other = [(Mark::Dash, '—'), (Mark::Colon, ':'), (Mark::OpenQuote, '«'), (Mark::CloseQuote, '»')];
+    let mark_levels = [0.5f32, 0.7, 0.8, 0.9, 0.95];
+    let mut other_put = vec![vec![(0usize, 0usize); mark_levels.len()]; other.len()];
+    let mut other_gold = vec![0usize; other.len()];
+    // The graph's «?»: put (it says a question), right (the text ends so),
+    // and the text's questions.
+    let mut asks = (0usize, 0usize, 0usize);
     let mut model = (0usize, 0usize);
     // Where the graph is sure (≥ 0.95) and the model mildly against (odds in
     // [-3, 0)): how right each rule is.
@@ -78,6 +87,29 @@ fn main() {
         t += t0.elapsed().as_secs_f64();
         sentences += 1;
         let has = |i: usize| marks[i].contains(',');
+        // The other marks: the sentence read with no mark at all.
+        let bare: Vec<(&str, &str)> = words.iter().map(|w| (*w, "")).collect();
+        if let Some((put, end)) = engine.sentence_marks(&bare) {
+            let question = f.get(7).is_some_and(|m| m.contains('?'));
+            asks.2 += usize::from(question);
+            if end == Mark::Question {
+                asks.0 += 1;
+                asks.1 += usize::from(question);
+            }
+            for (k, &(mark, ch)) in other.iter().enumerate() {
+                other_gold[k] += (0..words.len()).filter(|&i| marks[i].contains(ch)).count();
+                for p in put.iter().filter(|p| p.mark == mark) {
+                    let right = usize::from(marks[p.before].contains(ch));
+                    let c = if p.learned >= 0.0 { p.learned } else { p.chance };
+                    for (l, &t) in mark_levels.iter().enumerate() {
+                        if c >= t {
+                            other_put[k][l].0 += 1;
+                            other_put[k][l].1 += right;
+                        }
+                    }
+                }
+            }
+        }
         gold += (1..words.len()).filter(|&i| has(i)).count();
         // The comma model's odds for each gap, with the text typed so far.
         let mut odds = vec![f32::NEG_INFINITY; words.len()];
@@ -273,6 +305,29 @@ fn main() {
     println!("a rule's comma (≥ 0.8) the head gives at least t (0.3, 0.4, …, 0.8):");
     for (h, t) in [0.3f32, 0.4, 0.5, 0.6, 0.7, 0.8].iter().enumerate() {
         println!("  {t:>5.2}  {}", pct(both_say[h]));
+    }
+    println!(
+        "«?» at the end: put {}, right {:.1}%, found {:.1}% of {}",
+        asks.0,
+        100.0 * asks.1 as f64 / asks.0.max(1) as f64,
+        100.0 * asks.1 as f64 / asks.2.max(1) as f64,
+        asks.2
+    );
+    if other_gold.iter().any(|&g| g > 0) {
+        println!("the other marks, from the text typed with none — put, right, found at 0.5 0.7 0.8 0.9 0.95:");
+        for (k, &(_, ch)) in other.iter().enumerate() {
+            let cells: Vec<String> = other_put[k]
+                .iter()
+                .map(|&(n, ok)| {
+                    format!(
+                        "{n:>5} {:>5.1}% {:>5.1}%",
+                        100.0 * ok as f64 / n.max(1) as f64,
+                        100.0 * ok as f64 / other_gold[k].max(1) as f64
+                    )
+                })
+                .collect();
+            println!("  {ch} ({:>4})  {}", other_gold[k], cells.join(" |"));
+        }
     }
     println!("commas of the text not put ({} put), by why and the next word's relation:", put_n);
     let mut by_why: std::collections::BTreeMap<&str, usize> = Default::default();

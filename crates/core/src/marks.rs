@@ -19,6 +19,10 @@ pub enum Mark {
     Dash,
     Period,
     Question,
+    /// By the parser's marks head only: a colon, quotes opening and closing.
+    Colon,
+    OpenQuote,
+    CloseQuote,
 }
 
 /// A mark before a word: its place (the word's index, 0-based), the mark,
@@ -578,6 +582,33 @@ pub fn place(
                     by: j,
                     learned: c,
                 });
+            }
+        }
+    }
+    // The marks head's other marks: a dash, a colon, quotes (MARK_KINDS'
+    // places 1, 2, 6, 7) — on the rules' dashes, and its own where none.
+    if graph.marks.len() == n {
+        for p in out.iter_mut().filter(|p| p.mark == Mark::Dash) {
+            p.learned = graph.marks[p.before][1];
+        }
+        for (k, mark) in [(1, Mark::Dash), (2, Mark::Colon), (6, Mark::OpenQuote), (7, Mark::CloseQuote)] {
+            for j in 0..n {
+                let c = graph.marks[j][k];
+                // An opening quote may stand before the first word; the others
+                // between words.
+                if c >= LEARNED_LEAST
+                    && (j > 0 || mark == Mark::OpenQuote)
+                    && !out.iter().any(|p| p.mark == mark && p.before == j)
+                {
+                    out.push(Placed {
+                        before: j,
+                        mark,
+                        chance: c,
+                        rule: "learned",
+                        by: j,
+                        learned: c,
+                    });
+                }
             }
         }
     }

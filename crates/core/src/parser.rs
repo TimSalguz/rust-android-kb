@@ -100,6 +100,9 @@ pub struct Parser<D: AsRef<[u8]>> {
     /// Whether a comma stands before a word, from the text without its
     /// commas (a whole sentence's parser, field + 8).
     comma: Option<[Linear; 2]>,
+    /// Each kind of mark before a word ([`MARK_KINDS`]' order), from the
+    /// text without its marks (field + 16).
+    mark_head: Option<[Linear; 2]>,
     /// A word's relation to its head, from the two: [word, head] → relation.
     rel: [Linear; 2],
     /// The blob copied to 4-aligned memory, when it doesn't lie so.
@@ -146,6 +149,9 @@ pub struct Sentence {
     /// The chance of a comma before word i (a parser with the comma head;
     /// empty else).
     pub commas: Vec<f32>,
+    /// The chance of each kind of mark before word i ([`MARK_KINDS`]' order;
+    /// a parser with the marks head; empty else).
+    pub marks: Vec<Vec<f32>>,
 }
 
 /// A sentence's graph, shared.
@@ -180,9 +186,15 @@ impl<D: AsRef<[u8]>> Parser<D> {
             h[9],
         );
         // The causal field: 0 whole sentence, 1 causal, 2 causal and the
-        // waiting word's relation; + 4: the marks read; + 8: the comma head.
-        let (causal, waiting, reads_marks, commas) =
-            (causal & 3 >= 1, causal & 3 == 2, causal & 4 != 0, causal & 8 != 0);
+        // waiting word's relation; + 4: the marks read; + 8: the comma head;
+        // + 16: the marks head (every kind of mark, MARK_KINDS' order).
+        let (causal, waiting, reads_marks, commas, marks_head) = (
+            causal & 3 >= 1,
+            causal & 3 == 2,
+            causal & 4 != 0,
+            causal & 8 != 0,
+            causal & 16 != 0,
+        );
         if heads == 0 || d % heads != 0 {
             return None;
         }
@@ -249,6 +261,7 @@ impl<D: AsRef<[u8]>> Parser<D> {
         let rel = [linear(d, 2 * d, &mut off), linear(n_rel, d, &mut off)];
         let wait_rel = waiting.then(|| [linear(d, d, &mut off), linear(n_rel, d, &mut off)]);
         let comma = commas.then(|| [linear(d, d, &mut off), linear(1, d, &mut off)]);
+        let mark_head = marks_head.then(|| [linear(d, d, &mut off), linear(MARK_KINDS.len(), d, &mut off)]);
         if b.len() != off {
             return None;
         }
@@ -283,6 +296,7 @@ impl<D: AsRef<[u8]>> Parser<D> {
             later,
             wait_rel,
             comma,
+            mark_head,
             rel,
             marks,
             owned,
@@ -580,6 +594,7 @@ impl<D: AsRef<[u8]>> Parser<D> {
             relations: Vec::new(),
             relation_chances: Vec::new(),
             commas: Vec::new(),
+            marks: Vec::new(),
         }
     }
 
@@ -637,12 +652,26 @@ impl<D: AsRef<[u8]>> Parser<D> {
                 .collect(),
             None => Vec::new(),
         };
+        let marks: Vec<Vec<f32>> = match &self.mark_head {
+            Some(m) => (1..hs.len())
+                .map(|i| {
+                    let mut a = vec![0f32; self.d];
+                    self.linear(&m[0], &hs[i], &mut a);
+                    a.iter_mut().for_each(|v| *v = v.max(0.0));
+                    let mut o = vec![0f32; MARK_KINDS.len()];
+                    self.linear(&m[1], &a, &mut o);
+                    o.iter().map(|&x| 1.0 / (1.0 + (-x).exp())).collect()
+                })
+                .collect(),
+            None => Vec::new(),
+        };
         Sentence {
             heads,
             waiting: Vec::new(),
             relations,
             relation_chances,
             commas,
+            marks,
         }
     }
 
