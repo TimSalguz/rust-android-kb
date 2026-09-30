@@ -265,6 +265,9 @@ pub const OP_RECT: i32 = 1; // x, y, w, h, color, radius
 pub const OP_TEXT: i32 = 2; // center x, baseline y, size, color, text index, bold
 pub const OP_ROTATE: i32 = 3; // center x, center y, millidegrees clockwise: until OP_RESTORE
 pub const OP_RESTORE: i32 = 4;
+pub const OP_ICON: i32 = 5; // center x, center y, size, color, icon: a line drawing in one color
+/// [`OP_ICON`]'s icons.
+pub const ICON_SMILE: i32 = 1;
 
 /// A text operation for the editor.
 #[derive(Clone, Debug, PartialEq)]
@@ -5829,8 +5832,21 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 pal.text
             };
             text(&mut ops, &mut texts, label, cx, cy, size, fg, bold);
-            // The emoji's own colors would stand out of the theme: no hint for them.
-            if let Some(alt) = Self::alt_of(key, self.settings.emoji_on_enter).filter(|&a| a != EMOJI_KEY) {
+            let alt = Self::alt_of(key, self.settings.emoji_on_enter);
+            if alt == Some(EMOJI_KEY) {
+                // The emoji held here: a smile drawn in the hints' color (an
+                // emoji's own colors would stand out of the theme).
+                ops.extend([
+                    OP_ICON,
+                    (key.x + key.w - gx - 7.5 * dp) as i32,
+                    (key.y + gy + 7.5 * dp) as i32,
+                    (9.0 * dp) as i32,
+                    pal.text_dim,
+                    ICON_SMILE,
+                    0,
+                ]);
+            }
+            if let Some(alt) = alt.filter(|&a| a != EMOJI_KEY) {
                 let hint = (key.x + key.w - gx - 7.0 * dp, key.y + gy + 9.0 * dp);
                 text(
                     &mut ops,

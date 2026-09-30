@@ -16,7 +16,7 @@ FALLBACKS = [
     "/nix/store/71mxn2pyq807r32qsd2mdszkajhlb39q-dejavu-fonts-2.37/share/fonts/truetype/DejaVuSans.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
 ]
-OP_RECT, OP_TEXT, OP_ROTATE, OP_RESTORE = 1, 2, 3, 4
+OP_RECT, OP_TEXT, OP_ROTATE, OP_RESTORE, OP_ICON = 1, 2, 3, 4, 5
 WIDTH, FIELD_H = 1080, 260
 
 
@@ -93,5 +93,16 @@ for op in ops:
         ft = font(max(size, 8), bool(bold))
         w = k.textlength(t, font=ft)
         k.text((cx - w / 2, base), t, font=ft, fill=argb(color), anchor="ls")
+    elif op[0] == OP_ICON:
+        # The smile: a ring, two eyes, a mouth (as KeyboardView draws it).
+        _, cx, cy, size, color, _icon, _ = op
+        r = size / 2
+        c = argb(color)
+        lw = max(1, round(r * 0.16))
+        k.ellipse([cx - r, cy - r, cx + r, cy + r], outline=c, width=lw)
+        for dx in (-0.36, 0.36):
+            e = r * 0.12
+            k.ellipse([cx + dx * r - e, cy - 0.22 * r - e, cx + dx * r + e, cy - 0.22 * r + e], fill=c)
+        k.arc([cx - r * 0.5, cy - r * 0.5, cx + r * 0.5, cy + r * 0.5], 25, 155, fill=c, width=lw)
 img.alpha_composite(kb, (0, FIELD_H))
 img.convert("RGB").save(sys.argv[2])
