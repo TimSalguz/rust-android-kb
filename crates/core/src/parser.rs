@@ -235,11 +235,7 @@ impl<D: AsRef<[u8]>> Parser<D> {
     }
 
     /// [`Parser::parse`], kept for the sentences parsed lately.
-    pub fn parse_cached<L: AsRef<[u8]>>(
-        &self,
-        lemmas: &Lemmas<L>,
-        words: &[Word],
-    ) -> Graph {
+    pub fn parse_cached<L: AsRef<[u8]>>(&self, lemmas: &Lemmas<L>, words: &[Word]) -> Graph {
         let words = &words[words.len().saturating_sub(self.places())..];
         if let Ok(mut cache) = self.cache.lock() {
             if let Some(i) = cache.iter().position(|r| r.0 == words) {

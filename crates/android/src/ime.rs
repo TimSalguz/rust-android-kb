@@ -3327,7 +3327,9 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 .strip_suffix(sep)
                 .and_then(|b| b.strip_suffix(committed.as_str()))
                 .unwrap_or("");
-            let here = self.context_at(rest);
+            // (Without the chooser, as the window weighs them: its pull to
+            // the word typed held «в» against «во что».)
+            let here = self.context_at(rest).without_chooser();
             self.engine.weigh(&here, &mut readings);
             readings.truncate(WINDOW_ALTS);
             // The words it is spelled for by mistake (к / ко, учится /
