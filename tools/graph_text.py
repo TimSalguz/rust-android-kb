@@ -18,6 +18,7 @@ longer than the parser reads
 is cut at its «;» or «:» (then at the limit): each piece parsed apart.
 """
 import argparse
+import math
 import os
 import re
 import sys
@@ -30,9 +31,13 @@ ap.add_argument("out")
 ap.add_argument("--d", type=int, default=128)
 ap.add_argument("--layers", type=int, default=4)
 ap.add_argument("--places", type=int, default=40)
+ap.add_argument("--tree", action="store_true",
+                help="the best tree whose links don't cross (Eisner), on the joint scores")
+ap.add_argument("--joint", action="store_true",
+                help="choose each word's head and relation together, weighed by the grammar of the pair")
 ap.add_argument("--grammar", action="store_true",
                 help="mask a bare noun's heads by case (off: without the link's type it forbids true links — "
-                     "a nominal predicate's subject, conjuncts with their own prepositions; 92.99 → 92.28% "
+                     "a nominal predicate's subject, conjuncts with their own prepositions; 92.99 → 92.28%% "
                      "on «Война и мир»; the case must go with the relation, head and relation chosen together)")
 opts = ap.parse_args()
 
@@ -130,6 +135,207 @@ def admissible(words):
     return mask
 
 
+# ---------------------------------------------------------------- the joint choice
+GOVERNS = {"у": {"gent", "gen2"}, "от": {"gent", "gen2"}, "из": {"gent", "gen2"}, "до": {"gent", "gen2"},
+           "для": {"gent"}, "без": {"gent", "gen2"}, "после": {"gent"}, "около": {"gent"}, "возле": {"gent"},
+           "кроме": {"gent"}, "среди": {"gent"}, "из-за": {"gent"}, "из-под": {"gent"}, "против": {"gent"},
+           "вокруг": {"gent"}, "мимо": {"gent"}, "к": {"datv"}, "ко": {"datv"}, "по": {"datv", "loct", "accs"},
+           "с": {"ablt", "gent", "gen2"}, "со": {"ablt", "gent"}, "в": {"loct", "loc2", "accs", "acc2"},
+           "во": {"loct", "accs"}, "на": {"loct", "loc2", "accs"}, "о": {"loct", "accs"}, "об": {"loct", "accs"},
+           "обо": {"loct"}, "при": {"loct"}, "за": {"ablt", "accs"}, "под": {"ablt", "accs"}, "над": {"ablt"},
+           "перед": {"ablt"}, "между": {"ablt", "gent"}, "через": {"accs"}, "про": {"accs"}, "сквозь": {"accs"}}
+PENALTY = 8.0  # nats: the grammar against a pair — not a ban (unknown words have no readings)
+
+
+def readings_of(word):
+    return graph_tags.sets.get(graph_tags.word_set.get(word, ""), [])
+
+
+def cases_of(rs, pos):
+    return {g for r in rs if r[0] in pos for g in r[1:] if g in CASES}
+
+
+def agree(dep, head):
+    """A modifier and its noun share a case and a number (a gender too in
+    the singular) in some pair of their readings."""
+    for a in dep:
+        if a[0] not in ("ADJF", "PRTF", "NPRO", "NUMR"):
+            continue
+        for b in head:
+            if b[0] not in ("NOUN", "NPRO", "ADJF"):
+                continue
+            ca, cb = set(a) & CASES, set(b) & CASES
+            if not (ca & cb):
+                continue
+            na, nb = set(a) & {"sing", "plur"}, set(b) & {"sing", "plur"}
+            if na and nb and not (na & nb):
+                continue
+            if "sing" in (na & nb):
+                ga, gb = set(a) & {"masc", "femn", "neut"}, set(b) & {"masc", "femn", "neut"}
+                if ga and gb and not (ga & gb) and "ms-f" not in a and "ms-f" not in b:
+                    continue
+            return True
+    return False
+
+
+CASE_TABLE = None
+
+
+def case_table():
+    """P(case | relation, preposition) learned from the teacher's parses
+    (data/graph/case_by_relation.json): «iobj» is the dative 0.74 and the
+    instrumental 0.23 («развела руками»), a bare «nmod» the genitive 0.97."""
+    global CASE_TABLE
+    if CASE_TABLE is None:
+        import json
+        raw = json.load(open(f"{ROOT}/data/graph/case_by_relation.json", encoding="utf-8"))
+        CASE_TABLE = {}
+        for key, d in raw.items():
+            t = sum(d.values())
+            if t >= 50:
+                CASE_TABLE[key] = {c: (k + 1) / (t + 10) for c, k in d.items()}
+    return CASE_TABLE
+
+
+HEAD_TABLE = None
+UPOS_OF = {"NOUN": ("NOUN", "PROPN"), "NPRO": ("PRON", "DET"), "VERB": ("VERB", "AUX"), "INFN": ("VERB",),
+           "GRND": ("VERB",), "PRTF": ("VERB", "ADJ"), "PRTS": ("VERB", "ADJ"), "ADJF": ("ADJ", "DET"),
+           "ADJS": ("ADJ",), "COMP": ("ADJ", "ADV"), "ADVB": ("ADV",), "PRED": ("ADV", "VERB"),
+           "NUMR": ("NUM",), "PREP": ("ADP",), "CONJ": ("CCONJ", "SCONJ"), "PRCL": ("PART",), "INTJ": ("INTJ",)}
+
+
+def head_table():
+    """P(the head's part of speech | relation), learned from the parses:
+    «iobj» hangs on a verb 0.83 (a noun 0.04), «nmod» on a noun 0.95."""
+    global HEAD_TABLE
+    if HEAD_TABLE is None:
+        import json
+        raw = json.load(open(f"{ROOT}/data/graph/head_pos_by_relation.json", encoding="utf-8"))
+        HEAD_TABLE = {}
+        for r, d in raw.items():
+            t = sum(d.values())
+            if t >= 50:
+                HEAD_TABLE[r] = {u: (k + 1) / (t + 20) for u, k in d.items()}
+    return HEAD_TABLE
+
+
+def grammar_costs(words, rel_names):
+    """Each (word, head, relation)'s cost by the grammar of the pair, in
+    nats: how unlikely the word's possible cases are for the relation (and
+    its preposition), as the parses show — 0 for the relation's likeliest
+    case; a name's word or an apposition not sharing its head's case, an
+    adjective not agreeing with its noun: PENALTY (one name's words share
+    their case almost always), PENALTY / 2."""
+    table = case_table()
+    n = len(words)
+    rs = [readings_of(w) for w in words]
+    nounish = [bool(r) and all(x[0] in ("NOUN", "NPRO") for x in r) for r in rs]
+    modifier = [bool(r) and all(x[0] in ("ADJF", "PRTF", "NUMR", "NPRO") for x in r) and
+                any(x[0] in ("ADJF", "PRTF") for x in r) for r in rs]
+    prep = []
+    for i in range(n):  # the preposition before a noun, over its modifiers
+        j = i - 1
+        while j >= 0 and modifier[j]:
+            j -= 1
+        prep.append(words[j] if j >= 0 and any(x[0] == "PREP" for x in rs[j]) else "-")
+    R = len(rel_names)
+    cost = np.zeros((n, n + 1, R), dtype=np.float32)
+    # The head's part of speech for each relation (the root: «ROOT»).
+    heads_t = head_table()
+    upos_sets = [{"ROOT"}] + [{u for x in r for u in UPOS_OF.get(x[0], ())} for r in rs]
+    for k, r in enumerate(rel_names):
+        d = heads_t.get(r)
+        if not d:
+            continue
+        best = max(d.values())
+        for j, us in enumerate(upos_sets):
+            if not us:
+                continue
+            p = sum(d.get(u, 0.0) for u in us)
+            cost[:, j, k] += min(PENALTY, max(0.0, math.log(best) - math.log(max(p, 1e-6))))
+    for i in range(n):
+        if not nounish[i] and not modifier[i]:
+            continue
+        own = cases_of(rs[i], ("NOUN", "NPRO"))
+        if nounish[i]:
+            for k, r in enumerate(rel_names):
+                d = table.get(f"{r}|{prep[i]}") or (table.get(f"{r}|-") if prep[i] == "-" else None)
+                if not d or not own:
+                    continue
+                best = max(d.values())
+                p = sum(d.get(c, 0.0) for c in own | {"gent" if c == "gen2" else c for c in own})
+                cost[i, :, k] = min(PENALTY, max(0.0, math.log(best) - math.log(max(p, 1e-6))))
+        for j in range(n):
+            if j == i or not rs[j]:
+                continue
+            if nounish[i] and nounish[j] and not (own & cases_of(rs[j], ("NOUN", "NPRO", "ADJF"))):
+                # One name's words, an apposition, and bare conjuncts share the
+                # case («Анны и Марии»; «с выражением … и звездах» has its own «в»).
+                for r in ("flat", "appos") + (("conj",) if prep[i] == "-" else ()):
+                    if r in rel_names:
+                        cost[i, j + 1, rel_names.index(r)] += PENALTY
+            if modifier[i] and any(x[0] in ("NOUN", "NPRO") for x in rs[j]) and not agree(rs[i], rs[j]):
+                for r in ("amod", "det", "acl", "nummod"):
+                    if r in rel_names:
+                        cost[i, j + 1, rel_names.index(r)] += PENALTY / 2
+    return cost
+
+
+def eisner(scores):
+    """The best projective tree for one sentence: scores[d, h] of word d
+    (1..n) hanging on h (0 the root), [n+1, n+1] — heads, [n+1] (0 for the
+    root). First-order Eisner, one root's child allowed per its rule."""
+    n = scores.shape[0] - 1
+    NEG = -1e9
+    # complete/incomplete spans, right-headed (0) and left-headed (1)
+    C = np.full((n + 1, n + 1, 2), NEG)
+    I = np.full((n + 1, n + 1, 2), NEG)
+    Cb = np.zeros((n + 1, n + 1, 2), dtype=np.int64)
+    Ib = np.zeros((n + 1, n + 1, 2), dtype=np.int64)
+    for i in range(n + 1):
+        C[i, i, 0] = C[i, i, 1] = 0.0
+    for w in range(1, n + 1):
+        for i in range(0, n + 1 - w):
+            j = i + w
+            # incomplete: an arc between i and j
+            cand = C[i, i:j, 1] + C[i + 1:j + 1, j, 0]
+            k = int(np.argmax(cand))
+            best = cand[k]
+            I[i, j, 0] = best + scores[i, j] if i else NEG  # j -> i (i's head is j); the root has no head
+            I[i, j, 1] = best + scores[j, i]                  # i -> j
+            Ib[i, j, 0] = Ib[i, j, 1] = i + k
+            # complete
+            cand = C[i, i:j, 0] + I[i:j, j, 0]
+            k = int(np.argmax(cand))
+            C[i, j, 0], Cb[i, j, 0] = cand[k], i + k
+            cand = I[i, i + 1:j + 1, 1] + C[i + 1:j + 1, j, 1]
+            k = int(np.argmax(cand))
+            C[i, j, 1], Cb[i, j, 1] = cand[k], i + 1 + k
+    heads = np.zeros(n + 1, dtype=np.int64)
+
+    def back(i, j, d, complete):
+        if i == j:
+            return
+        if complete:
+            k = Cb[i, j, d]
+            if d == 0:
+                back(i, k, 0, True)
+                back(k, j, 0, False)
+            else:
+                back(i, k, 1, False)
+                back(k, j, 1, True)
+        else:
+            k = Ib[i, j, d]
+            if d == 0:
+                heads[i] = j
+            else:
+                heads[j] = i
+            back(i, k, 1, True)
+            back(k + 1, j, 0, True)
+    back(0, n, 1, True)
+    return heads
+
+
 def pieces(words, before):
     """A sentence the parser can read whole, or cut at «;» «:» (then at the
     limit)."""
@@ -176,6 +382,34 @@ with torch.no_grad(), open(opts.out, "w", encoding="utf-8") as out:
         hidx = pick.clamp(max=L - 1)
         rl = model.rel(torch.cat([h, torch.gather(h, 1, hidx.unsqueeze(-1).expand(-1, -1, h.shape[-1]))], -1))
         rp, rk = torch.softmax(rl, -1).max(-1)
+        if opts.joint:
+            # Every (head, relation) pair: the relation layer's first linear
+            # map splits into the word's part and the head's part.
+            W = model.rel[0].weight
+            dpart = h @ W[:, : h.shape[-1]].T + model.rel[0].bias  # [B, L, d]
+            hpart = h @ W[:, h.shape[-1]:].T                        # [B, L, d]
+            names = [rel_name[k] for k in range(len(rel_name))]
+            logp_head = torch.log_softmax(s, -1)[..., :L]            # [B, L, L] (no «later»)
+            for j, (_, _, w, _, _) in enumerate(chunk):
+                n = len(w)
+                pair = torch.relu(dpart[j, 1:n + 1, None, :] + hpart[j, None, : n + 1, :])  # [n, n+1, d]
+                logp_rel = torch.log_softmax(model.rel[2](pair), -1)                        # [n, n+1, R]
+                cost = torch.tensor(grammar_costs(w, names), device=pair.device)
+                total = logp_head[j, 1:n + 1, : n + 1, None] + logp_rel - cost
+                total[torch.arange(n), torch.arange(1, n + 1)] = -1e9  # not itself
+                flat = total.reshape(n, -1).argmax(-1)
+                hj, rj = flat // len(names), flat % len(names)
+                if opts.tree:
+                    # Each arc's score: its best relation; the tree over them.
+                    arc, arc_r = total.max(-1)                       # [n, n+1]
+                    sc = np.full((n + 1, n + 1), -1e9)
+                    sc[1:, :] = arc.cpu().numpy()
+                    th = torch.tensor(eisner(sc)[1:], device=arc.device)
+                    hj, rj = th, arc_r[torch.arange(n), th]
+                pick[j, 1:n + 1] = hj
+                rk[j, 1:n + 1] = rj
+                hp[j, 1:n + 1] = logp_head[j, 1:n + 1].exp().gather(1, hj[:, None])[:, 0]
+                rp[j, 1:n + 1] = logp_rel.exp()[torch.arange(n), hj, rj]
         top2 = p.topk(2, dim=-1)
         pick, hp, rp, rk = pick.cpu(), hp.cpu(), rp.cpu(), rk.cpu()
         alt_h, alt_p = top2.indices[..., 1].cpu(), top2.values[..., 1].cpu()
