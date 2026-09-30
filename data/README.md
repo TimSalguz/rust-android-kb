@@ -18,6 +18,7 @@ into `data/lexicon.tsv` (`word<TAB>count`, ~3.2 M words; CI does the same).
 | [Tatoeba](https://tatoeba.org) sentence exports `rus_sentences`, `eng_sentences` (tatoeba.org contributors) | everyday sentences → word pairs for the context model (`bigrams.tsv`, `tools/build_bigrams.py`) | CC BY 2.0 FR |
 | [Leipzig Corpora Collection](https://wortschatz.uni-leipzig.de): rus-ru_web-public_2019_1M, eng-com_web-public_2018_1M — © 2025 Universität Leipzig / Sächsische Akademie der Wissenschaften / InfAI | significant neighbour pairs → the context model | CC BY |
 | `slang.tsv` (this repo) | chat slang, abbreviations, loanwords (го, тс, кринж, lol) | same as the code |
+| [Unicode CLDR](https://cldr.unicode.org) annotations (`common/annotations`, `annotationsDerived`), © Unicode, Inc. | emoji names and keywords in six languages for the emoji search (`tools/emoji_names.py` → `crates/android/src/emoji_names/`) | Unicode License v3 |
 
 How the pieces combine:
 

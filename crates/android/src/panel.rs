@@ -7,9 +7,24 @@
 //! library (`emoji.txt`, from Unicode's emoji-test.txt by tools/emoji.py) and
 //! is read the first time the panel opens; only the page shown is drawn.
 
+use std::collections::HashSet;
 use std::sync::OnceLock;
 
+use crate::layout::Lang;
+
 static LIST: &str = include_str!("emoji.txt");
+/// Each emoji's name and keywords, lowercase, ё as е (Unicode CLDR
+/// annotations, Unicode License v3; tools/emoji_names.py).
+static NAMES: [&str; 6] = [
+    include_str!("emoji_names/ru.txt"),
+    include_str!("emoji_names/en.txt"),
+    include_str!("emoji_names/de.txt"),
+    include_str!("emoji_names/fr.txt"),
+    include_str!("emoji_names/es.txt"),
+    include_str!("emoji_names/pt.txt"),
+];
+/// Emoji found for a word, at most (a page).
+const FOUND: usize = 32;
 
 /// Emoji groups, in Unicode's order, and each one's tab.
 pub const GROUPS: usize = 9;
@@ -60,6 +75,79 @@ fn groups(max: u16) -> &'static [Vec<&'static str>] {
         }
         out
     })
+}
+
+/// The emoji whose name or keywords hold `query` in `lang` (the phone can
+/// draw them: `max`): a name that is just the word first, then a keyword
+/// that is, then a name or keyword with that word in it, then one with a
+/// word it begins; a word in another form («кота», «котом») by its first
+/// letters, when nothing else is found.
+pub fn search(lang: Lang, query: &str, max: u16) -> Vec<&'static str> {
+    let q = query.to_lowercase().replace('ё', "е");
+    if q.chars().count() < 2 {
+        return Vec::new();
+    }
+    let drawn: HashSet<&str> = groups(max).iter().flatten().copied().collect();
+    let names = NAMES[match lang {
+        Lang::Ru => 0,
+        Lang::En => 1,
+        Lang::De => 2,
+        Lang::Fr => 3,
+        Lang::Es => 4,
+        Lang::Pt => 5,
+    }];
+    let score = |terms: &str, q: &str, stem: bool| -> Option<u8> {
+        let mut best: Option<u8> = None;
+        for (k, term) in terms.split('|').enumerate() {
+            let s = if term == q {
+                Some(if k == 0 { 0 } else { 1 })
+            } else if term.split(|c: char| !c.is_alphanumeric()).any(|w| w == q) {
+                Some(2)
+            } else if term
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|w| w.len() > q.len() && w.starts_with(q))
+                && (stem || q.chars().count() >= 3)
+            {
+                Some(3)
+            } else {
+                None
+            };
+            best = match (best, s) {
+                (Some(b), Some(s)) => Some(b.min(s)),
+                (b, s) => b.or(s),
+            };
+        }
+        best
+    };
+    let find = |q: &str, stem: bool| -> Vec<&'static str> {
+        let mut hits: Vec<(u8, usize, &'static str)> = names
+            .lines()
+            .enumerate()
+            .filter_map(|(i, line)| {
+                let (e, terms) = line.split_once('\t')?;
+                drawn.contains(e).then_some(())?;
+                score(terms, q, stem).map(|s| (s, i, e))
+            })
+            .collect();
+        hits.sort_unstable();
+        hits.into_iter().map(|(_, _, e)| e).take(FOUND).collect()
+    };
+    let found = find(&q, false);
+    if !found.is_empty() {
+        return found;
+    }
+    // Another form of the word: its first letters (at least three).
+    let chars: Vec<char> = q.chars().collect();
+    for cut in 1..=2 {
+        if chars.len() >= cut + 3 {
+            let stem: String = chars[..chars.len() - cut].iter().collect();
+            let found = find(&stem, true);
+            if !found.is_empty() {
+                return found;
+            }
+        }
+    }
+    Vec::new()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,6 +203,9 @@ pub struct Stash {
     fresh: Vec<String>,
     /// Texts copied while the keyboard ran, the newest first.
     pub clips: Vec<String>,
+    /// Emoji found for the word typed when the panel opened: shown in the
+    /// recent ones' tab (🔍) while there are any.
+    pub found: Vec<String>,
 }
 
 impl Stash {
@@ -166,6 +257,7 @@ impl Panel {
     pub fn items(tab: Tab, stash: &Stash, max: u16) -> Vec<&str> {
         match tab {
             Tab::Clips => stash.clips.iter().map(String::as_str).collect(),
+            Tab::Recent if !stash.found.is_empty() => stash.found.iter().map(String::as_str).collect(),
             Tab::Recent => stash.recent.iter().map(String::as_str).collect(),
             Tab::Group(g) => groups(max)
                 .get(g as usize)
@@ -331,6 +423,19 @@ mod tests {
         let last = Panel::pages(Tab::Group(0), &stash, u16::MAX) - 1;
         assert_eq!((p.tab, p.page), (Tab::Group(0), last));
         assert!(last >= 2);
+    }
+
+    #[test]
+    fn emoji_are_found_by_their_names() {
+        let ru = search(Lang::Ru, "кот", u16::MAX);
+        assert!(ru.contains(&"😺"), "{ru:?}");
+        assert!(search(Lang::Ru, "огонь", u16::MAX).contains(&"🔥"));
+        assert!(search(Lang::Ru, "россия", u16::MAX).contains(&"🇷🇺"));
+        // Another form of the word, by its first letters.
+        assert!(search(Lang::Ru, "котом", u16::MAX).contains(&"😺"));
+        assert!(search(Lang::En, "cat", u16::MAX).contains(&"🐈"));
+        assert!(search(Lang::Ru, "к", u16::MAX).is_empty());
+        assert!(search(Lang::Ru, "фывапр", u16::MAX).is_empty());
     }
 
     #[test]

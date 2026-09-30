@@ -2816,10 +2816,27 @@ impl<D: AsRef<[u8]>> Ime<D> {
     }
 
     /// Hold the comma: the emoji (the recent ones first, if any).
+    /// With a word typed there (or just before the cursor), the emoji its
+    /// name finds first, in the recent ones' tab (🔍); one picked goes after
+    /// the word, as any (the word stays: it may be meant).
     fn open_panel(&mut self) {
         self.stash.settle();
         self.popup = None;
-        self.panel = Some(Panel::new(&self.stash));
+        let mut panel = Panel::new(&self.stash);
+        self.stash.found.clear();
+        let word = if !self.word.is_empty() {
+            self.word.clone()
+        } else {
+            let text = self.before.strip_suffix(' ').unwrap_or(&self.before);
+            let rev: String = text.chars().rev().take_while(|c| c.is_alphabetic()).collect();
+            rev.chars().rev().collect()
+        };
+        let found = panel::search(self.lang, &word, self.emoji_max);
+        if !found.is_empty() {
+            self.stash.found = found.into_iter().map(String::from).collect();
+            panel.open_tab(Tab::Recent);
+        }
+        self.panel = Some(panel);
         self.relayout();
     }
 
@@ -5472,7 +5489,11 @@ impl<D: AsRef<[u8]>> Ime<D> {
                         1.5 * dp,
                     );
                 }
-                let icon = Tab::from_index(i).icon().to_string();
+                let icon = if i == 1 && !self.stash.found.is_empty() {
+                    "🔍".to_string()
+                } else {
+                    Tab::from_index(i).icon().to_string()
+                };
                 let cx = (i as f32 + 0.5) * tw;
                 let size = (19.0 * dp).min(tw * 0.55);
                 text(
@@ -6269,6 +6290,26 @@ mod tests {
         assert_eq!(k.slots[1].as_deref(), Some("быть"), "{:?}", k.slots);
         type_str(&mut k, "ы");
         assert_eq!(k.slots[1].as_deref(), Some("быть"), "{:?}", k.slots);
+    }
+
+    #[test]
+    fn a_word_typed_finds_its_emoji() {
+        let mut k = ime(WORDS);
+        k.start_input("", 1);
+        type_str(&mut k, "огонь");
+        k.open_panel();
+        assert!(k.stash.found.iter().any(|e| e == "🔥"), "{:?}", k.stash.found);
+        assert_eq!(k.panel.unwrap().tab, Tab::Recent);
+        // Just before the cursor, with its space: the same.
+        k.start_input("", 1);
+        type_str(&mut k, "огонь ");
+        k.open_panel();
+        assert!(k.stash.found.iter().any(|e| e == "🔥"));
+        // Nothing found: the panel as ever.
+        k.start_input("", 1);
+        type_str(&mut k, "фывапр ");
+        k.open_panel();
+        assert!(k.stash.found.is_empty());
     }
 
     #[test]
@@ -7778,14 +7819,16 @@ mod tests {
             .keys
             .iter()
             .all(|key| !matches!(key.action, Action::Char(_))));
-        // An emoji: the word finished with a space first.
+        // An emoji: the word finished with a space first. «привет» finds
+        // its emoji: the panel opens on them (🔍).
         let tab = k.panel.unwrap().tab;
-        assert_eq!(tab, Tab::Group(0));
+        assert_eq!(tab, Tab::Recent);
+        let first = k.stash.found[0].clone();
         let frame = k.panel_frame();
         let (cx, cy, w, h) = frame.cell(0);
         k.touch(DOWN, 0, cx + w / 2.0, cy + h / 2.0, 2_000);
         k.touch(UP, 0, cx + w / 2.0, cy + h / 2.0, 2_050);
-        assert_eq!(k.before, "привет 😀");
+        assert_eq!(k.before, format!("привет {first}"));
         // ⌫ takes the whole emoji, even a joined one.
         type_str(&mut k, "⌫");
         assert_eq!(k.before, "привет ");
@@ -7798,7 +7841,7 @@ mod tests {
         k.touch(DOWN, 0, x, y, 3_000);
         k.touch(UP, 0, x, y, 3_050);
         assert!(k.panel.is_none());
-        assert_eq!(k.stash.recent, vec!["😀"]);
+        assert_eq!(k.stash.recent, vec![first]);
     }
 
     #[test]
