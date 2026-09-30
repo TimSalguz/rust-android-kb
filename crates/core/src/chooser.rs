@@ -65,6 +65,9 @@ pub struct Chooser<D: AsRef<[u8]>> {
     /// word doesn't change while it is typed, nor do the places the
     /// two-word window tries.
     cache: std::sync::Mutex<Vec<Cached>>,
+    /// The same by the sentence's words as written: a hit costs no lookup
+    /// of their lemmas and classes.
+    by_words: std::sync::Mutex<Vec<(Vec<String>, std::sync::Arc<Reading>)>>,
 }
 
 /// What the chooser read of a sentence, ready to score candidates: with h
@@ -76,6 +79,9 @@ pub struct Reading {
     u: Vec<f32>,
     bh: f32,
     class_dot: Vec<f32>,
+    /// The most the sentence gives any lemma and class: the part of f the
+    /// features don't bound.
+    sense: f32,
     pub most: f32,
 }
 
@@ -158,6 +164,7 @@ impl<D: AsRef<[u8]>> Chooser<D> {
             tau,
             owned,
             cache: std::sync::Mutex::new(Vec::new()),
+            by_words: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -222,6 +229,31 @@ impl<D: AsRef<[u8]>> Chooser<D> {
         r
     }
 
+    /// The reading of a sentence given as its words (lowercase; `tokens`
+    /// looks up their lemma rows and classes — only when it isn't kept).
+    pub fn reading_of<L: AsRef<[u8]>>(
+        &self,
+        lemmas: &Lemmas<L>,
+        sentence: &[String],
+        tokens: impl FnOnce(&[String]) -> Vec<(u32, u32)>,
+    ) -> std::sync::Arc<Reading> {
+        let sentence = &sentence[sentence.len().saturating_sub(self.ctx)..];
+        if let Ok(mut cache) = self.by_words.lock() {
+            if let Some(i) = cache.iter().position(|r| r.0 == sentence) {
+                let r = cache.remove(i);
+                let out = r.1.clone();
+                cache.insert(0, r);
+                return out;
+            }
+        }
+        let r = self.reading(lemmas, &tokens(sentence));
+        if let Ok(mut cache) = self.by_words.lock() {
+            cache.insert(0, (sentence.to_vec(), r.clone()));
+            cache.truncate(CACHED);
+        }
+        r
+    }
+
     /// Ready `h` to score candidates, and bound f: the best lemma, the best
     /// class and the features at their best — what a search allows for
     /// before it knows the word.
@@ -254,13 +286,35 @@ impl<D: AsRef<[u8]>> Chooser<D> {
             })
             .sum::<f32>()
             + ws[self.feat.1];
-        let most = (lemma + bh + class) / (d as f32).sqrt() + lin;
+        let sense = (lemma + bh + class) / (d as f32).sqrt();
         Reading {
             u,
             bh,
             class_dot,
-            most,
+            sense,
+            most: sense + lin,
         }
+    }
+
+    /// The most f can be for a word whose prior is at least `least` nats:
+    /// the features' part bounded by it — the chooser holds rare words back
+    /// (its weight on the prior is negative), so where a search's words are
+    /// all rare it allows for much less. Never less than f of such a word.
+    pub fn bound(&self, r: &Reading, least: f32) -> f32 {
+        let ws = self.ws();
+        let prior_lo = (least / 10.0).clamp(0.0, FEATURE_RANGE[1].1);
+        let lin: f32 = FEATURE_RANGE
+            .iter()
+            .enumerate()
+            .take(self.feats)
+            .map(|(i, &(lo, hi))| {
+                let w = ws[self.feat.0 + i];
+                let lo = if i == 1 { prior_lo.max(lo) } else { lo };
+                (w * lo).max(w * hi)
+            })
+            .sum::<f32>()
+            + ws[self.feat.1];
+        r.sense + lin
     }
 
     /// What a reading ([`Chooser::reading`]) adds to a candidate's logit:

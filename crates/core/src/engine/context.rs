@@ -67,7 +67,7 @@ impl Context {
     /// (the words expected before any is typed).
     pub(crate) fn without_chooser(&self) -> Context {
         let mut c = self.clone();
-        c.bonus_max -= c.chooser.take().map_or(0.0, |x| x.1);
+        c.chooser = None;
         c
     }
 
@@ -175,14 +175,13 @@ impl<D: AsRef<[u8]>> Engine<D> {
             cfg.w_topic.max(0.0) * TOPIC_CLAMP
         };
         let chooser = self.read_sentence(sentence);
-        let chooser_max = chooser.as_ref().map_or(0.0, |c| c.1);
         Context {
             prev_frame,
             prev_tags,
             prev_lemma,
             pairs: prev.as_deref().and_then(|p| self.pairs_of(p)),
             fit_max,
-            bonus_max: phrase_max + topic_max + chooser_max,
+            bonus_max: phrase_max + topic_max,
             prev,
             phrase,
             walk,
@@ -221,15 +220,16 @@ impl<D: AsRef<[u8]>> Engine<D> {
         if w <= 0.0 {
             return None;
         }
-        let words: Vec<(u32, u32)> = sentence
-            .iter()
-            .map(|word| {
-                let word = word.to_lowercase();
-                let l = self.lemma(&word).unwrap_or(lemmas.unk());
-                (l, self.word_class(&word).unwrap_or(0) as u32)
-            })
-            .collect();
-        let r = chooser.reading(lemmas, &words);
+        // (The sentence comes lowercase, as `Engine::context` takes it.)
+        let r = chooser.reading_of(lemmas, sentence, |words| {
+            words
+                .iter()
+                .map(|word| {
+                    let l = self.lemma(word).unwrap_or(lemmas.unk());
+                    (l, self.word_class(word).unwrap_or(0) as u32)
+                })
+                .collect()
+        });
         let clamp = self.cfg.chooser_clamp.max(0.0);
         let most = (w * r.most.max(0.0) / chooser.tau()).min(clamp) * self.cfg.chooser_bound;
         Some((r, most))
@@ -495,7 +495,18 @@ impl<D: AsRef<[u8]>> Engine<D> {
         } else {
             u
         };
-        cfg.w_lm * nats - ctx.bonus_max
+        cfg.w_lm * nats - ctx.bonus_max - self.chooser_allowance(ctx, u)
+    }
+
+    /// The most the chooser may take off the cost of a word whose prior is
+    /// at least `u` nats (weighted, over τ, within its clamp).
+    fn chooser_allowance(&self, ctx: &Context, u: f32) -> f32 {
+        let (Some((r, _)), Some(chooser)) = (&ctx.chooser, &self.chooser) else {
+            return 0.0;
+        };
+        let cfg = &self.cfg;
+        let most = cfg.w_chooser * chooser.bound(r, u).max(0.0) / chooser.tau();
+        most.min(cfg.chooser_clamp.max(0.0)) * cfg.chooser_bound
     }
 
     /// How the phrase weighs a word (its readings), in nats, and the weight
