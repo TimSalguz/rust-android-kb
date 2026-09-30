@@ -498,6 +498,9 @@ pub struct Ime<D: AsRef<[u8]>> {
     now_ms: i64,
     /// Top candidates of the last update, for the log.
     last_cands: Vec<(String, f32)>,
+    /// The word being typed read at its place, every candidate (for tools
+    /// that learn from the keyboard's choices: `decoded`).
+    decoded: Vec<Candidate>,
     /// Read the current word as two (missing or mistyped space).
     split: Option<Split>,
     /// Suggestion strip: left, center, right.
@@ -862,6 +865,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
             log: Vec::new(),
             now_ms: 0,
             last_cands: Vec::new(),
+            decoded: Vec::new(),
             split: None,
             slots: [None, None, None],
             grips: Grips::default(),
@@ -4701,6 +4705,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
             .take(VARIANTS)
             .map(|c| (c.word.clone(), c.cost))
             .collect();
+        self.decoded = corrections.clone();
         if self.settings.one_row {
             // The typed letters are placeholders: the best decoding is the
             // word — unless every letter was picked exactly (an abbreviation).
@@ -5556,6 +5561,12 @@ impl<D: AsRef<[u8]>> Ime<D> {
     pub fn put_char(&mut self, c: char) -> i32 {
         self.type_char(c);
         REDRAW | OUTPUT
+    }
+
+    /// The word being typed read at its place: every candidate, best first
+    /// (tools: what the keyboard chose among).
+    pub fn decoded(&self) -> &[Candidate] {
+        &self.decoded
     }
 
     pub fn key_center(&self, action: Action) -> Option<(f32, f32)> {

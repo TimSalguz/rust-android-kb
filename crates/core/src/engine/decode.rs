@@ -45,9 +45,12 @@ impl<D: AsRef<[u8]>> Engine<D> {
                 keys,
                 key_w,
             } => self.gesture_at(ctx, points, times, keys, key_w),
-            _ => {
-                let mut cands = self.read_at(ctx, evidence);
-                self.weigh(ctx, &mut cands);
+            Evidence::Nothing => {
+                // The chooser learned to choose among words typed, not
+                // among words expected: not here, yet.
+                let ctx = ctx.without_chooser();
+                let mut cands = self.read_at(&ctx, evidence);
+                self.weigh(&ctx, &mut cands);
                 cands
             }
         }

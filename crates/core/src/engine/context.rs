@@ -51,6 +51,9 @@ pub struct Context {
     clause: Option<Frame>,
     /// The sentence's sense classes, once each.
     topics: Vec<u64>,
+    /// What the chooser read of the sentence, and the most its f may take
+    /// off a word's cost (weighted, over τ).
+    chooser: Option<(std::sync::Arc<crate::chooser::Reading>, f32)>,
 }
 
 impl Context {
@@ -58,6 +61,14 @@ impl Context {
     /// punctuation).
     pub fn prev(&self) -> Option<&str> {
         self.prev.as_deref()
+    }
+
+    /// The place without the chooser's reading: for what it wasn't taught
+    /// (the words expected before any is typed).
+    pub(crate) fn without_chooser(&self) -> Context {
+        let mut c = self.clone();
+        c.bonus_max -= c.chooser.take().map_or(0.0, |x| x.1);
+        c
     }
 
     /// Whether the place says anything (with a context model to say it).
@@ -163,13 +174,15 @@ impl<D: AsRef<[u8]>> Engine<D> {
         } else {
             cfg.w_topic.max(0.0) * TOPIC_CLAMP
         };
+        let chooser = self.read_sentence(sentence);
+        let chooser_max = chooser.as_ref().map_or(0.0, |c| c.1);
         Context {
             prev_frame,
             prev_tags,
             prev_lemma,
             pairs: prev.as_deref().and_then(|p| self.pairs_of(p)),
             fit_max,
-            bonus_max: phrase_max + topic_max,
+            bonus_max: phrase_max + topic_max + chooser_max,
             prev,
             phrase,
             walk,
@@ -178,7 +191,73 @@ impl<D: AsRef<[u8]>> Engine<D> {
             next,
             clause,
             topics,
+            chooser,
         }
+    }
+
+    /// What each word of the phrase is to the word coming, by the grammar
+    /// (in order; the phrase is the sentence's tail): 1 the word governing
+    /// it, 2 the verb of its clause, 3 the adjective nearest it, 4 another
+    /// word of the phrase — the chooser's prior on what the word links to.
+    pub fn roles(&self, ctx: &Context) -> Vec<u8> {
+        let mut roles = vec![4u8; ctx.phrase.len()];
+        let w = &ctx.walk;
+        for (i, role) in [(w.nearest_attribute, 3), (w.clause, 2), (w.governor, 1)] {
+            if let Some(r) = i.and_then(|i| roles.get_mut(i)) {
+                *r = role;
+            }
+        }
+        roles
+    }
+
+    /// The chooser's reading of the sentence so far (`sentence`, its words
+    /// before the place), with the most its f may take off a cost.
+    fn read_sentence(
+        &self,
+        sentence: &[String],
+    ) -> Option<(std::sync::Arc<crate::chooser::Reading>, f32)> {
+        let (chooser, lemmas) = (self.chooser.as_ref()?, self.lemmas.as_ref()?);
+        let w = self.cfg.w_chooser;
+        if w <= 0.0 {
+            return None;
+        }
+        let words: Vec<(u32, u32)> = sentence
+            .iter()
+            .map(|word| {
+                let word = word.to_lowercase();
+                let l = self.lemma(&word).unwrap_or(lemmas.unk());
+                (l, self.word_class(&word).unwrap_or(0) as u32)
+            })
+            .collect();
+        let r = chooser.reading(lemmas, &words);
+        let clamp = self.cfg.chooser_clamp.max(0.0);
+        let most = (w * r.most.max(0.0) / chooser.tau()).min(clamp) * self.cfg.chooser_bound;
+        Some((r, most))
+    }
+
+    /// What the chooser takes off a candidate's cost at the place (nats,
+    /// weighted; negative: it adds): its f over τ.
+    fn chooser_fit(&self, ctx: &Context, c: &Candidate, class: u64) -> f32 {
+        let (Some((r, _)), Some(chooser), Some(lemmas)) =
+            (&ctx.chooser, &self.chooser, &self.lemmas)
+        else {
+            return 0.0;
+        };
+        let unk = lemmas.unk();
+        let l = self.lemma(&c.word);
+        let prior = (c.cost - c.edit) / self.cfg.w_lm.max(1e-6);
+        let feats = [
+            c.edit.min(crate::chooser::EDIT_CAP),
+            prior / 10.0,
+            if l.is_some_and(|x| x != unk) {
+                0.0
+            } else {
+                1.0
+            },
+        ];
+        let f = chooser.score(lemmas, r, l.unwrap_or(unk), class as u32, &feats);
+        let clamp = self.cfg.chooser_clamp.max(0.0);
+        (self.cfg.w_chooser * f / chooser.tau()).clamp(-clamp, clamp)
     }
 
     /// The most the word pairs' grammar may raise any word's own odds after
@@ -330,8 +409,15 @@ impl<D: AsRef<[u8]>> Engine<D> {
     /// How much the place moves a candidate's cost.
     pub(crate) fn shift(&self, ctx: &Context, c: &Candidate) -> f32 {
         let mut cost = c.cost;
+        // The word's grammar once: its readings for the phrase, its class for
+        // the chooser.
+        let grammar = if ctx.prev.is_some() || !ctx.phrase.is_empty() || ctx.chooser.is_some() {
+            self.word_grammar(&c.word)
+        } else {
+            None
+        };
         let readings = if ctx.prev.is_some() || !ctx.phrase.is_empty() {
-            self.readings(&c.word)
+            self.set_readings(grammar.map_or(0, |g| g.1))
         } else {
             Vec::new()
         };
@@ -345,6 +431,7 @@ impl<D: AsRef<[u8]>> Engine<D> {
             let (s, w) = self.phrase_nats(ctx, &readings);
             cost -= w * s;
         }
+        cost -= self.chooser_fit(ctx, c, grammar.map_or(0, |g| g.0));
         if !ctx.topics.is_empty() && self.cfg.w_topic > 0.0 {
             if let Some(t) = self.topic(&c.word) {
                 let s = ctx

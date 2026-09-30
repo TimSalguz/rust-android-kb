@@ -147,6 +147,35 @@ impl<D: AsRef<[u8]>> Lemmas<D> {
         &s[..s.iter().position(|&x| x == 0).unwrap_or(STEM)]
     }
 
+    /// Lemma (or UNK, START) `c`'s context vector, dequantized into `out`.
+    pub fn ctx_vector(&self, c: u32, out: &mut [f32]) {
+        let c = (c as usize).min(self.v + 1);
+        self.vector(self.ctx_vec + c * self.d, self.ctx_scale + 4 * c, out);
+    }
+
+    /// Lemma (or UNK) `l`'s target vector, dequantized into `out`.
+    pub fn tgt_vector(&self, l: u32, out: &mut [f32]) {
+        let l = (l as usize).min(self.v);
+        self.vector(self.tgt_vec + l * self.d, self.tgt_scale + 4 * l, out);
+    }
+
+    /// Lemma (or UNK) `l`'s target vector · `u`.
+    pub fn tgt_dot(&self, l: u32, u: &[f32]) -> f32 {
+        let l = (l as usize).min(self.v);
+        let b = self.data.as_ref();
+        let row = &b[self.tgt_vec + l * self.d..][..self.d];
+        let dot: f32 = row.iter().zip(u).map(|(&x, y)| x as i8 as f32 * y).sum();
+        dot * f32_at(b, self.tgt_scale + 4 * l)
+    }
+
+    fn vector(&self, at: usize, scale: usize, out: &mut [f32]) {
+        let b = self.data.as_ref();
+        let s = f32_at(b, scale);
+        for (o, &x) in out.iter_mut().zip(&b[at..at + self.d]) {
+            *o = x as i8 as f32 * s;
+        }
+    }
+
     /// The most PMI any lemma gets after `c`: what a search allows for
     /// before it knows the word.
     pub fn most(&self, c: u32) -> f32 {

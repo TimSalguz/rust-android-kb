@@ -66,7 +66,7 @@ public final class RustKbService extends InputMethodService implements SensorEve
             File ext = getExternalFilesDir(null);
             String log = ext == null ? null : new File(ext, "typing-log.jsonl").getPath();
             handle = Native.create(install("dict.fst"), install("bigrams.fst"), install("casing.fst"),
-                    install("lemmas.bin"), settingsPath(this), log, locale(),
+                    install("lemmas.bin"), install("chooser.bin"), settingsPath(this), log, locale(),
                     getResources().getDisplayMetrics().density, Build.VERSION.SDK_INT);
         } catch (Exception e) {
             Log.e("rustkb", "cannot open the dictionary", e);

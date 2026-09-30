@@ -207,6 +207,7 @@ pub extern "system" fn Java_io_github_timsalguz_rustkb_Native_create(
     bigrams: JString,
     casing: JString,
     lemmas: JString,
+    chooser: JString,
     settings: JString,
     log: JString,
     locale: JString,
@@ -226,6 +227,7 @@ pub extern "system" fn Java_io_github_timsalguz_rustkb_Native_create(
             Some(env.get_string(&casing)?.into())
         };
         let lemmas = opt_string(&mut env, &lemmas)?;
+        let chooser = opt_string(&mut env, &chooser)?;
         let settings: String = env.get_string(&settings)?.into();
         let log_path: Option<String> = if log.is_null() {
             None
@@ -237,7 +239,15 @@ pub extern "system" fn Java_io_github_timsalguz_rustkb_Native_create(
         let mut engine = open_engine(&path, bigrams, casing, phone_config(kbcore::Latin::Qwerty))?;
         // The lemma vectors: without them the keyboard works as before.
         match lemmas.map(kbcore::Lemmas::open) {
-            Some(Ok(l)) => engine = engine.with_lemmas(l),
+            Some(Ok(l)) => {
+                engine = engine.with_lemmas(l);
+                // The chooser reads the lemma vectors: only with them.
+                match chooser.map(kbcore::Chooser::open) {
+                    Some(Ok(c)) => engine = engine.with_chooser(c),
+                    Some(Err(e)) => crate::log(&format!("chooser: {e}")),
+                    None => {}
+                }
+            }
             Some(Err(e)) => crate::log(&format!("lemmas: {e}")),
             None => {}
         }

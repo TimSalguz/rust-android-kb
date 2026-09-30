@@ -7,6 +7,7 @@
 //! `index-builder` tool) and runs a weighted Damerau-Levenshtein search over it.
 
 pub mod alphabet;
+pub mod chooser;
 pub mod config;
 pub mod dict;
 pub mod engine;
@@ -15,6 +16,7 @@ pub mod gram;
 pub mod keyboard;
 pub mod lemmas;
 
+pub use chooser::Chooser;
 pub use config::{Config, Latin, Profile};
 pub use dict::DictFormat;
 pub use engine::{Candidate, Casing, Context, Engine, Evidence, Hint, Stats};

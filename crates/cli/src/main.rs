@@ -49,10 +49,11 @@ fn main() -> io::Result<()> {
                 let engine = Engine::open_with_bigrams(&dict, &b, config_from_env())?;
                 // The lemma vectors, when they lie beside the context model.
                 let lemmas = std::path::Path::new(&b).with_file_name("lemmas.bin");
-                if lemmas.exists() {
-                    engine.open_lemmas(lemmas)
-                } else {
-                    Ok(engine)
+                let chooser = std::path::Path::new(&b).with_file_name("chooser.bin");
+                match (lemmas.exists(), chooser.exists()) {
+                    (true, true) => engine.open_lemmas(lemmas)?.open_chooser(chooser),
+                    (true, false) => engine.open_lemmas(lemmas),
+                    _ => Ok(engine),
                 }
             }
             Err(_) => Engine::open(&dict, config_from_env()),

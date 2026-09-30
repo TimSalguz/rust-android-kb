@@ -18,6 +18,10 @@
 //! the field and the suggestion strip there; `NOSPACE=1`: no space at the
 //! end of a line.
 //!
+//! `DUMP=file` writes, before each space, what the keyboard read the word
+//! as: `text before<TAB>word meant<TAB>typed<TAB>word:cost:edit|…` (every
+//! candidate, best first) — data for tools/chooser.py.
+//!
 //! `COMMAS=1` lets the keyboard put in the commas it is sure of.
 //! `SWIPE=σ` draws the words instead (see `common::draw`: corners missed by
 //! σ key widths, the finger's pace too), each followed by a tap on space;
@@ -102,6 +106,11 @@ fn main() {
     let lemmas = std::path::Path::new(&args[1]).with_file_name("lemmas.bin");
     if lemmas.exists() {
         engine = engine.open_lemmas(lemmas).expect("lemmas");
+        // And the chooser, which reads them.
+        let chooser = std::path::Path::new(&args[1]).with_file_name("chooser.bin");
+        if chooser.exists() {
+            engine = engine.open_chooser(chooser).expect("chooser");
+        }
     }
     let jitter: f32 = std::env::var("JITTER")
         .ok()
@@ -133,6 +142,9 @@ fn main() {
     let mut t: i64 = 1_000;
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
+    let mut dump = std::env::var("DUMP")
+        .ok()
+        .map(|p| std::io::BufWriter::new(std::fs::File::create(p).expect("DUMP file")));
     let swipe: Option<f32> = std::env::var("SWIPE").ok().and_then(|s| s.parse().ok());
     let letter_keys: Vec<(char, f32, f32)> = LETTERS
         .chars()
@@ -212,7 +224,26 @@ fn main() {
         if !std::env::var("NOSPACE").is_ok_and(|v| v == "1") {
             taps.push((' ', None));
         }
+        let mut meant_words = line.split(' ').filter(|w| !w.is_empty());
         for (c, meant) in taps {
+            if c == ' ' {
+                if let (Some(d), Some(word)) = (dump.as_mut(), meant_words.next()) {
+                    let cands: Vec<String> = ime
+                        .decoded()
+                        .iter()
+                        .map(|c| format!("{}:{:.3}:{:.3}", c.word, c.cost, c.edit))
+                        .collect();
+                    writeln!(
+                        d,
+                        "{}\t{}\t{}\t{}",
+                        field.text,
+                        word.to_lowercase(),
+                        field.composing,
+                        cands.join("|")
+                    )
+                    .ok();
+                }
+            }
             if c == '|' {
                 writeln!(
                     out,

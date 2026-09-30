@@ -53,6 +53,14 @@ if [ -s data/lemma/vectors.npz ] && [ -s data/lemma/words.tsv ]; then
 else
     rm -f "$OUT/assets/lemmas.bin"
 fi
+# The chooser (tools/chooser.py → data/chooser/chooser.bin), optional: it
+# reads the lemma vectors, so only with them.
+if [ -s data/chooser/chooser.bin ] && [ -s "$OUT/assets/lemmas.bin" ]; then
+    cp data/chooser/chooser.bin "$OUT/assets/chooser.bin.part"
+    mv "$OUT/assets/chooser.bin.part" "$OUT/assets/chooser.bin"
+else
+    rm -f "$OUT/assets/chooser.bin"
+fi
 if [ -s data/bigrams.tsv ]; then
     cargo run --release -q -p index-builder -- --bigrams data/bigrams.tsv "$OUT/assets/bigrams.fst" \
         $([ -s data/endings.tsv ] && echo --endings data/endings.tsv) \

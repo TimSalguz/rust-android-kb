@@ -25,6 +25,7 @@ use fst::Map;
 use memmap2::Mmap;
 
 use crate::alphabet;
+use crate::chooser::Chooser;
 use crate::config::Config;
 use crate::dict::DictFormat;
 use crate::keyboard::{Keyboard, N};
@@ -327,6 +328,9 @@ pub struct Engine<D: AsRef<[u8]>> {
     /// Optional lemma vectors ([`crate::lemmas`]), each word's row under `0,
     /// 25, word` in the context model.
     pub(crate) lemmas: Option<Lemmas<D>>,
+    /// Optional chooser ([`crate::chooser`]): the sentence so far read by a
+    /// small transformer, in every weighing (with the lemma vectors).
+    pub(crate) chooser: Option<Chooser<D>>,
     /// Optional casing list: lowercase word → 1 (always Capitalized) or 2 (in
     /// CAPITALS) — names, places, abbreviations (tools/proper_nouns.py).
     casing: Option<Map<D>>,
@@ -438,6 +442,11 @@ impl Engine<Mmap> {
         Ok(self.with_casing(map_file(path)?))
     }
 
+    /// Add the chooser ([`crate::chooser`]), mmap'd.
+    pub fn open_chooser<P: AsRef<Path>>(self, path: P) -> io::Result<Self> {
+        Ok(self.with_chooser(Chooser::open(path)?))
+    }
+
     /// Add the lemma vectors ([`crate::lemmas`]), mmap'd.
     pub fn open_lemmas<P: AsRef<Path>>(self, path: P) -> io::Result<Self> {
         Ok(self.with_lemmas(Lemmas::open(path)?))
@@ -451,6 +460,7 @@ impl<D: AsRef<[u8]>> Engine<D> {
             map,
             bigrams: None,
             lemmas: None,
+            chooser: None,
             casing: None,
             user: None,
             kb: Keyboard::new(&cfg),
@@ -503,6 +513,12 @@ impl<D: AsRef<[u8]>> Engine<D> {
     /// lemma ids).
     pub fn with_lemmas(mut self, lemmas: Lemmas<D>) -> Self {
         self.lemmas = Some(lemmas);
+        self
+    }
+
+    /// Attach the chooser (it reads the lemma vectors: attach those too).
+    pub fn with_chooser(mut self, chooser: Chooser<D>) -> Self {
+        self.chooser = Some(chooser);
         self
     }
 
@@ -573,10 +589,12 @@ impl<D: AsRef<[u8]>> Engine<D> {
     /// rare ones too (empty when unknown): its reading set's, one each under
     /// `0, 9, set (2 bytes), index`.
     pub fn readings(&self, word: &str) -> Vec<u64> {
-        let (Some(bigrams), Some(set)) = (
-            self.bigrams.as_ref(),
-            self.word_grammar(word).map(|g| g.1).filter(|&s| s != 0),
-        ) else {
+        self.set_readings(self.word_grammar(word).map_or(0, |g| g.1))
+    }
+
+    /// A reading set's readings (see [`Engine::readings`]; 0: none).
+    pub(crate) fn set_readings(&self, set: u64) -> Vec<u64> {
+        let Some(bigrams) = self.bigrams.as_ref().filter(|_| set != 0) else {
             return Vec::new();
         };
         let mut out = Vec::new();
@@ -2168,6 +2186,87 @@ mod tests {
             .with_lemmas(blob());
         let ctx = off.context(Some("пить"), &["пить".to_string()], &[]);
         assert_eq!(off.decode(&ctx, taps)[0].word, "час");
+    }
+
+    #[test]
+    fn the_chooser_weighs_inside_the_search() {
+        // A random chooser over the lemma test's blob: whatever it says, the
+        // search at the place must weigh as weigh does (its bound holds).
+        let words = [
+            ("час", 4_000),
+            ("чай", 6_000),
+            ("чан", 12_000),
+            ("чем", 3_000),
+        ];
+        let id = |w: &str| -> Vec<u8> {
+            w.chars()
+                .map(|c| alphabet::char_to_id(c).unwrap())
+                .collect()
+        };
+        let (z, one) = (vec![0.0; 4], |x: f32| vec![x, 0.0, 0.0, 0.0]);
+        let ctx = vec![
+            one(3.0),
+            z.clone(),
+            z.clone(),
+            z.clone(),
+            z.clone(),
+            z.clone(),
+        ];
+        let tgt = vec![z.clone(), one(2.0), z.clone(), z.clone(), z.clone()];
+        let stems: Vec<Vec<u8>> = ["пить", "чай", "час", "чан"]
+            .iter()
+            .map(|w| id(w))
+            .collect();
+        let stems: Vec<&[u8]> = stems.iter().map(Vec::as_slice).collect();
+        let blob =
+            || Lemmas::new(crate::lemmas::tests::blob(&ctx, &tgt, &[0.0; 5], &stems)).unwrap();
+        let ids = || {
+            let mut kv: Vec<(Vec<u8>, u64)> = [("пить", 0), ("чай", 1), ("час", 2), ("чан", 3)]
+                .iter()
+                .map(|(w, i)| ([vec![0, 25], id(w)].concat(), *i))
+                .collect();
+            kv.sort();
+            Map::from_iter(kv).unwrap()
+        };
+        let chooser = || Chooser::new(crate::chooser::tests::blob(8, 1, 4, 3, 4)).unwrap();
+        let make = |cfg: Config| {
+            engine_with(&words, cfg)
+                .with_bigrams(ids())
+                .with_lemmas(blob())
+                .with_chooser(chooser())
+        };
+        let narrow = make(Config {
+            top_k: 1,
+            ..Config::default()
+        });
+        let wide = make(Config::default());
+        let sentence = ["я".to_string(), "хочу".to_string(), "пить".to_string()];
+        for typed in ["ча", "чм", "чен"] {
+            let taps = Evidence::Taps(typed, &[]);
+            let ctx = narrow.context(Some("пить"), &sentence[2..], &sentence);
+            let got = narrow.decode(&ctx, taps);
+            let mut all = wide.read(taps);
+            wide.weigh(&ctx, &mut all);
+            assert_eq!(got[0].word, all[0].word, "{typed}: {got:?} {all:?}");
+            assert!((all[0].cost - got[0].cost).abs() < 1e-3, "{all:?} {got:?}");
+        }
+        // Off, the chooser changes nothing.
+        let off = make(Config {
+            w_chooser: 0.0,
+            ..Config::default()
+        });
+        let ctx = off.context(Some("пить"), &sentence[2..], &sentence);
+        let bare = engine_with(&words, Config::default())
+            .with_bigrams(ids())
+            .with_lemmas(blob());
+        let bctx = bare.context(Some("пить"), &sentence[2..], &sentence);
+        let taps = Evidence::Taps("ча", &[]);
+        let (a, b) = (off.decode(&ctx, taps), bare.decode(&bctx, taps));
+        assert_eq!(a.len(), b.len());
+        assert!(a
+            .iter()
+            .zip(&b)
+            .all(|(x, y)| x.word == y.word && (x.cost - y.cost).abs() < 1e-6));
     }
 
     #[test]
