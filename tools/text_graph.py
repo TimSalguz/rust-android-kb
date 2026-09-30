@@ -257,10 +257,30 @@ text = [re.findall(r"[а-яё]+(?:-[а-яё]+)*", line.lower().replace("ё", "е
 text = [s for s in text if s]
 graph = {"sentences": [], "coref": []}
 flat = []
+GENDERS = {"masc": "мужской род", "femn": "женский род", "neut": "средний род"}
+NUMBERS = {"sing": "единственное число", "plur": "множественное число"}
+
+
+def agreement(sent, pred, subj):
+    """What the predicate and its subject share (gender, number) — the
+    feature node through which they agree: «отец → мужской род ← бил»."""
+    def feats(w):
+        return {g for t in sent[w]["readings"] for g in t.split(",") if g in GENDERS or g in NUMBERS}
+    return sorted((GENDERS | NUMBERS)[g] for g in feats(pred) & feats(subj))
+
+
 graph["events"] = []
 for si, words in enumerate(text):
     graph["sentences"].append(sentence_graph(words))
-    graph["events"].append(events(graph["sentences"][-1]))
+    evs = events(graph["sentences"][-1])
+    for e in evs:
+        for r in e["roles"]:
+            if r["rel"] == "nsubj":
+                shared = agreement(graph["sentences"][-1], e["at"], r["at"])
+                if shared:
+                    e["facts"].append({"fact": "согласовано с подлежащим", "value": ", ".join(shared),
+                                       "from": r["word"], "p": r["p"]})
+    graph["events"].append(evs)
     for wi, w in enumerate(words):
         if w in PRON:
             gen, num = PRON[w]
@@ -283,9 +303,19 @@ for si, sent in enumerate(graph["sentences"]):
             alts.append(f"{head}:{rel} {l['p']:.2f}")
         more = len(x["links"]) - opts.top
         print(f"  {x['word']:<12} → " + " | ".join(alts) + (f"  (+{more} more)" if more > 0 else ""))
+# A pronoun's role holds every antecedent it may stand for (the worlds of
+# the text): «кто? → он» is «отец? 0.5 | сын? 0.5».
+for c in graph["coref"]:
+    for e in graph["events"][c["sentence"]]:
+        for r in e["roles"]:
+            if r["at"] == c["word"]:
+                r["stands_for"] = [{"form": k["form"], "sentence": k["sentence"], "p": k["p"]} for k in c["candidates"]]
 for si, evs in enumerate(graph["events"]):
     for e in evs:
-        roles = "; ".join(f"{r['question']} → {r['word']} {r['p']:.2f}" for r in e["roles"] if r["p"] >= 0.05)
+        roles = "; ".join(f"{r['question']} → {r['word']} {r['p']:.2f}"
+                          + (" [" + " | ".join(f"{k['form']}? {k['p']:.2f}" for k in r.get("stands_for", [])) + "]"
+                             if r.get("stands_for") else "")
+                          for r in e["roles"] if r["p"] >= 0.05)
         facts = "; ".join(f"{f['fact']}: {f['value']}" for f in e["facts"])
         print(f"  [{si + 1}] «{e['predicate']}» (событие {e['p_event']:.2f}): {roles}" + (f"  ({facts})" if facts else ""))
 for c in graph["coref"]:
