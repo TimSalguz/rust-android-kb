@@ -40,3 +40,8 @@ CLAUDE.md
 !/data/fr/README.md
 !/data/fr/slang.tsv
 !/data/fr/GRAMMALECTE-NOTICE
+
+# Assistant notes stay local, never published.
+CLAUDE.md
+CLAUDE.local.md
+.claude/
