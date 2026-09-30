@@ -156,6 +156,24 @@ const ASKING: &[&str] = &[
     "чему", "чем", "чего-нибудь",
 ];
 
+/// A word's part of speech and form as text («Verb/Fin», «Adj short»,
+/// «Noun nom»): of its readings, the one its link calls for (tools that
+/// show or study the graph).
+pub fn describe(word: &str, readings: &[u64], rel: &str) -> String {
+    let t = tag(word, readings, rel);
+    let mut out = format!("{:?}", t.pos);
+    if let Some(f) = t.form {
+        out.push_str(&format!("/{f:?}"));
+    }
+    if t.short {
+        out.push_str(" short");
+    }
+    if t.nominative {
+        out.push_str(" nom");
+    }
+    out
+}
+
 /// A word's part of speech and form: of its readings, the one its link
 /// (`rel`) calls for.
 fn tag(word: &str, readings: &[u64], rel: &str) -> Tag {
