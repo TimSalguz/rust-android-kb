@@ -241,21 +241,24 @@ const WAITING_SUBJECT: f32 = 0.5;
 /// rare «вод» too) waiting for a word still to come, as the sentence's graph
 /// has it (`waits`, asked only for such a noun): a subject for its
 /// predicate — by its nominative readings.
-fn waiting_subject(readings: &[u64], waits: impl FnOnce() -> f32) -> Option<u64> {
+fn waiting_subject(readings: &[u64], waits: impl FnOnce() -> f32) -> Option<(u64, f32)> {
     let nominative: Vec<u64> = readings
         .iter()
         .copied()
         .filter(|&r| r & NOUN != 0 && cases(r) == NOMN)
         .collect();
     let s = subject_noun(&nominative)?;
-    (waits() >= WAITING_SUBJECT).then_some(s)
+    let p = waits();
+    (p >= WAITING_SUBJECT).then_some((s, p))
 }
 
-/// A subject: a personal pronoun, a noun only in the nominative, or one
-/// that may be, waiting for its head (`waits`, the graph's chance).
-fn subject_of(word: &str, readings: &[u64], waits: impl FnOnce() -> f32) -> Option<u64> {
+/// A subject and how sure: a personal pronoun or a noun only in the
+/// nominative (1), or one that may be, waiting for its head (`waits`, the
+/// graph's chance).
+fn subject_of(word: &str, readings: &[u64], waits: impl FnOnce() -> f32) -> Option<(u64, f32)> {
     subject(word)
         .or_else(|| subject_noun(readings))
+        .map(|s| (s, 1.0))
         .or_else(|| waiting_subject(readings, waits))
 }
 
@@ -268,12 +271,12 @@ fn subject_at<S: AsRef<str>>(
     phrase: &[(S, Vec<u64>)],
     waits: &mut dyn FnMut(usize) -> f32,
     i: usize,
-) -> Option<u64> {
+) -> Option<(u64, f32)> {
     let (w, r) = &phrase[i];
-    let s = subject_of(w.as_ref(), r, || waits(i))?;
+    let (s, sure) = subject_of(w.as_ref(), r, || waits(i))?;
     let joined = i >= 1 && matches!(phrase[i - 1].0.as_ref(), "и" | "или");
     if !joined {
-        return Some(s);
+        return Some((s, sure));
     }
     let (w, r) = phrase.get(i.checked_sub(2)?)?;
     let nominative = r
@@ -285,7 +288,7 @@ fn subject_at<S: AsRef<str>>(
         .into_iter()
         .find(|&p| persons & p != 0)
         .unwrap_or(PER3);
-    Some(person | PLUR)
+    Some((person | PLUR, sure))
 }
 
 /// Two readings agree (an attribute and what it goes with): a case, the
@@ -390,7 +393,7 @@ pub fn misfit<S: AsRef<str>>(phrase: &[(S, Vec<u64>)], word: &[u64]) -> bool {
         }
         if attributes.is_empty() {
             if subject(w).or_else(|| subject_noun(readings)).is_some() {
-                subj = subject_at(phrase, &mut |_| 0.0, phrase.len() - 1 - i);
+                subj = subject_at(phrase, &mut |_| 0.0, phrase.len() - 1 - i).map(|s| s.0);
                 break;
             }
             if adverbial(readings) {
@@ -556,6 +559,9 @@ pub struct Walk {
     /// anything else).
     pub attributes: Vec<Vec<u64>>,
     pub subject: Option<u64>,
+    /// How unsure the subject is (0: it can't be anything else; else 1 − the
+    /// graph's chance that the noun waits for its predicate as the subject).
+    pub subject_doubt: f32,
     /// The subject stands right before the word (no adverb between).
     pub subject_next: bool,
     /// No subject but a genitive before «не» («её не [существовало]»): the
@@ -664,7 +670,9 @@ pub fn walk_waiting<S: AsRef<str>>(
         }
         if collected == adverbs {
             if subject_of(w, readings, || waits(i)).is_some() {
-                out.subject = subject_at(phrase, waits, i);
+                let s = subject_at(phrase, waits, i);
+                out.subject = s.map(|s| s.0);
+                out.subject_doubt = s.map_or(0.0, |s| 1.0 - s.1);
                 out.subject_next = i + 1 == phrase.len();
                 return out;
             }
@@ -761,12 +769,20 @@ pub fn phrase_score(
         let by_kind = kinds.map_or(0.0, |k| {
             word.iter().map(|&r| k[kind(r)]).fold(f32::MIN, f32::max)
         });
-        return by_kind
+        let given = by_kind
             + match fits(word, s) {
                 Some(true) => attr.subject_fits,
                 Some(false) => attr.subject_misfits,
                 None => 0.0,
             };
+        // A subject the graph isn't sure of: as likely as it is the subject,
+        // what it says; else nothing.
+        let doubt = walk.subject_doubt.clamp(0.0, 1.0);
+        return if doubt > 0.0 {
+            ((1.0 - doubt) * given.exp() + doubt).ln()
+        } else {
+            given
+        };
     }
     let nominal: Vec<u64> = word
         .iter()

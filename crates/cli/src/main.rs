@@ -86,10 +86,10 @@ fn main() -> io::Result<()> {
             let words: Vec<String> = s.split_whitespace().map(str::to_lowercase).collect();
             let read: Vec<_> = words.iter().filter_map(|w| engine.parser_word(w)).collect();
             let t = std::time::Instant::now();
-            let chances = parser.parse(lemmas, &read);
+            let graph = parser.parse_cached(lemmas, &read);
             let ms = t.elapsed().as_secs_f64() * 1e3;
             println!("{s:?}  ({ms:.2} ms)");
-            for (i, row) in chances.iter().enumerate() {
+            for (i, row) in graph.heads.iter().enumerate() {
                 let mut ranked: Vec<(usize, f32)> = row.iter().copied().enumerate().collect();
                 ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
                 let shown: Vec<String> = ranked
@@ -105,7 +105,22 @@ fn main() -> io::Result<()> {
                         format!("{head} {p:.2}")
                     })
                     .collect();
-                println!("  {:<12} → {}", words[i], shown.join(" | "));
+                // A word waiting: how it would hang on the head to come.
+                let waits = match graph.waiting.get(i) {
+                    Some(w) if row.last().is_some_and(|&p| p >= 0.1) => {
+                        let mut r: Vec<(usize, f32)> = w.iter().copied().enumerate().collect();
+                        r.sort_by(|a, b| b.1.total_cmp(&a.1));
+                        let names: Vec<String> = r
+                            .iter()
+                            .take(2)
+                            .filter(|x| x.1 >= 0.05)
+                            .map(|&(k, p)| format!("{} {p:.2}", parser.relations()[k]))
+                            .collect();
+                        format!("   ждёт как: {}", names.join(" | "))
+                    }
+                    _ => String::new(),
+                };
+                println!("  {:<12} → {}{waits}", words[i], shown.join(" | "));
             }
         }
         return Ok(());

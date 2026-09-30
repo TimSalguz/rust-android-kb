@@ -184,10 +184,10 @@ pub struct Config {
     /// found — the same words on the phrase set, a third faster to type).
     pub chooser_clamp: f32,
     pub chooser_bound: f32,
-    /// The sentence's graph (the parser) names the subject: a noun that may
-    /// be in the nominative, waiting for its head (1), or not (0). Off: the
-    /// graph doesn't tell a subject from an adverbial noun waiting too («я
-    /// все время занята» → «занято»).
+    /// The sentence's graph (the parser) names the subject (1) or not (0): a
+    /// noun that may be in the nominative, waiting for its head as the
+    /// subject — weighed by that chance («нос» before «оторвали» may be the
+    /// object: 0.67), not taken for sure.
     pub graph_subject: f32,
     /// Gesture typing: weights of the full comparison with a word's path —
     /// location (squared mean distance, key widths) and shape (scale-free) —
@@ -297,7 +297,7 @@ impl Config {
             w_chooser: 1.0,
             chooser_clamp: 2.0,
             chooser_bound: 0.0,
-            graph_subject: 0.0,
+            graph_subject: 1.0,
             gesture_location: 7.0,
             gesture_shape: 6.0,
             gesture_walk: 8.0,

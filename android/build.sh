@@ -63,6 +63,15 @@ if [ -s data/chooser/chooser.bin ] && [ -s "$OUT/assets/lemmas.bin" ]; then
 else
     rm -f "$OUT/assets/chooser.bin"
 fi
+# The parser, the sentence's graph (tools/graph_parser.py --causal →
+# tools/graph_parser_export.py --causal --int8 → data/graph/parser.bin),
+# optional: it reads the lemma vectors too.
+if [ -s data/graph/parser.bin ] && [ -s "$OUT/assets/lemmas.bin" ]; then
+    cp data/graph/parser.bin "$OUT/assets/parser.bin.part"
+    mv "$OUT/assets/parser.bin.part" "$OUT/assets/parser.bin"
+else
+    rm -f "$OUT/assets/parser.bin"
+fi
 if [ -s data/bigrams.tsv ]; then
     cargo run --release -q -p index-builder -- --bigrams data/bigrams.tsv "$OUT/assets/bigrams.fst" \
         $([ -s data/endings.tsv ] && echo --endings data/endings.tsv) \
