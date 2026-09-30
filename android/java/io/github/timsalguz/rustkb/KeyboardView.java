@@ -4,8 +4,10 @@ import android.annotation.SuppressLint;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.RectF;
+import android.os.Build;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.WindowInsets;
 
 /** Paints the draw list the Rust core returns and forwards touches to it. */
 @SuppressLint("ViewConstructor")
@@ -19,17 +21,33 @@ final class KeyboardView extends View {
     private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF rect = new RectF();
+    /**
+     * The system's navigation bar over the bottom of the keyboard's window
+     * (Android 15 draws an IME's window behind it): the keys stay above it,
+     * the keyboard's background goes on under it.
+     */
+    private int navBottom;
 
     KeyboardView(RustKbService ime) {
         super(ime);
         this.ime = ime;
         text.setTextAlign(Paint.Align.CENTER);
+        setOnApplyWindowInsetsListener((v, insets) -> {
+            int bottom = Build.VERSION.SDK_INT >= 30
+                    ? insets.getInsets(WindowInsets.Type.navigationBars()).bottom
+                    : insets.getSystemWindowInsetBottom();
+            if (bottom != navBottom) {
+                navBottom = bottom;
+                requestLayout();
+            }
+            return insets;
+        });
     }
 
     @Override
     protected void onMeasure(int widthSpec, int heightSpec) {
         int width = MeasureSpec.getSize(widthSpec);
-        setMeasuredDimension(width, Native.measure(ime.handle(), width));
+        setMeasuredDimension(width, Native.measure(ime.handle(), width) + navBottom);
     }
 
     @Override
@@ -37,6 +55,8 @@ final class KeyboardView extends View {
         int[] ops = Native.drawOps(ime.handle());
         String[] texts = Native.drawTexts(ime.handle());
         if (ops == null || texts == null) return;
+        // The background (the list's first rectangle) under the navigation bar too.
+        if (ops.length >= 7 && ops[0] == OP_RECT) canvas.drawColor(ops[5]);
         for (int i = 0; i + 7 <= ops.length; i += 7) {
             if (ops[i] == OP_RECT) {
                 fill.setColor(ops[i + 5]);

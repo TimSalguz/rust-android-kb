@@ -15,6 +15,8 @@ import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
+import android.os.Build;
+import android.view.WindowInsets;
 import android.widget.ScrollView;
 import android.widget.Switch;
 import android.widget.TextView;
@@ -164,6 +166,16 @@ public final class SettingsActivity extends Activity {
 
         ScrollView scroll = new ScrollView(this);
         scroll.addView(list);
+        // Android 15 draws the screen behind the navigation bar (and the
+        // keyboard): the list ends above them, scrolling on under them.
+        scroll.setClipToPadding(false);
+        scroll.setOnApplyWindowInsetsListener((v, insets) -> {
+            int bottom = Build.VERSION.SDK_INT >= 30
+                    ? insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.ime()).bottom
+                    : insets.getSystemWindowInsetBottom();
+            v.setPadding(v.getPaddingLeft(), v.getPaddingTop(), v.getPaddingRight(), bottom);
+            return insets;
+        });
         setContentView(scroll);
     }
 
