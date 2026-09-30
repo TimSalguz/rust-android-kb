@@ -118,7 +118,7 @@ def sentence_graph(words):
                 hj = h[0, j].unsqueeze(0)
                 rl = torch.softmax(model.rel(torch.cat([h[0, i + 1].unsqueeze(0), hj], -1))[0], -1)
             rel_p = sorted(((float(rl[saved["rels"][r]]), r) for r in rs if r in saved["rels"]), reverse=True)
-            links.append({"head": j, "p": float(p[i + 1, j]), "rels": [[r, round(q, 3)] for q, r in rel_p[:3]]})
+            links.append({"head": j, "p": float(p[i + 1, j]), "rels": [[r, round(q, 4)] for q, r in rel_p]})
         links.sort(key=lambda x: -x["p"])
         out.append({"word": w, "readings": readings(w), "links": links})
     return out
@@ -131,14 +131,15 @@ PRON = {"он": ("masc", "sing"), "его": ("masc", "sing"), "ему": ("masc",
 
 
 def antecedents(text_words, at, gender, number):
-    """Earlier nouns (animate) the pronoun can stand for: equal chances."""
+    """Earlier nouns (animate) the pronoun can stand for, equal chances; with
+    the reading that matched."""
     found = []
     for k in range(at - 1, -1, -1):
         s_i, w_i, w = text_words[k]
         for t in readings(w):
             parts = t.split(",")
             if parts[0] == "NOUN" and "anim" in parts and number in parts and (gender is None or gender in parts):
-                found.append((s_i, w_i, w))
+                found.append((s_i, w_i, w, t))
                 break
     return found
 
@@ -155,8 +156,9 @@ for si, words in enumerate(text):
             cands = antecedents(flat, len(flat), gen, num)
             if cands:
                 graph["coref"].append({"sentence": si, "word": wi, "pronoun": w,
-                                       "candidates": [{"sentence": a, "word": b, "form": c,
-                                                       "p": round(1 / len(cands), 3)} for a, b, c in cands]})
+                                       "grammemes": [x for x in (gen, num, "anim") if x],
+                                       "candidates": [{"sentence": a, "word": b, "form": c, "reading": t,
+                                                       "p": round(1 / len(cands), 3)} for a, b, c, t in cands]})
         flat.append((si, wi, w))
 
 for si, sent in enumerate(graph["sentences"]):
