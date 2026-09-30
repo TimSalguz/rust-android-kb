@@ -398,7 +398,12 @@ pub fn place(
                 || i > 1 && s.word(i - 1) == "не" && i < n && GERUND_IDIOMS.contains(&(word, s.word(i + 1))))
         {
             // An idiom: no commas.
-        } else if b == "advcl" && t.form == Some(Form::Conv) {
+        } else if b == "advcl"
+            && (t.form == Some(Form::Conv)
+                || s.kids[i].iter().any(|&k| s.rel(k) == "cop" && s.tag(k).form == Some(Form::Conv)))
+        {
+            // A gerund phrase — «будучи» the copula of its word too («даже
+            // будучи спокойным человеком»).
             around("gerund");
         } else if b == "acl" && t.form == Some(Form::Part) {
             if lo > head {
@@ -532,9 +537,22 @@ pub fn place(
         }
         for j in 1..n {
             let c = graph.commas[j];
-            // Not before a gerund idiom («сидел сложа руки»).
+            // Not before a gerund idiom («сидел сложа руки»); nor before a
+            // participle phrase that qualifies a noun after it («на луну
+            // трепещущей в небе бабочки»), unless the word before qualifies
+            // that noun too («уставший, промокший до нитки путник»).
             let idiom = j + 1 < n && GERUND_IDIOMS.contains(&(words[j].as_str(), words[j + 1].as_str()));
-            if c >= LEARNED_LEAST && !idiom && !out.iter().any(|p| p.mark == Mark::Comma && p.before == j) {
+            let w = j + 1; // Read's numbering
+            let before_its_noun = matches!(s.rel(w), "amod" | "acl")
+                && s.tag(w).form == Some(Form::Part)
+                && !s.kids[w].is_empty()
+                && s.heads[w - 1] > w
+                && !(w > 1 && s.heads[w - 2] == s.heads[w - 1] && matches!(s.rel(w - 1), "amod" | "acl"));
+            if c >= LEARNED_LEAST
+                && !idiom
+                && !before_its_noun
+                && !out.iter().any(|p| p.mark == Mark::Comma && p.before == j)
+            {
                 out.push(Placed {
                     before: j,
                     mark: Mark::Comma,

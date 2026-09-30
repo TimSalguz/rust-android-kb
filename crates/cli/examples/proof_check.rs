@@ -39,6 +39,8 @@ fn main() {
     // against it (≥ v).
     let (hs, vs) = ([0.6f32, 0.7, 0.8], [0.1f32, 0.2, 0.3, 0.4]);
     let mut headed = vec![vec![(0usize, 0usize); vs.len()]; hs.len()];
+    // h 0.7, v 0.3, and a phrase's other comma along (the head ≥ 0.1 for it).
+    let mut headed_pairs = (0usize, 0usize);
     let mut model = (0usize, 0usize);
     // Where the graph is sure (≥ 0.95) and the model mildly against (odds in
     // [-3, 0)): how right each rule is.
@@ -101,8 +103,20 @@ fn main() {
             rule[p.before] = p.rule;
             learned[p.before] = p.learned;
         }
+        // The keyboard's policy (h 0.7, v 0.3) on each gap, for the pairs.
+        let accepted: Vec<bool> = (0..words.len())
+            .map(|x| learned[x] >= 0.7 || graph[x].is_some_and(|c| c >= 0.8) && learned[x] >= 0.3)
+            .collect();
         for i in 1..words.len() {
             let right = usize::from(has(i));
+            let along = graph[i].is_some_and(|c| c >= 0.8)
+                && ["gerund", "participle after", "relative", "said"].contains(&rule[i])
+                && learned[i] >= 0.1
+                && (1..words.len()).any(|x| x != i && by[x].is_some() && by[x] == by[i] && accepted[x]);
+            if accepted[i] || along {
+                headed_pairs.0 += 1;
+                headed_pairs.1 += right;
+            }
             if let Some(c) = graph[i] {
                 let key = if (0.6..0.8).contains(&c) && (0.0..1.0).contains(&odds[i]) {
                     Some("0.6…0.8, odds 0…1")
@@ -243,6 +257,7 @@ fn main() {
         }
         println!();
     }
+    println!("h 0.7, v 0.3 and a phrase's other comma along (head ≥ 0.1): {}", pct(headed_pairs));
     println!("a rule's comma (≥ 0.8) the head gives at least t (0.3, 0.4, …, 0.8):");
     for (h, t) in [0.3f32, 0.4, 0.5, 0.6, 0.7, 0.8].iter().enumerate() {
         println!("  {t:>5.2}  {}", pct(both_say[h]));
