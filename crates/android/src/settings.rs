@@ -104,8 +104,10 @@ pub struct Settings {
     /// The cursor put on a word of another script (an English word in a
     /// Russian text) switches the language to it.
     pub lang_from_text: bool,
-    /// Experiment: the arc layout for the thumb the grip shows (a swipe up
-    /// on ?123 or Enter forces it for the left or right thumb either way).
+    /// The one-handed (arc) layout follows the thumb the grip shows — the
+    /// phone's tilt and the taps, against the calibrated grips; off by
+    /// default (a swipe up on ?123 or Enter forces it for the left or right
+    /// thumb either way).
     pub arc_layout: bool,
     /// Obscene words are never suggested or corrected to (typed letter by
     /// letter, they stay).
@@ -600,6 +602,15 @@ impl SettingsFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_setting_has_a_label() {
+        for f in FIELDS {
+            for ui in [Lang::Ru, Lang::En, Lang::De, Lang::Fr, Lang::Es, Lang::Pt] {
+                assert!(!t(ui, &format!("set.{}", f.key)).is_empty(), "{} ({ui:?})", f.key);
+            }
+        }
+    }
 
     #[test]
     fn roundtrip() {

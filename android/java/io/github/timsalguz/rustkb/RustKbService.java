@@ -67,6 +67,8 @@ public final class RustKbService extends InputMethodService implements SensorEve
             String log = ext == null ? null : new File(ext, "typing-log.jsonl").getPath();
             // A ranked dictionary's priors lie beside it (read by the core).
             install("dict.bin");
+            // The parser of whole sentences lies beside parser.bin (read by the core).
+            install("sentence.bin");
             handle = Native.create(install("dict.fst"), install("bigrams.fst"), install("casing.fst"),
                     install("lemmas.bin"), install("chooser.bin"), install("parser.bin"), settingsPath(this), log,
                     locale(),
@@ -208,9 +210,12 @@ public final class RustKbService extends InputMethodService implements SensorEve
     @Override
     public void onAccuracyChanged(Sensor sensor, int accuracy) {}
 
+    /** The text before the cursor the core keeps: a whole sentence (BEFORE_CHARS in ime.rs). */
+    private static final int BEFORE_UNITS = 400;
+
     private String textBefore() {
         InputConnection ic = getCurrentInputConnection();
-        CharSequence before = ic == null ? null : ic.getTextBeforeCursor(48, 0);
+        CharSequence before = ic == null ? null : ic.getTextBeforeCursor(BEFORE_UNITS, 0);
         return before == null ? "" : before.toString();
     }
 

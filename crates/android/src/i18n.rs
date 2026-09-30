@@ -201,6 +201,14 @@ const TEXTS: &[(&str, [&str; 6])] = &[
     ("set.calibrate_right", ["[ I] Правая рука: область пальца и фраза", "[ I] Right hand: the thumb's area and a phrase", "[ I] Rechte Hand: Daumenbereich und ein Satz", "[ I] Main droite : zone du pouce et une phrase", "[ I] Mano derecha: zona del pulgar y una frase", "[ I] Mão direita: área do polegar e uma frase"]),
     ("set.calibrate_both", ["[II] Двумя руками: фраза", "[II] Both hands: a phrase", "[II] Beide Hände: ein Satz", "[II] Deux mains : une phrase", "[II] Dos manos: una frase", "[II] Duas mãos: uma frase"]),
     ("set.calibrate_finger", ["[•] Одним пальцем, телефон на столе: фраза", "[•] One finger, the phone on a table: a phrase", "[•] Ein Finger, Telefon auf dem Tisch: ein Satz", "[•] Un doigt, téléphone sur la table : une phrase", "[•] Un dedo, teléfono en la mesa: una frase", "[•] Um dedo, telefone na mesa: uma frase"]),
+    ("set.arc_layout", [
+        "Одной рукой: клавиатура сама подстраивается под левый или правый большой палец по наклону телефона (нужна калибровка хвата)",
+        "One-handed: the keyboard follows the left or right thumb by the phone's tilt (needs the grip calibration)",
+        "Einhändig: die Tastatur folgt dem linken oder rechten Daumen nach der Neigung des Telefons (braucht die Griff-Kalibrierung)",
+        "À une main : le clavier suit le pouce gauche ou droit selon l'inclinaison du téléphone (calibrage de la prise requis)",
+        "A una mano: el teclado sigue al pulgar izquierdo o derecho según la inclinación del teléfono (requiere calibrar el agarre)",
+        "Com uma mão: o teclado segue o polegar esquerdo ou direito pela inclinação do telefone (requer calibrar a pegada)",
+    ]),
     ("set.grip_undo", ["Откатить", "Undo", "Zurück", "Annuler", "Deshacer", "Desfazer"]),
     ("set.grip_indicator", [
         "Показывать хват: [I ] левая, [ I] правая, [II] две руки, [•] один палец",

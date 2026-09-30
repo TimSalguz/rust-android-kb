@@ -199,6 +199,15 @@ fn with<T>(h: jlong, fallback: T, f: impl FnOnce(&mut Handle) -> Result<T>) -> T
     })
 }
 
+/// The parser of whole sentences beside the parser: `sentence-<stamp>.bin`
+/// by `parser-<stamp>.bin` (both installed from the assets), if it is there.
+fn sentence_parser_path(parser: &str) -> Option<std::path::PathBuf> {
+    let path = std::path::Path::new(parser);
+    let rest = path.file_name()?.to_str()?.strip_prefix("parser")?;
+    let whole = path.with_file_name(format!("sentence{rest}"));
+    whole.exists().then_some(whole)
+}
+
 #[no_mangle]
 pub extern "system" fn Java_io_github_timsalguz_rustkb_Native_create(
     mut env: JNIEnv,
@@ -249,10 +258,18 @@ pub extern "system" fn Java_io_github_timsalguz_rustkb_Native_create(
                     Some(Err(e)) => crate::log(&format!("chooser: {e}")),
                     None => {}
                 }
-                // And the parser, the sentence's graph.
+                // And the parser, the sentence's graph — and beside it
+                // (sentence-<stamp>.bin by parser-<stamp>.bin) the parser of
+                // whole sentences, the proofreading's.
+                let whole = parser.as_deref().and_then(sentence_parser_path);
                 match parser.map(kbcore::Parser::open) {
                     Some(Ok(p)) => engine = engine.with_parser(p),
                     Some(Err(e)) => crate::log(&format!("parser: {e}")),
+                    None => {}
+                }
+                match whole.map(kbcore::Parser::open) {
+                    Some(Ok(p)) => engine = engine.with_sentence_parser(p),
+                    Some(Err(e)) => crate::log(&format!("sentence parser: {e}")),
                     None => {}
                 }
             }

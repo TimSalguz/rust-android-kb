@@ -213,7 +213,7 @@ impl Hands {
                 self.field.sel.1 as i32,
                 cs,
                 ce,
-                &self.field.before(48),
+                &self.field.before(400),
                 &self.field.after(32),
                 selected.as_deref(),
             );
@@ -340,7 +340,7 @@ impl Hands {
             at as i32,
             cs,
             ce,
-            &self.field.before(48),
+            &self.field.before(400),
             &self.field.after(32),
             None,
         );
@@ -377,6 +377,9 @@ fn main() {
         }
         if beside("parser.bin").exists() {
             engine = engine.open_parser(beside("parser.bin")).expect("parser");
+        }
+        if beside("sentence.bin").exists() {
+            engine = engine.open_sentence_parser(beside("sentence.bin")).expect("sentence parser");
         }
     }
     let session = &args[3];

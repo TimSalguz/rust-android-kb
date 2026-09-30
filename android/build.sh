@@ -72,6 +72,14 @@ if [ -s data/graph/parser.bin ] && [ -s "$OUT/assets/lemmas.bin" ]; then
 else
     rm -f "$OUT/assets/parser.bin"
 fi
+# The parser of whole sentences, the proofreading's (tools/graph_parser.py →
+# tools/graph_parser_export.py --int8 → data/graph/sentence.bin), beside it.
+if [ -s data/graph/sentence.bin ] && [ -s "$OUT/assets/parser.bin" ]; then
+    cp data/graph/sentence.bin "$OUT/assets/sentence.bin.part"
+    mv "$OUT/assets/sentence.bin.part" "$OUT/assets/sentence.bin"
+else
+    rm -f "$OUT/assets/sentence.bin"
+fi
 if [ -s data/bigrams.tsv ]; then
     cargo run --release -q -p index-builder -- --bigrams data/bigrams.tsv "$OUT/assets/bigrams.fst" \
         $([ -s data/endings.tsv ] && echo --endings data/endings.tsv) \

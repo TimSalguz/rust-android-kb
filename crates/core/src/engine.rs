@@ -430,6 +430,9 @@ pub struct Engine<D: AsRef<[u8]>> {
     /// Optional student parser ([`crate::parser`]): the chances of the links
     /// of the sentence's graph.
     pub(crate) parser: Option<crate::parser::Parser<D>>,
+    /// Optional parser of whole sentences: a finished sentence's graph, the
+    /// marks it puts ([`Engine::sentence_marks`]).
+    pub(crate) sentence_parser: Option<crate::parser::Parser<D>>,
     /// The priors by rank of a ranked dictionary ([`DictFormat::ranked`]).
     pub(crate) store: Option<Store<D>>,
     /// Optional casing list: lowercase word → 1 (always Capitalized) or 2 (in
@@ -453,6 +456,7 @@ pub enum Casing {
 }
 
 mod commas;
+pub mod proof;
 mod context;
 mod decode;
 pub use context::Context;
@@ -555,6 +559,11 @@ impl Engine<Mmap> {
         Ok(self.with_parser(crate::parser::Parser::open(path)?))
     }
 
+    /// Add the parser of whole sentences, mmap'd.
+    pub fn open_sentence_parser<P: AsRef<Path>>(self, path: P) -> io::Result<Self> {
+        Ok(self.with_sentence_parser(crate::parser::Parser::open(path)?))
+    }
+
     /// Add the chooser ([`crate::chooser`]), mmap'd.
     pub fn open_chooser<P: AsRef<Path>>(self, path: P) -> io::Result<Self> {
         Ok(self.with_chooser(Chooser::open(path)?))
@@ -575,6 +584,7 @@ impl<D: AsRef<[u8]>> Engine<D> {
             lemmas: None,
             chooser: None,
             parser: None,
+            sentence_parser: None,
             store: None,
             casing: None,
             user: None,
@@ -649,6 +659,19 @@ impl<D: AsRef<[u8]>> Engine<D> {
     pub fn with_parser(mut self, parser: crate::parser::Parser<D>) -> Self {
         self.parser = Some(parser);
         self
+    }
+
+    /// Attach the parser of whole sentences (not a causal one).
+    pub fn with_sentence_parser(mut self, parser: crate::parser::Parser<D>) -> Self {
+        if !parser.causal() {
+            self.sentence_parser = Some(parser);
+        }
+        self
+    }
+
+    /// The parser of whole sentences, if attached.
+    pub fn sentence_parser(&self) -> Option<&crate::parser::Parser<D>> {
+        self.sentence_parser.as_ref()
     }
 
     /// The student parser, if attached.

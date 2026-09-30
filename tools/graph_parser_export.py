@@ -46,7 +46,10 @@ ap.add_argument("--check")
 ap.add_argument("--dump")
 opts = ap.parse_args()
 
-src = open(f"{ROOT}/tools/graph_parser.py", encoding="utf-8").read().split("\ntrain = read(")[0]
+# The trainer's definitions: all of it before the training data is read.
+src = open(f"{ROOT}/tools/graph_parser.py", encoding="utf-8").read().split("\ntt = read(")
+assert len(src) == 2, "tools/graph_parser.py: where the training starts is not found"
+src = src[0]
 sys.argv = ["graph_parser.py", "--places", str(opts.places), "--d", str(opts.d), "--layers", str(opts.layers)] \
     + (["--causal"] if opts.causal else [])
 g = {"__file__": f"{ROOT}/tools/graph_parser.py", "__name__": "graph_parser"}
@@ -120,7 +123,7 @@ if opts.check:
             marks = [w[: len(w) - len(w.lstrip(",—:;()«»\"!?.…"))] or "_" for w in words]
             words = [w.lstrip(",—:;()«»\"!?.…") for w in words]
             n = len(words)
-            t = [x.long() if x.dtype == torch.int32 else x for x in g["tensors"]([(words, [0] * n, [0] * n, marks)])]
+            t = g["tensors"]([(words, [0] * n, [0] * n, marks)])
             # The grammeme sets as numbered here (the saved table numbers the
             # training's).
             model.bag_rows = torch.tensor(g["np"].stack(g["bag_rows"]))

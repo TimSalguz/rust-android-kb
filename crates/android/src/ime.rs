@@ -5,6 +5,8 @@
 
 use std::collections::VecDeque;
 
+use kbcore::engine::proof::tokens;
+use kbcore::marks::Mark;
 use kbcore::{Candidate, Casing, Context, Engine, Evidence, Hint};
 
 use crate::grip::{phrase_for, Calibration, Grip, Grips, Sense, Step};
@@ -160,8 +162,9 @@ const DRAG_ADD_DP: f32 = 30.0;
 /// A capitalized selected word goes in as a name (always capitalized) or as
 /// an ordinary word: the two choices start with this (their texts: i18n).
 const DICT_PLAIN: &str = "＋ ";
-/// How much text before the cursor we keep (the shim sends this much too).
-const BEFORE_CHARS: usize = 120;
+/// How much text before the cursor we keep (the shim asks for this many
+/// UTF-16 units too): a whole sentence, for the proofreading.
+const BEFORE_CHARS: usize = 400;
 const REPEAT_START_MS: i32 = 400;
 const REPEAT_MS: i32 = 60;
 /// Held ⌫: after this many single chars it takes whole words…
@@ -289,6 +292,15 @@ const COMPLETE_ON_SPACE: usize = 2;
 /// are 40% of all commas).
 const COMMA_SURE: f32 = 2.2;
 
+/// A finished sentence read whole (Engine::sentence_marks): a comma goes in
+/// where its graph is at least this sure of one and the comma model's log
+/// odds for the gap are at least [`PROOF_ODDS`] — of such commas on
+/// held-out sentences typed without commas (data/parse_m long_valid,
+/// tools/../proof_check) 97% are right; with the ones put in as typed
+/// ([`COMMA_SURE`]) the keyboard finds 39% of the commas (27% without).
+const PROOF_SURE: f32 = 0.8;
+const PROOF_ODDS: f32 = 0.0;
+
 /// A text just copied, offered in the strip (a tap pastes it) for this long.
 const CLIP_OFFER_MS: i64 = 90_000;
 /// What marks it there.
@@ -364,6 +376,15 @@ struct Undo {
     /// A change that made two words of the text (a re-read pair, a split):
     /// its readings, so a swipe up after ⌫ can bring the pair back.
     pairs: Vec<String>,
+}
+
+/// A finished sentence's proofreading: the text from its first new comma
+/// on as it was and as it is now, and the word pairs the commas went
+/// between (⌫ right after puts it back; those commas don't come again).
+struct ProofUndo {
+    was: String,
+    now: String,
+    pairs: Vec<(String, String)>,
 }
 
 /// What the finger gave for a word: letters tapped (lowercase) with their
@@ -574,6 +595,12 @@ pub struct Ime<D: AsRef<[u8]>> {
     /// pairs whose comma the user took out in this field.
     comma_undo: Option<(String, String)>,
     commas_rejected: Vec<(String, String)>,
+    /// The commas a finished sentence's proofreading just put in (⌫ takes
+    /// them out).
+    proof_undo: Option<ProofUndo>,
+    /// `before` begins where the field does (the editor sent less than it
+    /// was asked for, and nothing has been cut since).
+    whole: bool,
     /// Letters erased from the word since one was last typed.
     erased: usize,
     /// The word came back whole (⌫ undid a correction or reached into a word).
@@ -903,6 +930,8 @@ impl<D: AsRef<[u8]>> Ime<D> {
             undo: None,
             rejected: Vec::new(),
             comma_undo: None,
+            proof_undo: None,
+            whole: false,
             commas_rejected: Vec::new(),
             erased: 0,
             restored: false,
@@ -1686,9 +1715,10 @@ impl<D: AsRef<[u8]>> Ime<D> {
         if self.panel.take().is_some() {
             self.stash.settle();
         }
-        self.set_before(text_before);
+        self.editor_before(text_before);
         self.written.clear();
         self.comma_undo = None;
+        self.proof_undo = None;
         self.commas_rejected.clear();
         self.recorrect = None;
         self.lang_for_field();
@@ -1702,7 +1732,17 @@ impl<D: AsRef<[u8]>> Ime<D> {
 
     fn set_before(&mut self, text: &str) {
         let n = text.chars().count();
+        if n > BEFORE_CHARS {
+            self.whole = false;
+        }
         self.before = text.chars().skip(n.saturating_sub(BEFORE_CHARS)).collect();
+    }
+
+    /// The text before the cursor as the editor sent it: less than asked
+    /// for, it starts where the field does.
+    fn editor_before(&mut self, text: &str) {
+        self.whole = text.encode_utf16().count() < BEFORE_CHARS;
+        self.set_before(text);
     }
 
     /// The editor's selection changed; `text_before` is the text before the
@@ -1792,7 +1832,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
             self.editing = false;
             self.forget_spot();
             self.out.push(Op::Finish);
-            self.set_before(text_before);
+            self.editor_before(text_before);
             return REDRAW | OUTPUT;
         }
         let text = text_before
@@ -1800,10 +1840,10 @@ impl<D: AsRef<[u8]>> Ime<D> {
             .unwrap_or(text_before);
         // The text before the cursor isn't what we left there: the user
         // moved the cursor (or the app changed the text). Only the tail is
-        // compared — the shim's 48 UTF-16 units may cut an emoji at the start.
+        // compared — the shim's text may cut an emoji at its start.
         let tail = |t: &str| t.chars().rev().take(16).collect::<String>();
         let moved = self.word.is_empty() && tail(text) != tail(&self.before);
-        self.set_before(text);
+        self.editor_before(text);
         if moved {
             self.forget_spot();
             self.lang_from_text();
@@ -2877,9 +2917,17 @@ impl<D: AsRef<[u8]>> Ime<D> {
     }
 
     fn type_char(&mut self, c: char) {
+        self.type_char_now(c);
+        if matches!(c, '.' | '!' | '?') {
+            self.proofread(false);
+        }
+    }
+
+    fn type_char_now(&mut self, c: char) {
         self.undo = None;
         self.clip_offer = None;
         self.comma_undo = None;
+        self.proof_undo = None;
         // Punctuation right after a word the strip joins with the one before
         // («кто нибудь,»): joined first, as space would (the space it leaves
         // moves after the mark, below).
@@ -3306,6 +3354,132 @@ impl<D: AsRef<[u8]>> Ime<D> {
         self.before = self.before.chars().take(keep).collect();
         self.commit(format!(" {word}"));
         self.commas_rejected.push((a, b));
+        true
+    }
+
+    /// A sentence just finished — by `.`, `!` or `?` (`by_enter`: by Enter,
+    /// no mark after its last word): the commas the graph of the whole
+    /// sentence is sure of ([`PROOF_SURE`]) go in where no mark stands, the
+    /// comma model not against them ([`PROOF_ODDS`]); ⌫ right after takes
+    /// them out.
+    fn proofread(&mut self, by_enter: bool) {
+        self.proof_undo = None;
+        if !self.settings.auto_commas || !self.suggest || self.lang != Lang::Ru {
+            return;
+        }
+        let Some(places) = self.engine.sentence_parser().map(|p| p.places()) else {
+            return;
+        };
+        let text = self.before.clone();
+        let body = text.trim_end_matches(|c: char| c.is_whitespace() || ".!?…".contains(c));
+        let rest = &text[body.len()..];
+        if by_enter {
+            if rest.chars().any(|c| !c.is_whitespace()) {
+                return; // proofread at its mark already
+            }
+        } else if !sentence_start(&format!("{} ", text.trim_end())) {
+            return; // a short form's period (т. е.), not the sentence's end
+        }
+        let toks = tokens(body);
+        // Where the sentence starts: after the one before, or where the field
+        // does — never where the text kept happens to be cut.
+        let starts = |i: usize| {
+            let pre = &body[..toks[i].start];
+            if pre.chars().all(|c| !c.is_alphanumeric()) {
+                self.whole || sentence_start(pre) && !pre.trim().is_empty()
+            } else {
+                sentence_start(pre)
+            }
+        };
+        let Some(first) = (0..toks.len()).rev().find(|&i| starts(i)) else {
+            return;
+        };
+        let sent = &toks[first..];
+        if sent.len() < 3
+            || sent.len() > places
+            || sent.iter().any(|t| t.text.chars().any(|c| c.is_ascii_alphabetic()))
+        {
+            return;
+        }
+        // Before the first word only what opens the sentence (a quote, a
+        // bracket), not the mark that ended the one before.
+        let marks: Vec<String> = sent
+            .iter()
+            .enumerate()
+            .map(|(k, t)| {
+                if k == 0 {
+                    t.before.chars().filter(|c| !".!?…".contains(*c)).collect()
+                } else {
+                    t.before.clone()
+                }
+            })
+            .collect();
+        let words: Vec<(&str, &str)> = sent.iter().zip(&marks).map(|(t, m)| (t.text, m.as_str())).collect();
+        let Some((put, _)) = self.engine.sentence_marks(&words) else {
+            return;
+        };
+        let mut at: Vec<(usize, (String, String))> = Vec::new();
+        for p in put {
+            if p.mark != Mark::Comma || p.before == 0 || p.chance < PROOF_SURE {
+                continue;
+            }
+            let (prev, next) = (&sent[p.before - 1], &sent[p.before]);
+            if !next.before.is_empty() || at.iter().any(|(pos, _)| *pos == prev.end) {
+                continue; // a mark stands there already
+            }
+            let pair = (prev.text.to_lowercase(), next.text.to_lowercase());
+            if self.commas_rejected.contains(&pair) {
+                continue;
+            }
+            let odds = self.engine.comma_odds_in(&text[..prev.end], &pair.0, &pair.1);
+            if odds.is_some_and(|o| o >= PROOF_ODDS) {
+                at.push((prev.end, pair));
+            }
+        }
+        if at.is_empty() {
+            return;
+        }
+        at.sort_by_key(|(pos, _)| *pos);
+        let from = at[0].0;
+        let mut now = String::new();
+        let mut last = from;
+        for (pos, _) in &at {
+            now.push_str(&text[last..*pos]);
+            now.push(',');
+            last = *pos;
+        }
+        now.push_str(&text[last..]);
+        let was = text[from..].to_string();
+        let n = was.chars().count();
+        self.log_event("proof", &[("commas", at.len().to_string())]);
+        self.out.push(Op::Delete(n));
+        let keep = self.before.chars().count() - n;
+        self.before = self.before.chars().take(keep).collect();
+        let auto_space = self.auto_space;
+        self.commit(now.clone());
+        self.auto_space = auto_space;
+        self.proof_undo = Some(ProofUndo {
+            was,
+            now,
+            pairs: at.into_iter().map(|(_, pair)| pair).collect(),
+        });
+    }
+
+    /// ⌫ right after a sentence's proofreading: its commas go out, and they
+    /// don't come again between those words in this field.
+    fn take_proof(&mut self) -> bool {
+        let Some(u) = self.proof_undo.take() else {
+            return false;
+        };
+        if !self.word.is_empty() || !self.before.ends_with(&u.now) {
+            return false;
+        }
+        let n = u.now.chars().count();
+        self.out.push(Op::Delete(n));
+        let keep = self.before.chars().count() - n;
+        self.before = self.before.chars().take(keep).collect();
+        self.commit(u.was);
+        self.commas_rejected.extend(u.pairs);
         true
     }
 
@@ -3773,8 +3947,15 @@ impl<D: AsRef<[u8]>> Ime<D> {
         let corrected = self.commit_word(true);
         self.leave_word();
         self.prev_word = None;
+        // A sentence ended by Enter, no mark after it: proofread as a mark
+        // would have it (before the app sends it).
+        self.proofread(true);
         self.out.push(Op::Enter);
         self.before.push('\n');
+        if let Some(u) = self.proof_undo.as_mut() {
+            u.was.push('\n');
+            u.now.push('\n');
+        }
         self.update_shift();
         self.undo = corrected.map(|(typed, fixed)| Undo {
             typed,
@@ -3791,7 +3972,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
         let after_drawn = std::mem::take(&mut self.auto_space);
         self.variants_shown = false;
         self.last_bksp = Some(self.now_ms);
-        if self.take_comma() {
+        if self.take_proof() || self.take_comma() {
             return;
         }
         let drawn_in = after_drawn

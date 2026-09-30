@@ -113,58 +113,88 @@ MARK_KINDS = {",": 0, "—": 1, ":": 2, ";": 3, "(": 4, ")": 5, "«": 6, "»": 7
 N_MARKS = len(MARK_KINDS)
 
 
+L = args.places + 1  # the root and the words
+
+
+def blank(n):
+    """Room for n sentences: lemma, class, grammeme set, padding, head,
+    relation, and the marks before each word as bits — small types on the
+    host; `batch` widens them on the device."""
+    t = [torch.full((n, L), UNK, dtype=torch.int32), torch.zeros((n, L), dtype=torch.int32),
+         torch.zeros((n, L), dtype=torch.int32), torch.ones((n, L), dtype=torch.bool),
+         torch.zeros((n, L), dtype=torch.int8), torch.zeros((n, L), dtype=torch.int8),
+         torch.zeros((n, L), dtype=torch.int16)]
+    t[3][:, 0] = False
+    return t
+
+
+def fill(t, i, words, heads, rels, before):
+    """Sentence i of tensors `t`."""
+    lem, cls, bags, mask, head, rel, marks = t
+    for j, w in enumerate(words[: L - 1]):
+        lem[i, j + 1] = lemma_of.get(w, UNK)
+        cls[i, j + 1] = class_of.get(w, 0)
+        bags[i, j + 1] = bag(w)
+        mask[i, j + 1] = False
+        head[i, j + 1] = heads[j]
+        rel[i, j + 1] = rels[j]
+        bits = 0
+        for c in before[j]:
+            k = MARK_KINDS.get(c)
+            if k is not None:
+                bits |= 1 << k
+        marks[i, j + 1] = bits
+
+
 def read(path, limit=0):
-    rows = []
+    """The sentences of a parse file as tensors, filled line by line (the
+    text is never held whole)."""
+    with open(path, encoding="utf-8") as f:
+        cap = sum(1 for _ in f)
+    if limit:
+        cap = min(cap, limit)
+    t = blank(cap)
+    i = 0
     with open(path, encoding="utf-8") as f:
         for line in f:
+            if i >= cap:
+                break
             p = line.rstrip("\n").split("\t")
             if len(p) < 5:
                 continue
             words = p[1].split()
             heads = [int(h) for h in p[3].split()]
             rels = [RELS.setdefault(r.split(":")[0], len(RELS)) for r in p[4].split()]
-            marks = p[6].split() if len(p) > 6 else ["_"] * len(words)
-            if not len(words) == len(heads) == len(rels) == len(marks) or len(words) > L - 1:
+            before = p[6].split() if len(p) > 6 else ["_"] * len(words)
+            if not len(words) == len(heads) == len(rels) == len(before) or len(words) > L - 1:
                 continue
-            rows.append((words, heads, rels, marks))
-            if limit and len(rows) >= limit:
-                break
-    return rows
-
-
-L = args.places + 1  # the root and the words
+            fill(t, i, words, heads, rels, before)
+            i += 1
+    return [x[:i] for x in t]
 
 
 def tensors(rows):
-    # 32-bit on the host (half the memory of long sentences); `batch` makes
-    # them long on the device.
-    n = len(rows)
-    lem = torch.full((n, L), UNK, dtype=torch.int32)
-    cls = torch.zeros((n, L), dtype=torch.int32)
-    bags = torch.zeros((n, L), dtype=torch.int32)
-    mask = torch.ones((n, L), dtype=torch.bool)
-    head = torch.zeros((n, L), dtype=torch.int32)
-    rel = torch.zeros((n, L), dtype=torch.int32)
-    marks = torch.zeros((n, L, N_MARKS), dtype=torch.bool)
-    mask[:, 0] = False
-    for i, (words, heads, rels, before) in enumerate(rows):
-        for j, w in enumerate(words[: L - 1]):
-            lem[i, j + 1] = lemma_of.get(w, UNK)
-            cls[i, j + 1] = class_of.get(w, 0)
-            bags[i, j + 1] = bag(w)
-            mask[i, j + 1] = False
-            head[i, j + 1] = heads[j]
-            rel[i, j + 1] = rels[j]
-            for c in before[j]:
-                k = MARK_KINDS.get(c)
-                if k is not None:
-                    marks[i, j + 1, k] = True
-    return lem, cls, bags, mask, head, rel, marks
+    """(words, heads, relations, marks) rows as the model reads them, on
+    the host (the exporter's check)."""
+    t = blank(len(rows))
+    for i, row in enumerate(rows):
+        fill(t, i, *row)
+    return [((x.int().unsqueeze(-1) >> torch.arange(N_MARKS)) & 1).bool() if x.dtype == torch.int16
+            else x if x.dtype == torch.bool else x.long() for x in t]
 
 
 def batch(t, idx):
-    """Rows `idx` of tensors `t` on the device, indices as long."""
-    return [x[idx].to(dev).long() if x.dtype == torch.int32 else x[idx].to(dev) for x in t]
+    """Rows `idx` of tensors `t` on the device: indices as long, the marks'
+    bits as a multi-hot of the kinds."""
+    out = []
+    for x in t:
+        x = x[idx].to(dev)
+        if x.dtype == torch.int16:
+            x = ((x.int().unsqueeze(-1) >> torch.arange(N_MARKS, device=dev)) & 1).bool()
+        elif x.dtype != torch.bool:
+            x = x.long()
+        out.append(x)
+    return out
 
 
 def drop_marks(marks):
@@ -270,14 +300,10 @@ def evaluate(model, t, marks=True):
             f"among the first three {top3 / tot:.2%}; calibration error {ece:.4f}{waits}")
 
 
-train = read(f"{args.parse}/train.tsv", args.limit)
-valid = read(f"{args.parse}/valid.tsv")
-log(f"{len(train)} training sentences, {len(valid)} held out, {len(RELS)} relations, {len(G)} grammemes; {dev}")
-tt = tensors(train)
-vt = tensors(valid)
-n_train = len(train)
-del train, valid  # the tensors hold them now
-log("tensors ready")
+tt = read(f"{args.parse}/train.tsv", args.limit)
+vt = read(f"{args.parse}/valid.tsv")
+n_train = tt[0].shape[0]
+log(f"{n_train} training sentences, {vt[0].shape[0]} held out, {len(RELS)} relations, {len(G)} grammemes; {dev}")
 model = Parser(args.d, args.layers).to(dev)
 opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr, weight_decay=1e-4)
 steps = args.epochs * math.ceil(n_train / args.batch)
