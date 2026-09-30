@@ -144,12 +144,123 @@ def antecedents(text_words, at, gender, number):
     return found
 
 
+CASE_Q = {"nomn": "кто? что?", "gent": "кого? чего?", "datv": "кому? чему?", "accs": "кого? что?",
+          "ablt": "кем? чем?", "loct": "о ком? о чём?", "gen2": "кого? чего?", "loc2": "где?"}
+# A preposition's cases, and the question each asks.
+PREP_Q = {"в": {"loct": "где?", "loc2": "где?", "accs": "куда? во что?"}, "на": {"loct": "где? на чём?", "loc2": "где?", "accs": "куда? на что?"},
+          "из": {"gent": "откуда? из чего?"}, "от": {"gent": "от кого? от чего?"}, "с": {"ablt": "с кем? с чем?", "gent": "откуда?"},
+          "к": {"datv": "к кому? к чему?"}, "о": {"loct": "о ком? о чём?"}, "об": {"loct": "о ком? о чём?"},
+          "за": {"ablt": "за кем? за чем?", "accs": "за что?"}, "по": {"datv": "по чему? где?"}, "у": {"gent": "у кого? где?"},
+          "для": {"gent": "для кого? для чего?"}, "без": {"gent": "без кого? без чего?"}, "до": {"gent": "до чего? докуда?"},
+          "под": {"ablt": "под чем? где?", "accs": "под что? куда?"}, "над": {"ablt": "над чем?"}, "перед": {"ablt": "перед чем?"},
+          "через": {"accs": "через что?"}, "про": {"accs": "про кого? про что?"}, "при": {"loct": "при ком? при чём?"}}
+REL_Q = {"nsubj": "кто? (подлежащее)", "obj": "кого? что?", "iobj": "кому? чему?", "amod": "какой?", "det": "чей? какой?",
+         "advmod": "как?", "nummod": "сколько?", "conj": "и ещё", "appos": "то есть",
+         "ccomp": "что?", "acl": "какой? (оборот)", "flat": "(имя)", "vocative": "(обращение)"}
+CAUSE = {"потому": "почему? (причина)", "так": "почему? (причина)", "поскольку": "почему? (причина)",
+         "когда": "когда?", "чтобы": "зачем?", "если": "при каком условии?", "хотя": "вопреки чему?"}
+# Words that mark a clause, not roles of their own.
+MARKERS = {"потому", "что", "так", "как", "поскольку", "чтобы", "если", "хотя", "когда"}
+PRED = ("VERB", "INFN", "ADJS", "PRTS", "PRED", "GRND")
+# A word is an event where the graph makes it a clause's head.
+EVENT_RELS = {"root", "conj", "advcl", "ccomp", "parataxis", "acl", "csubj"}
+
+
+def best(x):
+    return (x["links"][0]["head"], x["links"][0]["rels"][0][0]) if x["links"] and x["links"][0]["rels"] else (None, None)
+
+
+def dependents(sent, i):
+    """The words whose likeliest link goes to word i: (index, relation)."""
+    return [(d, best(y)[1]) for d, y in enumerate(sent) if best(y)[0] == i + 1]
+
+
+def question(sent, dep, rel):
+    """The school question from the head to the dependent `dep`."""
+    y = sent[dep]
+    if rel == "xcomp":
+        # A verb's infinitive, or a nominal part: «стали друзьями» — кем?
+        if any(t.startswith("INFN") for t in y["readings"]):
+            return "что делать?"
+        rel = "obl"
+    if rel in REL_Q:
+        return REL_Q[rel]
+    cases = [c for t in y["readings"] for c in t.split(",") if c in CASE_Q]
+    preps = [sent[k]["word"] for k, r in dependents(sent, dep) if r == "case"]
+    if preps:
+        by_case = PREP_Q.get(preps[0], {})
+        for c in cases:
+            if c in by_case:
+                return by_case[c]
+        return preps[0] + " " + CASE_Q.get(cases[0], "что?") if cases else preps[0] + " что?"
+    for c in ("ablt", "datv", "gent", "accs", "loct", "nomn"):
+        if c in cases:
+            return CASE_Q[c]
+    return "что?"
+
+
+def clause_question(sent, head):
+    """How a clause hangs on its head: its marker («потому что» — why)."""
+    for k, r in dependents(sent, head):
+        w = sent[k]["word"]
+        if w in CAUSE and r in ("mark", "advmod", "fixed"):
+            return CAUSE[w]
+    return None
+
+
+def events(sent):
+    """The sentence's events: each word the graph makes a clause's head,
+    with the chance of that, its roles — every dependent the graph links to
+    it, by the chance of that link, with the school question — the clauses
+    hanging on it (why, when), and the facts its grammemes and helpers imply
+    (tense, from the word or its copula; negation; supposition)."""
+    out = []
+    TENSE = {"past": "прошлое", "pres": "настоящее", "futr": "будущее"}
+    for i, x in enumerate(sent):
+        p_event = sum(l["p"] for l in x["links"] if l["rels"] and l["rels"][0][0] in EVENT_RELS)
+        if p_event < 0.05 or not any(t.split(",")[0] in PRED for t in x["readings"]):
+            continue
+        roles, facts = [], []
+        for d, y in enumerate(sent):
+            for l in y["links"]:
+                if l["head"] != i + 1 or l["p"] < 0.005 or not l["rels"]:
+                    continue
+                rel = l["rels"][0][0]
+                if rel in ("case", "mark", "fixed", "punct", "aux") or y["word"] in MARKERS:
+                    continue
+                if rel == "cop":
+                    tense = [g for t in y["readings"] for g in t.split(",") if g in TENSE]
+                    if tense:
+                        facts.append({"fact": "время", "value": TENSE[tense[0]], "from": y["word"], "p": round(l["p"], 4)})
+                    continue
+                if y["word"] == "не":
+                    facts.append({"fact": "отрицание", "value": "да", "from": "не", "p": round(l["p"], 4)})
+                    continue
+                if y["word"] == "бы":
+                    facts.append({"fact": "предположение", "value": "да", "from": "бы", "p": round(l["p"], 4)})
+                    continue
+                q = clause_question(sent, d) if rel in ("conj", "advcl", "parataxis") else None
+                roles.append({"question": q or question(sent, d, rel), "word": y["word"], "at": d, "rel": rel,
+                              "clause": bool(q), "p": round(l["p"], 4)})
+        if not any(f["fact"] == "время" for f in facts):
+            tense = sorted({g for t in x["readings"] for g in t.split(",") if g in TENSE})
+            if tense:
+                facts.append({"fact": "время", "value": " или ".join(TENSE[t] for t in tense), "from": x["word"], "p": 1.0})
+            elif any(t.startswith(("ADJS", "PRTS", "PRED")) for t in x["readings"]):
+                facts.append({"fact": "время", "value": "настоящее (нет связки)", "from": x["word"], "p": 1.0})
+        out.append({"at": i, "predicate": x["word"], "p_event": round(p_event, 4),
+                    "roles": sorted(roles, key=lambda r: -r["p"]), "facts": facts})
+    return out
+
+
 text = [re.findall(r"[а-яё]+(?:-[а-яё]+)*", line.lower().replace("ё", "е")) for line in sys.stdin]
 text = [s for s in text if s]
 graph = {"sentences": [], "coref": []}
 flat = []
+graph["events"] = []
 for si, words in enumerate(text):
     graph["sentences"].append(sentence_graph(words))
+    graph["events"].append(events(graph["sentences"][-1]))
     for wi, w in enumerate(words):
         if w in PRON:
             gen, num = PRON[w]
@@ -172,6 +283,11 @@ for si, sent in enumerate(graph["sentences"]):
             alts.append(f"{head}:{rel} {l['p']:.2f}")
         more = len(x["links"]) - opts.top
         print(f"  {x['word']:<12} → " + " | ".join(alts) + (f"  (+{more} more)" if more > 0 else ""))
+for si, evs in enumerate(graph["events"]):
+    for e in evs:
+        roles = "; ".join(f"{r['question']} → {r['word']} {r['p']:.2f}" for r in e["roles"] if r["p"] >= 0.05)
+        facts = "; ".join(f"{f['fact']}: {f['value']}" for f in e["facts"])
+        print(f"  [{si + 1}] «{e['predicate']}» (событие {e['p_event']:.2f}): {roles}" + (f"  ({facts})" if facts else ""))
 for c in graph["coref"]:
     cands = ", ".join(f"{x['form']} ({x['p']:.2f})" for x in c["candidates"])
     print(f"  «{c['pronoun']}» (предл. {c['sentence'] + 1}) → {cands}")
