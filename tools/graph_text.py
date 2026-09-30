@@ -12,7 +12,9 @@ Usage: tools/graph_text.py MODEL.pt --d 256 --layers 6 [--places 40] TEXT OUT.ts
 TEXT: a paragraph a line. OUT: a sentence a row — line<TAB>sentence (within
 the line)<TAB>words<TAB>parts of speech<TAB>heads<TAB>relations<TAB>features
 <TAB>marks before each word<TAB>marks after the last<TAB>the graph's chance
-of each head and relation («h,r»). A sentence longer than the parser reads
+of each head and relation («h,r»)<TAB>each word's second likeliest head and its
+chance («head:chance») — the graph keeps the other reading. A sentence
+longer than the parser reads
 is cut at its «;» or «:» (then at the limit): each piece parsed apart.
 """
 import argparse
@@ -28,6 +30,10 @@ ap.add_argument("out")
 ap.add_argument("--d", type=int, default=128)
 ap.add_argument("--layers", type=int, default=4)
 ap.add_argument("--places", type=int, default=40)
+ap.add_argument("--grammar", action="store_true",
+                help="mask a bare noun's heads by case (off: without the link's type it forbids true links — "
+                     "a nominal predicate's subject, conjuncts with their own prepositions; 92.99 → 92.28% "
+                     "on «Война и мир»; the case must go with the relation, head and relation chosen together)")
 opts = ap.parse_args()
 
 src = open(f"{ROOT}/tools/graph_parser.py", encoding="utf-8").read().split("\ntrain = read(")[0]
@@ -82,6 +88,48 @@ def tokens(sent):
     return words, before, tail
 
 
+NOUNISH = ("NOUN", "NPRO")
+CASES = {"nomn", "gent", "gen2", "datv", "accs", "acc2", "ablt", "loct", "loc2", "voct"}
+
+
+def noun_cases(word):
+    """The cases of a word that can only be a noun (None: it may be else)."""
+    rs = graph_tags.sets.get(graph_tags.word_set.get(word, ""), [])
+    if not rs or any(r[0] not in NOUNISH for r in rs):
+        return None
+    return {g for r in rs for g in r[1:] if g in CASES}
+
+
+def only(word, pos):
+    rs = graph_tags.sets.get(graph_tags.word_set.get(word, ""), [])
+    return bool(rs) and all(r[0] in pos for r in rs)
+
+
+def admissible(words):
+    """The heads the grammar allows each word (a mask over root + words):
+    a noun with no preposition hangs on a noun only in the genitive, or
+    sharing its case (one name of several words, an apposition) — «у Анны
+    Павловны княгине»: the dative «княгине» can't hang on «Анны». (With a
+    preposition — «письмо к отцу» — any case.)"""
+    n = len(words)
+    cs = [noun_cases(w) for w in words]
+    mask = []
+    for i in range(n):
+        row = [True] * (n + 1)
+        # A preposition before it, over its adjectives: no constraint.
+        j = i - 1
+        while j >= 0 and only(words[j], ("ADJF", "PRTF", "NUMR", "NPRO")) and not noun_cases(words[j]):
+            j -= 1
+        rs = graph_tags.sets.get(graph_tags.word_set.get(words[j], ""), []) if j >= 0 else []
+        has_prep = any(r[0] == "PREP" for r in rs)
+        if cs[i] and not has_prep:
+            for j in range(n):
+                if j != i and cs[j] and not (cs[i] & cs[j]) and not (cs[i] & {"gent", "gen2"}):
+                    row[j + 1] = False
+        mask.append(row)
+    return mask
+
+
 def pieces(words, before):
     """A sentence the parser can read whole, or cut at «;» «:» (then at the
     limit)."""
@@ -116,13 +164,21 @@ with torch.no_grad(), open(opts.out, "w", encoding="utf-8") as out:
         model.bag_rows = torch.tensor(np.stack(g["bag_rows"])).to(g["dev"])
         lem, cls, bags, mask, head, rel, mk = g["batch"](t, slice(0, len(chunk)))
         s, h = model(lem, cls, bags, mask, mk)
+        if opts.grammar:
+            for j, (_, _, w, _, _) in enumerate(chunk):
+                for i, row in enumerate(admissible(w)):
+                    bad = [c for c, ok in enumerate(row) if not ok]
+                    if bad and len(bad) < len(row):
+                        s[j, i + 1, bad] = -1e9
         p = torch.softmax(s, -1)
         pick = p.argmax(-1)
         hp = p.max(-1).values
         hidx = pick.clamp(max=L - 1)
         rl = model.rel(torch.cat([h, torch.gather(h, 1, hidx.unsqueeze(-1).expand(-1, -1, h.shape[-1]))], -1))
         rp, rk = torch.softmax(rl, -1).max(-1)
+        top2 = p.topk(2, dim=-1)
         pick, hp, rp, rk = pick.cpu(), hp.cpu(), rp.cpu(), rk.cpu()
+        alt_h, alt_p = top2.indices[..., 1].cpu(), top2.values[..., 1].cpu()
         for j, (ln, k, words, before, tail) in enumerate(chunk):
             n = len(words)
             heads = [int(pick[j, t]) if int(pick[j, t]) <= n else 0 for t in range(1, n + 1)]
@@ -131,7 +187,9 @@ with torch.no_grad(), open(opts.out, "w", encoding="utf-8") as out:
             upos = " ".join(u for u, _ in tagged)
             feats = "|".join(";".join(f"{a}={b}" for a, b in fs.items()) or "_" for _, fs in tagged)
             sure = " ".join(f"{float(hp[j, t]):.3f},{float(rp[j, t]):.3f}" for t in range(1, n + 1))
+            alt = " ".join(f"{int(alt_h[j, t]) if int(alt_h[j, t]) <= n else 0}:{float(alt_p[j, t]):.3f}"
+                           for t in range(1, n + 1))
             out.write(f"{ln}.{k}\t{' '.join(words)}\t{upos}\t{' '.join(map(str, heads))}\t{' '.join(rels)}"
-                      f"\t{feats}\t{' '.join(before)}\t{tail}\t{sure}\n")
+                      f"\t{feats}\t{' '.join(before)}\t{tail}\t{sure}\t{alt}\n")
         if i % 10240 == 0:
             print(f"{i + len(chunk)}/{len(rows)}", file=sys.stderr, flush=True)
