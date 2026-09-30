@@ -3337,8 +3337,11 @@ impl<D: AsRef<[u8]>> Ime<D> {
             // its own kind, not of the finger. (A key's slip, н / нн, comes
             // in with its own cost above.)
             let lower_committed = committed.to_lowercase();
+            // (Found by the search too, it may cost a key's slip there —
+            // с → со a letter put in: the pair's cost holds.)
             for w in self.engine.partners(&lower_committed) {
-                if readings.iter().any(|c| c.word == w)
+                let found = readings.iter().position(|c| c.word == w);
+                if found.is_some_and(|i| readings[i].edit <= PAIR_SLIP)
                     || self.blocked(&w, &lower)
                     || !spelling_pair(&lower_committed, &w)
                 {
@@ -3351,7 +3354,10 @@ impl<D: AsRef<[u8]>> Ime<D> {
                         edit: PAIR_SLIP,
                     }];
                     self.engine.weigh(&here, &mut c);
-                    readings.extend(c);
+                    match found {
+                        Some(i) => readings[i] = c.remove(0),
+                        None => readings.extend(c),
+                    }
                 }
             }
             alts = readings;
