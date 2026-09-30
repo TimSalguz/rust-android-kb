@@ -166,7 +166,10 @@ hidden (`MADV_DONTNEED`), a desktop build (launcher / file search).
 
 ## License
 
-Code: MIT OR Apache-2.0.
+Code: MIT OR Apache-2.0, at your option ([`LICENSE-MIT`](LICENSE-MIT),
+[`LICENSE-APACHE`](LICENSE-APACHE)). A contribution you submit for inclusion
+is licensed the same way, without any additional terms, unless you say
+otherwise.
 
 The data built into the app comes from open sources, each under its own
 license (details and attributions: [`data/README.md`](data/README.md) and the
