@@ -29,18 +29,29 @@ pub struct Word {
     pub grammemes: u64,
 }
 
+/// A weight matrix in the blob: `rows × cols` f32 (version 1) or i8 with a
+/// scale per row (version 2); byte offsets from the blob's start.
+#[derive(Clone, Copy)]
+struct Mat {
+    at: usize,
+    scales: Option<usize>,
+    cols: usize,
+}
+
+/// A linear layer: its matrix and the byte offset of its bias.
+type Linear = (Mat, usize);
+
 struct Layer {
     norm1: (usize, usize),
-    in_proj: (usize, usize),
-    out_proj: (usize, usize),
+    in_proj: Linear,
+    out_proj: Linear,
     norm2: (usize, usize),
-    ff1: (usize, usize),
-    ff2: (usize, usize),
+    ff1: Linear,
+    ff2: Linear,
 }
 
 pub struct Parser<D: AsRef<[u8]>> {
     data: D,
-    body: usize,
     d: usize,
     heads: usize,
     ff: usize,
@@ -51,24 +62,57 @@ pub struct Parser<D: AsRef<[u8]>> {
     /// Each grammeme input's bit.
     grams: Vec<u64>,
     relations: Vec<String>,
-    lemma: (usize, usize),
-    class: usize,
-    gram: (usize, usize),
-    pos: usize,
+    lemma: Linear,
+    class: Mat,
+    gram: Linear,
+    pos: Mat,
     root: usize,
     layers: Vec<Layer>,
     norm: (usize, usize),
-    dep: [(usize, usize); 2],
-    hd: [(usize, usize); 2],
+    dep: [Linear; 2],
+    hd: [Linear; 2],
     later: usize,
-    owned: Option<Vec<f32>>,
-    /// Sentences parsed lately (a sentence doesn't change while a word of it
-    /// is typed).
-    cache: std::sync::Mutex<Vec<(Vec<Word>, Graph)>>,
+    /// How a word waiting hangs on the head still to come (causal field 2).
+    wait_rel: Option<[Linear; 2]>,
+    /// The blob copied to 4-aligned memory, when it doesn't lie so.
+    owned: Option<Vec<u32>>,
+    /// Sentences read lately, word by word (a sentence doesn't change while
+    /// a word of it is typed; the next one starts with it).
+    cache: std::sync::Mutex<Vec<Read>>,
 }
 
-/// A sentence's graph: each word's chances of its heads.
-pub type Graph = std::sync::Arc<Vec<Vec<f32>>>;
+/// A sentence read so far by the causal parser: what each word after it
+/// needs of it — every token's keys and values, layer by layer, and head
+/// projection — and each word's chances.
+#[derive(Clone, Default)]
+struct Read {
+    words: Vec<Word>,
+    /// Per token (the root first): layer by layer, its key, then its value.
+    kv: Vec<Vec<f32>>,
+    /// Per token: its projection as a head.
+    heads: Vec<Vec<f32>>,
+    /// Per word: its chances of the root, of each word before it, and of a
+    /// word still to come.
+    rows: Vec<Vec<f32>>,
+    /// Per word: were its head still to come, the chances of each relation.
+    waiting: Vec<Vec<f32>>,
+}
+
+/// A sentence's graph: each word's chances of its heads, and how a word
+/// waiting would hang on the head still to come.
+#[derive(Clone, Debug, Default)]
+pub struct Sentence {
+    /// Word i's row: the root (0), the words (1..=n; nothing for the word
+    /// itself and — causal — the words after it) and, causal, a word still to
+    /// come (n + 1).
+    pub heads: Vec<Vec<f32>>,
+    /// Word i's chances of each relation ([`Parser::relations`]) to a head
+    /// still to come (empty: the parser doesn't tell).
+    pub waiting: Vec<Vec<f32>>,
+}
+
+/// A sentence's graph, shared.
+pub type Graph = std::sync::Arc<Sentence>;
 
 /// Sentences kept parsed.
 const CACHED: usize = 8;
@@ -77,7 +121,12 @@ impl<D: AsRef<[u8]>> Parser<D> {
     /// Read a blob's layout (None: not one, or cut short).
     pub fn new(data: D) -> Option<Self> {
         let b = data.as_ref();
-        if b.len() < 48 || &b[..4] != MAGIC || u32_at(b, 4) != 1 {
+        let version = if b.len() >= 48 && &b[..4] == MAGIC {
+            u32_at(b, 4)
+        } else {
+            0
+        };
+        if !matches!(version, 1 | 2) || !cfg!(target_endian = "little") {
             return None;
         }
         let h: Vec<usize> = (0..10).map(|i| u32_at(b, 8 + 4 * i) as usize).collect();
@@ -91,8 +140,9 @@ impl<D: AsRef<[u8]>> Parser<D> {
             h[6],
             h[7],
             h[8],
-            h[9] == 1,
+            h[9],
         );
+        let (causal, waiting) = (causal >= 1, causal == 2);
         if heads == 0 || d % heads != 0 {
             return None;
         }
@@ -110,50 +160,66 @@ impl<D: AsRef<[u8]>> Parser<D> {
         let body = at + (4 - at % 4) % 4;
         let grams = names[..n_gram].iter().map(|g| gram::parse(g)).collect();
         let relations = names[n_gram..].to_vec();
-        let mut off = 0usize;
-        let mut take = |n: usize| {
-            let o = off;
-            off += n;
+        // Byte offsets, in the blob's order: f32 vectors; matrices f32
+        // (version 1) or a scale per row and i8 rows, padded to 4 bytes.
+        let mut off = body;
+        let vector = |n: usize, off: &mut usize| {
+            let o = *off;
+            *off += 4 * n;
             o
         };
-        let lemma = (take(d * dv), take(d));
-        let class = take(classes * d);
-        let gram_w = (take(d * n_gram), take(d));
-        let pos = take(places * d);
-        let root = take(d);
+        let matrix = |rows: usize, cols: usize, off: &mut usize| {
+            if version == 1 {
+                let at = *off;
+                *off += 4 * rows * cols;
+                Mat { at, scales: None, cols }
+            } else {
+                let scales = *off;
+                let at = scales + 4 * rows;
+                *off = at + rows * cols;
+                *off += (4 - *off % 4) % 4;
+                Mat { at, scales: Some(scales), cols }
+            }
+        };
+        let linear = |rows: usize, cols: usize, off: &mut usize| {
+            let m = matrix(rows, cols, off);
+            (m, vector(rows, off))
+        };
+        let lemma = linear(d, dv, &mut off);
+        let class = matrix(classes, d, &mut off);
+        let gram_w = linear(d, n_gram, &mut off);
+        let pos = matrix(places, d, &mut off);
+        let root = vector(d, &mut off);
         let mut layers = Vec::new();
         for _ in 0..n_layers {
             layers.push(Layer {
-                norm1: (take(d), take(d)),
-                in_proj: (take(3 * d * d), take(3 * d)),
-                out_proj: (take(d * d), take(d)),
-                norm2: (take(d), take(d)),
-                ff1: (take(ff * d), take(ff)),
-                ff2: (take(d * ff), take(d)),
+                norm1: (vector(d, &mut off), vector(d, &mut off)),
+                in_proj: linear(3 * d, d, &mut off),
+                out_proj: linear(d, d, &mut off),
+                norm2: (vector(d, &mut off), vector(d, &mut off)),
+                ff1: linear(ff, d, &mut off),
+                ff2: linear(d, ff, &mut off),
             });
         }
-        let norm = (take(d), take(d));
-        let dep = [(take(d * d), take(d)), (take(d * d), take(d))];
-        let hd = [(take(d * d), take(d)), (take(d * d), take(d))];
-        let later = take(d);
-        let _rel = [(take(d * 2 * d), take(d)), (take(n_rel * d), take(n_rel))];
-        if b.len() != body + 4 * off {
+        let norm = (vector(d, &mut off), vector(d, &mut off));
+        let dep = [linear(d, d, &mut off), linear(d, d, &mut off)];
+        let hd = [linear(d, d, &mut off), linear(d, d, &mut off)];
+        let later = vector(d, &mut off);
+        let _rel = [linear(d, 2 * d, &mut off), linear(n_rel, d, &mut off)];
+        let wait_rel = waiting.then(|| [linear(d, d, &mut off), linear(n_rel, d, &mut off)]);
+        if b.len() != off {
             return None;
         }
-        let floats = &b[body..];
-        let in_place =
-            cfg!(target_endian = "little") && (floats.as_ptr() as usize).is_multiple_of(4);
-        let owned = (!in_place).then(|| {
-            floats
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|c| f32::from_le_bytes(*c))
-                .collect()
+        let owned = (!(b.as_ptr() as usize).is_multiple_of(4)).then(|| {
+            let mut v = vec![0u32; b.len().div_ceil(4)];
+            // SAFETY: `v` holds at least `b.len()` bytes; u32 has no invalid
+            // bit patterns.
+            unsafe { std::slice::from_raw_parts_mut(v.as_mut_ptr() as *mut u8, b.len()) }
+                .copy_from_slice(b);
+            v
         });
         Some(Parser {
             data,
-            body,
             d,
             heads,
             ff,
@@ -173,6 +239,7 @@ impl<D: AsRef<[u8]>> Parser<D> {
             dep,
             hd,
             later,
+            wait_rel,
             owned,
             cache: std::sync::Mutex::new(Vec::new()),
         })
@@ -193,64 +260,261 @@ impl<D: AsRef<[u8]>> Parser<D> {
         &self.relations
     }
 
-    fn ws(&self) -> &[f32] {
-        if let Some(o) = &self.owned {
-            return o;
-        }
-        let floats = &self.data.as_ref()[self.body..];
-        // SAFETY: checked in `new`: little-endian, 4-aligned, a whole number
-        // of floats; every bit pattern is a valid f32; the bytes live as long
-        // as `self`.
-        unsafe { std::slice::from_raw_parts(floats.as_ptr() as *const f32, floats.len() / 4) }
+    /// A relation's number (None: the parser doesn't know it).
+    pub fn relation(&self, name: &str) -> Option<usize> {
+        self.relations.iter().position(|r| r == name)
     }
 
-    fn linear(&self, (w, b): (usize, usize), x: &[f32], out: &mut [f32]) {
+    fn bytes(&self) -> &[u8] {
+        match &self.owned {
+            // SAFETY: the copy holds the blob's bytes (and up to 3 more).
+            Some(o) => unsafe { std::slice::from_raw_parts(o.as_ptr() as *const u8, o.len() * 4) },
+            None => self.data.as_ref(),
+        }
+    }
+
+    /// `n` floats at byte offset `at`.
+    fn floats(&self, at: usize, n: usize) -> &[f32] {
+        let b = &self.bytes()[at..at + 4 * n];
+        // SAFETY: checked in `new`: little-endian, the blob 4-aligned (or
+        // copied so), every offset a multiple of 4 and within it; every bit
+        // pattern is a valid f32; the bytes live as long as `self`.
+        unsafe { std::slice::from_raw_parts(b.as_ptr() as *const f32, n) }
+    }
+
+    /// Row `r` of a matrix, as f32.
+    fn row(&self, m: &Mat, r: usize, out: &mut [f32]) {
+        match m.scales {
+            None => out.copy_from_slice(self.floats(m.at + 4 * r * m.cols, m.cols)),
+            Some(s) => {
+                let scale = self.floats(s + 4 * r, 1)[0];
+                let q = &self.bytes()[m.at + r * m.cols..][..m.cols];
+                for (o, &v) in out.iter_mut().zip(q) {
+                    *o = scale * v as i8 as f32;
+                }
+            }
+        }
+    }
+
+    fn linear(&self, (m, b): &Linear, x: &[f32], out: &mut [f32]) {
         let n = x.len();
-        let ws = self.ws();
-        for (o, y) in out.iter_mut().enumerate() {
-            let row = &ws[w + o * n..][..n];
-            *y = ws[b + o] + row.iter().zip(x).map(|(a, b)| a * b).sum::<f32>();
+        let bias = self.floats(*b, out.len());
+        match m.scales {
+            None => {
+                let ws = self.floats(m.at, out.len() * n);
+                for (o, y) in out.iter_mut().enumerate() {
+                    let row = &ws[o * n..][..n];
+                    *y = bias[o] + row.iter().zip(x).map(|(a, b)| a * b).sum::<f32>();
+                }
+            }
+            Some(s) => {
+                let scales = self.floats(s, out.len());
+                let q = &self.bytes()[m.at..][..out.len() * n];
+                for (o, y) in out.iter_mut().enumerate() {
+                    let row = &q[o * n..][..n];
+                    let dot = row.iter().zip(x).map(|(&a, b)| a as i8 as f32 * b).sum::<f32>();
+                    *y = bias[o] + scales[o] * dot;
+                }
+            }
         }
     }
 
     fn layer_norm(&self, (g, b): (usize, usize), x: &[f32]) -> Vec<f32> {
-        let ws = self.ws();
+        let (g, b) = (self.floats(g, x.len()), self.floats(b, x.len()));
         let n = x.len() as f32;
         let mean = x.iter().sum::<f32>() / n;
         let var = x.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / n;
         let inv = 1.0 / (var + 1e-5).sqrt();
         x.iter()
             .enumerate()
-            .map(|(i, v)| (v - mean) * inv * ws[g + i] + ws[b + i])
+            .map(|(i, v)| (v - mean) * inv * g[i] + b[i])
             .collect()
     }
 
-    fn mlp(&self, l: &[(usize, usize); 2], x: &[f32]) -> Vec<f32> {
+    fn mlp(&self, l: &[Linear; 2], x: &[f32]) -> Vec<f32> {
         let mut a = vec![0f32; self.d];
-        self.linear(l[0], x, &mut a);
+        self.linear(&l[0], x, &mut a);
         a.iter_mut().for_each(|v| *v = v.max(0.0));
         let mut o = vec![0f32; self.d];
-        self.linear(l[1], &a, &mut o);
+        self.linear(&l[1], &a, &mut o);
         o
     }
 
-    /// [`Parser::parse`], kept for the sentences parsed lately.
+    /// [`Parser::parse`], for a causal parser from the sentences read lately:
+    /// only the words after the longest start in common are read (their
+    /// graph rows are the same — a word sees only the words before it).
     pub fn parse_cached<L: AsRef<[u8]>>(&self, lemmas: &Lemmas<L>, words: &[Word]) -> Graph {
         let words = &words[words.len().saturating_sub(self.places())..];
-        if let Ok(mut cache) = self.cache.lock() {
-            if let Some(i) = cache.iter().position(|r| r.0 == words) {
-                let r = cache.remove(i);
-                let out = r.1.clone();
-                cache.insert(0, r);
-                return out;
+        if !self.causal {
+            return std::sync::Arc::new(Sentence {
+                heads: self.parse(lemmas, words),
+                waiting: Vec::new(),
+            });
+        }
+        let common = |r: &Read| r.words.iter().zip(words).take_while(|(a, b)| a == b).count();
+        let mut read = {
+            let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+            match (0..cache.len()).max_by_key(|&i| common(&cache[i])) {
+                Some(i) if common(&cache[i]) == words.len() && cache[i].words.len() == words.len() => {
+                    let r = cache.remove(i);
+                    let g = std::sync::Arc::new(self.graph_of(&r));
+                    cache.insert(0, r);
+                    return g;
+                }
+                Some(i) => {
+                    let n = common(&cache[i]);
+                    let r = &cache[i];
+                    Read {
+                        words: r.words[..n].to_vec(),
+                        kv: r.kv[..n + 1].to_vec(),
+                        heads: r.heads[..n + 1].to_vec(),
+                        rows: r.rows[..n].to_vec(),
+                        waiting: r.waiting[..r.waiting.len().min(n)].to_vec(),
+                    }
+                }
+                None => Read::default(),
             }
+        };
+        if read.kv.is_empty() {
+            let x = self.root_input();
+            self.step(&mut read, x);
         }
-        let g = std::sync::Arc::new(self.parse(lemmas, words));
-        if let Ok(mut cache) = self.cache.lock() {
-            cache.insert(0, (words.to_vec(), g.clone()));
-            cache.truncate(CACHED);
+        for w in &words[read.words.len()..] {
+            let x = self.word_input(lemmas, w, read.words.len() + 1);
+            read.words.push(*w);
+            self.step(&mut read, x);
         }
+        let g = std::sync::Arc::new(self.graph_of(&read));
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache.insert(0, read);
+        cache.truncate(CACHED);
         g
+    }
+
+    /// The root's input.
+    fn root_input(&self) -> Vec<f32> {
+        let mut x = vec![0f32; self.d];
+        self.row(&self.pos, 0, &mut x);
+        x.iter_mut()
+            .zip(self.floats(self.root, self.d))
+            .for_each(|(a, b)| *a += b);
+        x
+    }
+
+    /// A word's input at `place` (the root's is 0): its lemma's vector, its
+    /// class, its grammemes, its place.
+    fn word_input<L: AsRef<[u8]>>(&self, lemmas: &Lemmas<L>, w: &Word, place: usize) -> Vec<f32> {
+        let d = self.d;
+        let mut v = vec![0f32; self.dv];
+        lemmas.ctx_vector(w.lemma, &mut v);
+        let mut x = vec![0f32; d];
+        self.linear(&self.lemma, &v, &mut x);
+        let bag: Vec<f32> = self
+            .grams
+            .iter()
+            .map(|&g| if w.grammemes & g != 0 { 1.0 } else { 0.0 })
+            .collect();
+        let mut gx = vec![0f32; d];
+        self.linear(&self.gram, &bag, &mut gx);
+        let c = (w.class as usize).min(self.classes - 1);
+        let (mut cx, mut px) = (vec![0f32; d], vec![0f32; d]);
+        self.row(&self.class, c, &mut cx);
+        self.row(&self.pos, place, &mut px);
+        for (i, xi) in x.iter_mut().enumerate() {
+            *xi += gx[i] + cx[i] + px[i];
+        }
+        x
+    }
+
+    /// Read one more token (causal) with input `x`: through the layers,
+    /// seeing the tokens read before; a word gets its row of chances.
+    fn step(&self, read: &mut Read, mut x: Vec<f32>) {
+        let d = self.d;
+        let hd_n = d / self.heads;
+        let scale = 1.0 / (hd_n as f32).sqrt();
+        let t = read.kv.len();
+        let mut kv = vec![0f32; self.layers.len() * 2 * d];
+        for (l, layer) in self.layers.iter().enumerate() {
+            let normed = self.layer_norm(layer.norm1, &x);
+            let mut qkv = vec![0f32; 3 * d];
+            self.linear(&layer.in_proj, &normed, &mut qkv);
+            kv[l * 2 * d..(l + 1) * 2 * d].copy_from_slice(&qkv[d..]);
+            let key_value = |j: usize| -> &[f32] {
+                let row = if j == t { &kv } else { &read.kv[j] };
+                &row[l * 2 * d..(l + 1) * 2 * d]
+            };
+            let mut att = vec![0f32; d];
+            for h in 0..self.heads {
+                let q = &qkv[h * hd_n..(h + 1) * hd_n];
+                let s: Vec<f32> = (0..=t)
+                    .map(|j| {
+                        let k = &key_value(j)[h * hd_n..(h + 1) * hd_n];
+                        q.iter().zip(k).map(|(a, b)| a * b).sum::<f32>() * scale
+                    })
+                    .collect();
+                let m = s.iter().copied().fold(f32::MIN, f32::max);
+                let e: Vec<f32> = s.iter().map(|v| (v - m).exp()).collect();
+                let z: f32 = e.iter().sum();
+                for (j, w) in e.iter().enumerate() {
+                    let val = &key_value(j)[d + h * hd_n..d + (h + 1) * hd_n];
+                    for (i, vv) in val.iter().enumerate() {
+                        att[h * hd_n + i] += w / z * vv;
+                    }
+                }
+            }
+            let mut o = vec![0f32; d];
+            self.linear(&layer.out_proj, &att, &mut o);
+            x.iter_mut().zip(&o).for_each(|(a, b)| *a += b);
+            let n2 = self.layer_norm(layer.norm2, &x);
+            let mut hid = vec![0f32; self.ff];
+            self.linear(&layer.ff1, &n2, &mut hid);
+            hid.iter_mut().for_each(|v| *v = v.max(0.0));
+            let mut o2 = vec![0f32; d];
+            self.linear(&layer.ff2, &hid, &mut o2);
+            x.iter_mut().zip(&o2).for_each(|(a, b)| *a += b);
+        }
+        read.kv.push(kv);
+        let h = self.layer_norm(self.norm, &x);
+        read.heads.push(self.mlp(&self.hd, &h));
+        if t == 0 {
+            return;
+        }
+        if let Some(w) = &self.wait_rel {
+            let mut a = vec![0f32; d];
+            self.linear(&w[0], &h, &mut a);
+            a.iter_mut().for_each(|v| *v = v.max(0.0));
+            let mut logits = vec![0f32; self.relations.len()];
+            self.linear(&w[1], &a, &mut logits);
+            read.waiting.push(softmax(&logits));
+        }
+        let dep = self.mlp(&self.dep, &h);
+        let sd = (d as f32).sqrt();
+        let dot = |b: &[f32]| dep.iter().zip(b).map(|(x, y)| x * y).sum::<f32>() / sd;
+        let mut s: Vec<f32> = read.heads[..t].iter().map(|b| dot(b)).collect();
+        s.push(dot(self.floats(self.later, d)));
+        read.rows.push(softmax(&s));
+    }
+
+    /// A sentence read's graph, as [`Parser::parse`] gives it: each word's
+    /// row over the root, all the words (nothing for itself and the words
+    /// after it) and a word still to come.
+    fn graph_of(&self, read: &Read) -> Sentence {
+        let n = read.rows.len();
+        let heads = read
+            .rows
+            .iter()
+            .map(|r| {
+                let (before, later) = r.split_at(r.len() - 1);
+                let mut row = before.to_vec();
+                row.resize(n + 1, 0.0);
+                row.extend_from_slice(later);
+                row
+            })
+            .collect();
+        Sentence {
+            heads,
+            waiting: read.waiting.clone(),
+        }
     }
 
     /// Each word's chances of its heads: for word i (in `words` order), a
@@ -260,33 +524,10 @@ impl<D: AsRef<[u8]>> Parser<D> {
     pub fn parse<L: AsRef<[u8]>>(&self, lemmas: &Lemmas<L>, words: &[Word]) -> Vec<Vec<f32>> {
         let words = &words[words.len().saturating_sub(self.places())..];
         let (d, n) = (self.d, words.len());
-        let ws = self.ws();
-        let mut v = vec![0f32; self.dv];
-        let mut bag = vec![0f32; self.grams.len()];
         let mut xs: Vec<Vec<f32>> = Vec::with_capacity(n + 1);
-        xs.push(
-            (0..d)
-                .map(|i| ws[self.root + i] + ws[self.pos + i])
-                .collect(),
-        );
+        xs.push(self.root_input());
         for (j, w) in words.iter().enumerate() {
-            lemmas.ctx_vector(w.lemma, &mut v);
-            let mut x = vec![0f32; d];
-            self.linear(self.lemma, &v, &mut x);
-            for (k, b) in bag.iter_mut().enumerate() {
-                *b = if w.grammemes & self.grams[k] != 0 {
-                    1.0
-                } else {
-                    0.0
-                };
-            }
-            let mut gx = vec![0f32; d];
-            self.linear(self.gram, &bag, &mut gx);
-            let c = (w.class as usize).min(self.classes - 1);
-            for (i, xi) in x.iter_mut().enumerate() {
-                *xi += gx[i] + ws[self.class + c * d + i] + ws[self.pos + (j + 1) * d + i];
-            }
-            xs.push(x);
+            xs.push(self.word_input(lemmas, w, j + 1));
         }
         let hd_n = d / self.heads;
         let scale = 1.0 / (hd_n as f32).sqrt();
@@ -297,7 +538,7 @@ impl<D: AsRef<[u8]>> Parser<D> {
                 .iter()
                 .map(|x| {
                     let mut o = vec![0f32; 3 * d];
-                    self.linear(layer.in_proj, x, &mut o);
+                    self.linear(&layer.in_proj, x, &mut o);
                     o
                 })
                 .collect();
@@ -326,14 +567,14 @@ impl<D: AsRef<[u8]>> Parser<D> {
                     }
                 }
                 let mut o = vec![0f32; d];
-                self.linear(layer.out_proj, &att, &mut o);
+                self.linear(&layer.out_proj, &att, &mut o);
                 let mut y: Vec<f32> = x.iter().zip(&o).map(|(a, b)| a + b).collect();
                 let n2 = self.layer_norm(layer.norm2, &y);
                 let mut hid = vec![0f32; self.ff];
-                self.linear(layer.ff1, &n2, &mut hid);
+                self.linear(&layer.ff1, &n2, &mut hid);
                 hid.iter_mut().for_each(|v| *v = v.max(0.0));
                 let mut o2 = vec![0f32; d];
-                self.linear(layer.ff2, &hid, &mut o2);
+                self.linear(&layer.ff2, &hid, &mut o2);
                 y.iter_mut().zip(&o2).for_each(|(a, b)| *a += b);
                 next.push(y);
             }
@@ -343,7 +584,7 @@ impl<D: AsRef<[u8]>> Parser<D> {
         let deps: Vec<Vec<f32>> = hs.iter().map(|h| self.mlp(&self.dep, h)).collect();
         let heads: Vec<Vec<f32>> = hs.iter().map(|h| self.mlp(&self.hd, h)).collect();
         let sd = (d as f32).sqrt();
-        let later = &ws[self.later..self.later + d];
+        let later = self.floats(self.later, d);
         (1..=n)
             .map(|i| {
                 let dot =
@@ -383,6 +624,13 @@ impl Parser<memmap2::Mmap> {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "not a parser blob")
         })
     }
+}
+
+fn softmax(s: &[f32]) -> Vec<f32> {
+    let m = s.iter().copied().fold(f32::MIN, f32::max);
+    let e: Vec<f32> = s.iter().map(|v| (v - m).exp()).collect();
+    let z: f32 = e.iter().sum();
+    e.iter().map(|v| v / z).collect()
 }
 
 fn u32_at(b: &[u8], at: usize) -> u32 {

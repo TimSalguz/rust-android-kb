@@ -184,6 +184,11 @@ pub struct Config {
     /// found — the same words on the phrase set, a third faster to type).
     pub chooser_clamp: f32,
     pub chooser_bound: f32,
+    /// The sentence's graph (the parser) names the subject: a noun that may
+    /// be in the nominative, waiting for its head (1), or not (0). Off: the
+    /// graph doesn't tell a subject from an adverbial noun waiting too («я
+    /// все время занята» → «занято»).
+    pub graph_subject: f32,
     /// Gesture typing: weights of the full comparison with a word's path —
     /// location (squared mean distance, key widths) and shape (scale-free) —
     /// and of the per-letter costs that choose which words get compared.
@@ -292,6 +297,7 @@ impl Config {
             w_chooser: 1.0,
             chooser_clamp: 2.0,
             chooser_bound: 0.0,
+            graph_subject: 0.0,
             gesture_location: 7.0,
             gesture_shape: 6.0,
             gesture_walk: 8.0,
@@ -359,7 +365,7 @@ impl Config {
         fields!(
             f32: sigma, base_sub, cross_alphabet_penalty, max_sub, c_phonetic, c_yo, c_tsya, c_yo_reverse,
                 c_hard_soft, c_accent, c_accent_reverse, c_del, c_del_double, c_del_sign, c_del_punct, c_del_held, c_ins, c_ins_repeat,
-                c_ins_neighbor, c_ins_sign, c_trans, c_trans_cross, c_trans_rollover, layout_switch, layout_max_cost, home_row_penalty, home_row_trigger, c_home_finger, c_complete_char, ctx_lambda, w_endings, w_classes, w_rules, w_phrase, w_subject, w_topic, w_lemma, w_chooser, chooser_clamp, chooser_bound, gesture_location, gesture_shape, gesture_walk, gesture_trust, gesture_rare, gesture_pace,
+                c_ins_neighbor, c_ins_sign, c_trans, c_trans_cross, c_trans_rollover, layout_switch, layout_max_cost, home_row_penalty, home_row_trigger, c_home_finger, c_complete_char, ctx_lambda, w_endings, w_classes, w_rules, w_phrase, w_subject, w_topic, w_lemma, w_chooser, chooser_clamp, chooser_bound, graph_subject, gesture_location, gesture_shape, gesture_walk, gesture_trust, gesture_rare, gesture_pace,
                 w_lm, w_ch, prior_scale, max_cost, widen_step, max_cost_ceiling, rescue_cost;
             usize: min_results, max_nodes, max_input_len, top_k
         );

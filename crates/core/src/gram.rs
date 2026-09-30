@@ -233,14 +233,44 @@ fn subject_noun(readings: &[u64]) -> Option<u64> {
     Some(PER3 | number | gender)
 }
 
+/// How sure the graph must be that a word waits for its head still to come
+/// for a noun that may be in the nominative to be taken for a subject.
+const WAITING_SUBJECT: f32 = 0.5;
+
+/// A noun that may be in the nominative («мать», «вода» — the genitive of a
+/// rare «вод» too) waiting for a word still to come, as the sentence's graph
+/// has it (`waits`, asked only for such a noun): a subject for its
+/// predicate — by its nominative readings.
+fn waiting_subject(readings: &[u64], waits: impl FnOnce() -> f32) -> Option<u64> {
+    let nominative: Vec<u64> = readings
+        .iter()
+        .copied()
+        .filter(|&r| r & NOUN != 0 && cases(r) == NOMN)
+        .collect();
+    let s = subject_noun(&nominative)?;
+    (waits() >= WAITING_SUBJECT).then_some(s)
+}
+
+/// A subject: a personal pronoun, a noun only in the nominative, or one
+/// that may be, waiting for its head (`waits`, the graph's chance).
+fn subject_of(word: &str, readings: &[u64], waits: impl FnOnce() -> f32) -> Option<u64> {
+    subject(word)
+        .or_else(|| subject_noun(readings))
+        .or_else(|| waiting_subject(readings, waits))
+}
+
 /// The subject standing at `i` in the phrase: a personal pronoun or a noun
 /// only in the nominative — and with another joined to it by «и»/«или»
 /// («Эстелла и я»), the two together: plural, of the lesser person («мы»).
 /// None when that other one can't be told (a name the dictionary doesn't
 /// know, or the phrase starting at «и»).
-fn subject_at<S: AsRef<str>>(phrase: &[(S, Vec<u64>)], i: usize) -> Option<u64> {
+fn subject_at<S: AsRef<str>>(
+    phrase: &[(S, Vec<u64>)],
+    waits: &mut dyn FnMut(usize) -> f32,
+    i: usize,
+) -> Option<u64> {
     let (w, r) = &phrase[i];
-    let s = subject(w.as_ref()).or_else(|| subject_noun(r))?;
+    let s = subject_of(w.as_ref(), r, || waits(i))?;
     let joined = i >= 1 && matches!(phrase[i - 1].0.as_ref(), "и" | "или");
     if !joined {
         return Some(s);
@@ -360,7 +390,7 @@ pub fn misfit<S: AsRef<str>>(phrase: &[(S, Vec<u64>)], word: &[u64]) -> bool {
         }
         if attributes.is_empty() {
             if subject(w).or_else(|| subject_noun(readings)).is_some() {
-                subj = subject_at(phrase, phrase.len() - 1 - i);
+                subj = subject_at(phrase, &mut |_| 0.0, phrase.len() - 1 - i);
                 break;
             }
             if adverbial(readings) {
@@ -583,6 +613,17 @@ fn clause<S: AsRef<str>>(phrase: &[(S, Vec<u64>)], g: usize) -> Option<usize> {
 }
 
 pub fn walk<S: AsRef<str>>(phrase: &[(S, Vec<u64>)]) -> Walk {
+    walk_waiting(phrase, &mut |_| 0.0)
+}
+
+/// [`walk`], with the sentence's graph: `waits(i)`, the chance that the
+/// phrase word `i` has its head still to come (asked only where it
+/// decides) — a noun waiting may be the subject though it may be in
+/// another case too.
+pub fn walk_waiting<S: AsRef<str>>(
+    phrase: &[(S, Vec<u64>)],
+    waits: &mut dyn FnMut(usize) -> f32,
+) -> Walk {
     let attributive = |r: &Vec<u64>| r.iter().any(|x| x & ATTRIBUTE != 0 && x & CASE != 0);
     let strict = |r: &Vec<u64>| !r.is_empty() && r.iter().all(|x| x & ATTRIBUTE != 0);
     let mut out = Walk::default();
@@ -622,8 +663,8 @@ pub fn walk<S: AsRef<str>>(phrase: &[(S, Vec<u64>)]) -> Walk {
             continue;
         }
         if collected == adverbs {
-            if subject(w).or_else(|| subject_noun(readings)).is_some() {
-                out.subject = subject_at(phrase, i);
+            if subject_of(w, readings, || waits(i)).is_some() {
+                out.subject = subject_at(phrase, waits, i);
                 out.subject_next = i + 1 == phrase.len();
                 return out;
             }

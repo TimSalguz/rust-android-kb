@@ -2,16 +2,21 @@
 """The student parser (tools/graph_parser.py) for the phone: kbcore::parser.
 
 Usage: tools/graph_parser_export.py data/graph/parser_causal.pt --causal --out parser.bin
-       [--check sentences.txt --dump check.tsv]
+       [--int8] [--check sentences.txt --dump check.tsv]
 
-The blob (little-endian): `b"KBGP"`, u32 version 1, then u32 d, layers,
+The blob (little-endian): `b"KBGP"`, u32 version (1: f32; 2: `--int8`, each
+weight matrix and embedding table as a f32 scale per row, then its rows in
+i8, padded to 4 bytes — a quarter of the size), then u32 d, layers,
 heads, ff, lemma dims, classes, places (the root and the words), grammemes,
-relations, causal (1: a word sees only the words before it); the grammemes'
+relations, causal (1: a word sees only the words before it; 2: and the waiting
+word's relation, below); the grammemes'
 names and the relations' names (u16 length + UTF-8 each); then f32 weights
 in this order: lemma projection, class embedding, grammeme projection,
 places, the root, each layer (norm, attention in and out, norm, feed-forward
 in and out), the final norm, the dependent and head projections (two layers
-each), the "later" vector (causal), the relation classifier (two layers).
+each), the "later" vector (causal), the relation classifier (two layers),
+and — causal field 2 — the waiting word's relation classifier (two layers:
+how a word waiting hangs on the head still to come).
 
 The grammemes are those of the keyboard's readings (tools/build_classes.py):
 the phone takes a word's from its reading set (`Engine::readings`), all
@@ -25,6 +30,7 @@ import os
 import struct
 import sys
 
+import numpy as np
 import torch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -32,6 +38,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("model")
 ap.add_argument("--causal", action="store_true")
 ap.add_argument("--out", required=True)
+ap.add_argument("--int8", action="store_true", help="matrices in i8, a scale per row")
 ap.add_argument("--check")
 ap.add_argument("--dump")
 opts = ap.parse_args()
@@ -60,6 +67,9 @@ for i in range(layers):
 names += ["norm.weight", "norm.bias", "dep.0.weight", "dep.0.bias", "dep.2.weight", "dep.2.bias",
           "hd.0.weight", "hd.0.bias", "hd.2.weight", "hd.2.bias", "later",
           "rel.0.weight", "rel.0.bias", "rel.2.weight", "rel.2.bias"]
+waiting = opts.causal and "wait_rel.0.weight" in sd
+if waiting:
+    names += ["wait_rel.0.weight", "wait_rel.0.bias", "wait_rel.2.weight", "wait_rel.2.bias"]
 
 
 def text(s):
@@ -68,8 +78,8 @@ def text(s):
 
 
 with open(opts.out + ".part", "wb") as f:
-    f.write(b"KBGP" + struct.pack("<11I", 1, d, layers, 4, 2 * d, g["D"], g["N_CLASS"], L,
-                                  len(grammemes), len(rels), int(opts.causal)))
+    f.write(b"KBGP" + struct.pack("<11I", 2 if opts.int8 else 1, d, layers, 4, 2 * d, g["D"], g["N_CLASS"], L,
+                                  len(grammemes), len(rels), 2 if waiting else int(opts.causal)))
     for s in grammemes + rels:
         f.write(text(s))
     # Floats start 4-aligned.
@@ -77,9 +87,17 @@ with open(opts.out + ".part", "wb") as f:
     f.write(b"\0" * pad)
     n = 0
     for name in names:
-        a = sd[name].detach().float().numpy().astype("<f4").ravel()
-        f.write(a.tobytes())
-        n += a.size
+        t = sd[name].detach().float().numpy()
+        if opts.int8 and t.ndim == 2:
+            # A scale per row: its largest weight is ±127.
+            scale = np.maximum(np.abs(t).max(axis=1), 1e-12) / 127.0
+            q = np.clip(np.rint(t / scale[:, None]), -127, 127).astype("i1")
+            f.write(scale.astype("<f4").tobytes())
+            f.write(q.tobytes())
+            f.write(b"\0" * ((-q.size) % 4))
+        else:
+            f.write(t.astype("<f4").ravel().tobytes())
+        n += t.size
 os.replace(opts.out + ".part", opts.out)
 print(f"wrote {opts.out}: {n} numbers, {os.path.getsize(opts.out) / 1e6:.2f} MB; "
       f"{len(grammemes)} grammemes, {len(rels)} relations")

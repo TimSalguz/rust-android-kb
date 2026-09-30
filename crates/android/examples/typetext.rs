@@ -112,6 +112,11 @@ fn main() {
         if chooser.exists() {
             engine = engine.open_chooser(chooser).expect("chooser");
         }
+        // And the parser, the sentence's graph.
+        let parser = std::path::Path::new(&args[1]).with_file_name("parser.bin");
+        if parser.exists() {
+            engine = engine.open_parser(parser).expect("parser");
+        }
     }
     let jitter: f32 = std::env::var("JITTER")
         .ok()

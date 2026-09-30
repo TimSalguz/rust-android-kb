@@ -68,7 +68,8 @@ public final class RustKbService extends InputMethodService implements SensorEve
             // A ranked dictionary's priors lie beside it (read by the core).
             install("dict.bin");
             handle = Native.create(install("dict.fst"), install("bigrams.fst"), install("casing.fst"),
-                    install("lemmas.bin"), install("chooser.bin"), settingsPath(this), log, locale(),
+                    install("lemmas.bin"), install("chooser.bin"), install("parser.bin"), settingsPath(this), log,
+                    locale(),
                     getResources().getDisplayMetrics().density, Build.VERSION.SDK_INT);
         } catch (Exception e) {
             Log.e("rustkb", "cannot open the dictionary", e);

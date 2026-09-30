@@ -208,6 +208,7 @@ pub extern "system" fn Java_io_github_timsalguz_rustkb_Native_create(
     casing: JString,
     lemmas: JString,
     chooser: JString,
+    parser: JString,
     settings: JString,
     log: JString,
     locale: JString,
@@ -228,6 +229,7 @@ pub extern "system" fn Java_io_github_timsalguz_rustkb_Native_create(
         };
         let lemmas = opt_string(&mut env, &lemmas)?;
         let chooser = opt_string(&mut env, &chooser)?;
+        let parser = opt_string(&mut env, &parser)?;
         let settings: String = env.get_string(&settings)?.into();
         let log_path: Option<String> = if log.is_null() {
             None
@@ -245,6 +247,12 @@ pub extern "system" fn Java_io_github_timsalguz_rustkb_Native_create(
                 match chooser.map(kbcore::Chooser::open) {
                     Some(Ok(c)) => engine = engine.with_chooser(c),
                     Some(Err(e)) => crate::log(&format!("chooser: {e}")),
+                    None => {}
+                }
+                // And the parser, the sentence's graph.
+                match parser.map(kbcore::Parser::open) {
+                    Some(Ok(p)) => engine = engine.with_parser(p),
+                    Some(Err(e)) => crate::log(&format!("parser: {e}")),
                     None => {}
                 }
             }

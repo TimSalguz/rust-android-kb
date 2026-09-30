@@ -10,7 +10,9 @@ The graph keeps every link the grammar allows (tools/graph_grammar.py: the
 true parse is in it for 99.8% of sentences); the parser only weighs them.
 `--causal`: as the keyboard reads a sentence, word by word — each word sees
 the words before it only, and its head is one of them, the root, or a word
-still to come.
+still to come; and a word waiting for its head, how it will hang on it (a
+subject for its predicate, an adjective for its noun, an adverbial) — what
+it must agree with the word to come in.
 
 Measured on the held-out sentences against their parses: the head ranked
 first (UAS; with the relation, LAS), the true head among the first three,
@@ -156,6 +158,8 @@ class Parser(nn.Module):
         self.hd = nn.Sequential(nn.Linear(d, d), nn.ReLU(), nn.Linear(d, d))
         self.later = nn.Parameter(torch.zeros(d))  # causal: the head is still to come
         self.rel = nn.Sequential(nn.Linear(2 * d, d), nn.ReLU(), nn.Linear(d, len(RELS)))
+        # Causal: a word waiting, its relation to the head still to come.
+        self.wait_rel = nn.Sequential(nn.Linear(d, d), nn.ReLU(), nn.Linear(d, len(RELS)))
 
     def forward(self, lem, cls, bags, mask):
         n = lem.shape[0]
@@ -192,6 +196,7 @@ def gold_heads(head):
 def evaluate(model, t):
     model.eval()
     tot = uas = las = top3 = 0
+    waiting = wait_ok = 0
     conf, hit = [], []
     with torch.no_grad():
         for i in range(0, t[0].shape[0], 2048):
@@ -207,6 +212,10 @@ def evaluate(model, t):
             hidx = pick.clamp(max=L - 1)
             rl = model.rel(torch.cat([h, torch.gather(h, 1, hidx.unsqueeze(-1).expand(-1, -1, h.shape[-1]))], -1)).argmax(-1)
             ok = (pick == g) & real
+            if args.causal:
+                w = (g == L) & real
+                waiting += int(w.sum())
+                wait_ok += int(((model.wait_rel(h).argmax(-1) == rel) & w).sum())
             tot += int(real.sum())
             uas += int(ok.sum())
             las += int((ok & (rl == rel)).sum())
@@ -217,8 +226,9 @@ def evaluate(model, t):
     conf, hit = torch.cat(conf).numpy(), torch.cat(hit).numpy().astype(float)
     ece = sum(abs(conf[m].mean() - hit[m].mean()) * m.sum()
               for b in range(10) if (m := (conf >= b / 10) & (conf < (b + 1) / 10)).any()) / len(conf)
+    waits = f"; the relation of a word waiting {wait_ok / waiting:.2%} ({waiting})" if waiting else ""
     return (f"head first {uas / tot:.2%}, with the relation {las / tot:.2%}, "
-            f"among the first three {top3 / tot:.2%}; calibration error {ece:.4f}")
+            f"among the first three {top3 / tot:.2%}; calibration error {ece:.4f}{waits}")
 
 
 train = read(f"{args.parse}/train.tsv", args.limit)
@@ -246,6 +256,10 @@ for epoch in range(1, args.epochs + 1):
         gh = head.clamp(max=L - 1)
         rl = model.rel(torch.cat([h, torch.gather(h, 1, gh.unsqueeze(-1).expand(-1, -1, h.shape[-1]))], -1))
         rloss = ce(rl.reshape(-1, rl.shape[-1]), rel.reshape(-1)).reshape(rel.shape)
+        if args.causal:
+            wl = model.wait_rel(h)
+            wloss = ce(wl.reshape(-1, wl.shape[-1]), rel.reshape(-1)).reshape(rel.shape)
+            rloss = rloss + wloss * (g == L)
         loss = ((arc + rloss) * real).sum() / real.sum()
         opt.zero_grad()
         loss.backward()

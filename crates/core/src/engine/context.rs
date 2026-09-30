@@ -56,7 +56,8 @@ pub struct Context {
     /// The words are expected before any letter of them (predictions).
     predicting: bool,
     /// The sentence's graph so far ([`crate::parser`]): each of its words'
-    /// chances of its heads (the root, the words, a word still to come).
+    /// chances of its heads (the root, the words, a word still to come) —
+    /// read when the grammar asked it (None else).
     graph: Option<crate::parser::Graph>,
 }
 
@@ -65,7 +66,7 @@ impl Context {
     /// parser reads), its chances of each head — the root (0), the words
     /// (1..=n), and, as typed, a word still to come (n + 1).
     pub fn graph(&self) -> Option<&[Vec<f32>]> {
-        self.graph.as_deref().map(Vec::as_slice)
+        self.graph.as_deref().map(|g| g.heads.as_slice())
     }
 
     /// The words waiting for a head still to come — the word being typed may
@@ -116,6 +117,21 @@ impl Context {
 }
 
 impl<D: AsRef<[u8]>> Engine<D> {
+    /// The sentence's graph, as the parser reads it word by word (None
+    /// without a causal parser).
+    fn sentence_graph(&self, sentence: &[String]) -> Option<crate::parser::Graph> {
+        match (&self.parser, &self.lemmas) {
+            (Some(parser), Some(lemmas)) if parser.causal() && !sentence.is_empty() => {
+                let words: Vec<_> = sentence
+                    .iter()
+                    .filter_map(|w| self.parser_word(w))
+                    .collect();
+                Some(parser.parse_cached(lemmas, &words))
+            }
+            _ => None,
+        }
+    }
+
     /// Read a place: `prev`, the word right before it (None across
     /// punctuation); `phrase`, the words back to the punctuation before
     /// (at most five, in order); `sentence`, the words of the sentence so
@@ -131,7 +147,21 @@ impl<D: AsRef<[u8]>> Engine<D> {
             .iter()
             .map(|w| (w.to_lowercase(), self.readings(&w.to_lowercase())))
             .collect();
-        let mut walk = gram::walk(&phrase);
+        // The sentence's graph, as the parser reads it word by word — only
+        // where the grammar asks it (a noun that may be the subject).
+        let mut graph = None;
+        let by_graph = self.cfg.graph_subject > 0.0;
+        let subject = self.parser.as_ref().and_then(|p| p.relation("nsubj"));
+        let mut walk = gram::walk_waiting(&phrase, &mut |i| {
+            if !by_graph {
+                return 0.0;
+            }
+            let g = graph.get_or_insert_with(|| self.sentence_graph(sentence));
+            g.as_deref()
+                .and_then(|g| waiting_at(g, sentence, &phrase, i, subject))
+                .unwrap_or(0.0)
+        });
+        let graph = graph.flatten();
         walk.attribute_disagree = walk
             .nearest_attribute
             .and_then(|i| self.attribute_weights(&phrase[i].0))
@@ -213,17 +243,6 @@ impl<D: AsRef<[u8]>> Engine<D> {
             cfg.w_topic.max(0.0) * TOPIC_CLAMP
         };
         let chooser = self.read_sentence(sentence);
-        // The sentence's graph, as the parser reads it word by word.
-        let graph = match (&self.parser, &self.lemmas) {
-            (Some(parser), Some(lemmas)) if parser.causal() && !sentence.is_empty() => {
-                let words: Vec<_> = sentence
-                    .iter()
-                    .filter_map(|w| self.parser_word(w))
-                    .collect();
-                Some(parser.parse_cached(lemmas, &words))
-            }
-            _ => None,
-        };
         Context {
             prev_frame,
             prev_tags,
@@ -613,4 +632,30 @@ impl<D: AsRef<[u8]>> Engine<D> {
             .map_or(0.0, |f| f.next(&readings));
         self.phrase_nats(ctx, &readings).0 + frame
     }
+}
+
+/// The chance, in the sentence's graph, that the phrase word `j` has its
+/// head still to come — as `relation` there, when the graph tells how a word
+/// waiting hangs on it (None: a word the graph didn't read). The phrase is the
+/// sentence's last words; the graph, of its last words too.
+fn waiting_at(
+    graph: &crate::parser::Sentence,
+    sentence: &[String],
+    phrase: &[(String, Vec<u64>)],
+    j: usize,
+    relation: Option<usize>,
+) -> Option<f32> {
+    let n = graph.heads.len();
+    let k = (sentence.len() + j).checked_sub(phrase.len())?;
+    let i = (k + n).checked_sub(sentence.len())?;
+    let row = graph.heads.get(i)?;
+    let same = sentence.get(k)?.to_lowercase() == phrase.get(j)?.0;
+    if !same || row.len() != n + 2 {
+        return None;
+    }
+    let as_relation = match (graph.waiting.get(i), relation) {
+        (Some(w), Some(r)) => w.get(r).copied().unwrap_or(0.0),
+        _ => 1.0,
+    };
+    Some(row.last()? * as_relation)
 }
