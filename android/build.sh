@@ -10,7 +10,7 @@ OUT=$ROOT/target/apk
 API=${PLATFORM_API:-35}
 MIN_SDK=26
 VERSION_CODE=${VERSION_CODE:-1}
-VERSION_NAME=${VERSION_NAME:-0.1.0}
+VERSION_NAME=${VERSION_NAME:-1.0.0}
 BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
 JAR=$ANDROID_HOME/platforms/android-$API/android.jar
 
@@ -152,12 +152,15 @@ cp "$OUT/base.apk" "$OUT/unaligned.apk"
 (cd "$OUT" && zip -q -X -0 -r "$OUT/unaligned.apk" lib)
 "$BT/zipalign" -f -P 16 4 "$OUT/unaligned.apk" "$OUT/aligned.apk"
 
-# A fixed debug key, so each new build installs over the previous one.
+# A fixed debug key, so each new build installs over the previous one; a
+# release (android/release.sh) signs with the release key, kept outside the
+# repository: KEYSTORE, KEYSTORE_PASS (apksigner's form: file:…, env:…),
+# KEY_ALIAS.
 KS=${KEYSTORE:-$ROOT/android/debug.keystore}
-if [ ! -f "$KS" ]; then
+if [ ! -f "$KS" ] && [ -z "${KEYSTORE:-}" ]; then
     keytool -genkeypair -keystore "$KS" -storepass android -keypass android -alias androiddebugkey \
         -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
 fi
-"$BT/apksigner" sign --ks "$KS" --ks-pass pass:android --key-pass pass:android \
-    --out "$OUT/rust-kb.apk" "$OUT/aligned.apk"
+"$BT/apksigner" sign --ks "$KS" --ks-pass "${KEYSTORE_PASS:-pass:android}" \
+    --ks-key-alias "${KEY_ALIAS:-androiddebugkey}" --out "$OUT/rust-kb.apk" "$OUT/aligned.apk"
 ls -la "$OUT/rust-kb.apk"

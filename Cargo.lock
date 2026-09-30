@@ -34,7 +34,7 @@ checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 
 [[package]]
 name = "cli"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "crossterm",
  "kbcore",
@@ -99,7 +99,7 @@ checksum = "d231dfb89cfffdbc30e7fc41579ed6066ad03abda9e567ccafae602b97ec5024"
 
 [[package]]
 name = "index-builder"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "fst",
  "kbcore",
@@ -151,7 +151,7 @@ dependencies = [
 
 [[package]]
 name = "kbcore"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "fst",
  "memmap2",
@@ -159,7 +159,7 @@ dependencies = [
 
 [[package]]
 name = "kbime"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "fst",
  "jni",
