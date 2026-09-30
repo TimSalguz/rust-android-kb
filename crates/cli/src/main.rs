@@ -74,6 +74,42 @@ fn main() -> io::Result<()> {
         }
         return Ok(());
     }
+    if args.first().map(String::as_str) == Some("--graph") {
+        // The sentence's graph as the phone builds it: each word's likeliest
+        // heads (the student parser, parser.bin beside the context model).
+        let engine = open()?;
+        let b = std::env::var("BIGRAMS_FST").unwrap_or_default();
+        let path = std::path::Path::new(&b).with_file_name("parser.bin");
+        let engine = engine.open_parser(path)?;
+        let (parser, lemmas) = (engine.parser().unwrap(), engine.lemma_vectors().unwrap());
+        for s in &args[1..] {
+            let words: Vec<String> = s.split_whitespace().map(str::to_lowercase).collect();
+            let read: Vec<_> = words.iter().filter_map(|w| engine.parser_word(w)).collect();
+            let t = std::time::Instant::now();
+            let chances = parser.parse(lemmas, &read);
+            let ms = t.elapsed().as_secs_f64() * 1e3;
+            println!("{s:?}  ({ms:.2} ms)");
+            for (i, row) in chances.iter().enumerate() {
+                let mut ranked: Vec<(usize, f32)> = row.iter().copied().enumerate().collect();
+                ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+                let shown: Vec<String> = ranked
+                    .iter()
+                    .take(3)
+                    .filter(|x| x.1 >= 0.01)
+                    .map(|&(j, p)| {
+                        let head = match j {
+                            0 => "корень".to_string(),
+                            j if j <= words.len() => words[j - 1].clone(),
+                            _ => "(впереди)".to_string(),
+                        };
+                        format!("{head} {p:.2}")
+                    })
+                    .collect();
+                println!("  {:<12} → {}", words[i], shown.join(" | "));
+            }
+        }
+        return Ok(());
+    }
     if args.first().map(String::as_str) == Some("--swipes") {
         let engine = open()?;
         let path = args

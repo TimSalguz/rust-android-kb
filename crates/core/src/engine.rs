@@ -427,6 +427,9 @@ pub struct Engine<D: AsRef<[u8]>> {
     /// Optional chooser ([`crate::chooser`]): the sentence so far read by a
     /// small transformer, in every weighing (with the lemma vectors).
     pub(crate) chooser: Option<Chooser<D>>,
+    /// Optional student parser ([`crate::parser`]): the chances of the links
+    /// of the sentence's graph.
+    pub(crate) parser: Option<crate::parser::Parser<D>>,
     /// The priors by rank of a ranked dictionary ([`DictFormat::ranked`]).
     pub(crate) store: Option<Store<D>>,
     /// Optional casing list: lowercase word → 1 (always Capitalized) or 2 (in
@@ -547,6 +550,11 @@ impl Engine<Mmap> {
         Ok(self.with_casing(map_file(path)?))
     }
 
+    /// Add the student parser ([`crate::parser`]), mmap'd.
+    pub fn open_parser<P: AsRef<Path>>(self, path: P) -> io::Result<Self> {
+        Ok(self.with_parser(crate::parser::Parser::open(path)?))
+    }
+
     /// Add the chooser ([`crate::chooser`]), mmap'd.
     pub fn open_chooser<P: AsRef<Path>>(self, path: P) -> io::Result<Self> {
         Ok(self.with_chooser(Chooser::open(path)?))
@@ -566,6 +574,7 @@ impl<D: AsRef<[u8]>> Engine<D> {
             bigrams: None,
             lemmas: None,
             chooser: None,
+            parser: None,
             store: None,
             casing: None,
             user: None,
@@ -634,6 +643,33 @@ impl<D: AsRef<[u8]>> Engine<D> {
     pub fn with_lemmas(mut self, lemmas: Lemmas<D>) -> Self {
         self.lemmas = Some(lemmas);
         self
+    }
+
+    /// Attach the student parser (it reads the lemma vectors too).
+    pub fn with_parser(mut self, parser: crate::parser::Parser<D>) -> Self {
+        self.parser = Some(parser);
+        self
+    }
+
+    /// The student parser, if attached.
+    pub fn parser(&self) -> Option<&crate::parser::Parser<D>> {
+        self.parser.as_ref()
+    }
+
+    /// The lemma vectors, if attached.
+    pub fn lemma_vectors(&self) -> Option<&Lemmas<D>> {
+        self.lemmas.as_ref()
+    }
+
+    /// A word as the parser reads it: its lemma's row, its grammar class,
+    /// the grammemes of all its readings (None without lemma vectors).
+    pub fn parser_word(&self, word: &str) -> Option<crate::parser::Word> {
+        let lemmas = self.lemmas.as_ref()?;
+        Some(crate::parser::Word {
+            lemma: self.lemma(word).unwrap_or(lemmas.unk()),
+            class: self.word_class(word).unwrap_or(0) as u32,
+            grammemes: self.readings(word).iter().fold(0, |a, r| a | r),
+        })
     }
 
     /// Attach the chooser (it reads the lemma vectors: attach those too).

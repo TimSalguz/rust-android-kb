@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""The student parser (tools/graph_parser.py) for the phone: kbcore::parser.
+
+Usage: tools/graph_parser_export.py data/graph/parser_causal.pt --causal --out parser.bin
+       [--check sentences.txt --dump check.tsv]
+
+The blob (little-endian): `b"KBGP"`, u32 version 1, then u32 d, layers,
+heads, ff, lemma dims, classes, places (the root and the words), grammemes,
+relations, causal (1: a word sees only the words before it); the grammemes'
+names and the relations' names (u16 length + UTF-8 each); then f32 weights
+in this order: lemma projection, class embedding, grammeme projection,
+places, the root, each layer (norm, attention in and out, norm, feed-forward
+in and out), the final norm, the dependent and head projections (two layers
+each), the "later" vector (causal), the relation classifier (two layers).
+
+The grammemes are those of the keyboard's readings (tools/build_classes.py):
+the phone takes a word's from its reading set (`Engine::readings`), all
+readings together.
+
+`--check`: for each line of the file, every word's chance of each head as
+PyTorch computes it, for the `parser_check` example to compare.
+"""
+import argparse
+import os
+import struct
+import sys
+
+import torch
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ap = argparse.ArgumentParser()
+ap.add_argument("model")
+ap.add_argument("--causal", action="store_true")
+ap.add_argument("--out", required=True)
+ap.add_argument("--check")
+ap.add_argument("--dump")
+opts = ap.parse_args()
+
+src = open(f"{ROOT}/tools/graph_parser.py", encoding="utf-8").read().split("\ntrain = read(")[0]
+sys.argv = ["graph_parser.py"] + (["--causal"] if opts.causal else [])
+g = {"__file__": f"{ROOT}/tools/graph_parser.py", "__name__": "graph_parser"}
+exec(compile(src, "graph_parser.py", "exec"), g)
+saved = torch.load(opts.model, map_location="cpu")
+g["RELS"].update(saved["rels"])
+model = g["Parser"](g["args"].d, g["args"].layers)
+model.bag_rows = saved["model"]["bag_rows"]
+model.load_state_dict(saved["model"])
+model.eval()
+sd = saved["model"]
+grammemes = saved["grammemes"]
+rels = [r for r, _ in sorted(saved["rels"].items(), key=lambda x: x[1])]
+d, layers, L = g["args"].d, g["args"].layers, g["L"]
+
+names = ["lemma.weight", "lemma.bias", "cls.weight", "gram.weight", "gram.bias", "pos.weight", "root"]
+for i in range(layers):
+    e = f"enc.layers.{i}."
+    names += [e + n for n in ("norm1.weight", "norm1.bias", "self_attn.in_proj_weight", "self_attn.in_proj_bias",
+                              "self_attn.out_proj.weight", "self_attn.out_proj.bias", "norm2.weight", "norm2.bias",
+                              "linear1.weight", "linear1.bias", "linear2.weight", "linear2.bias")]
+names += ["norm.weight", "norm.bias", "dep.0.weight", "dep.0.bias", "dep.2.weight", "dep.2.bias",
+          "hd.0.weight", "hd.0.bias", "hd.2.weight", "hd.2.bias", "later",
+          "rel.0.weight", "rel.0.bias", "rel.2.weight", "rel.2.bias"]
+
+
+def text(s):
+    b = s.encode("utf-8")
+    return struct.pack("<H", len(b)) + b
+
+
+with open(opts.out + ".part", "wb") as f:
+    f.write(b"KBGP" + struct.pack("<11I", 1, d, layers, 4, 2 * d, g["D"], g["N_CLASS"], L,
+                                  len(grammemes), len(rels), int(opts.causal)))
+    for s in grammemes + rels:
+        f.write(text(s))
+    # Floats start 4-aligned.
+    pad = (-f.tell()) % 4
+    f.write(b"\0" * pad)
+    n = 0
+    for name in names:
+        a = sd[name].detach().float().numpy().astype("<f4").ravel()
+        f.write(a.tobytes())
+        n += a.size
+os.replace(opts.out + ".part", opts.out)
+print(f"wrote {opts.out}: {n} numbers, {os.path.getsize(opts.out) / 1e6:.2f} MB; "
+      f"{len(grammemes)} grammemes, {len(rels)} relations")
+
+if opts.check:
+    with open(opts.check, encoding="utf-8") as f, open(opts.dump, "w", encoding="utf-8") as out:
+        for line in f:
+            words = line.split()[: L - 1]
+            if not words:
+                continue
+            t = g["tensors"]([(words, [0] * len(words), [0] * len(words))])
+            # The grammeme sets as numbered here (the saved table numbers the
+            # training's).
+            model.bag_rows = torch.tensor(g["np"].stack(g["bag_rows"]))
+            with torch.no_grad():
+                s, _ = model(*t[:4])
+                p = torch.softmax(s[0], -1)
+            for i, w in enumerate(words):
+                row = " ".join(f"{float(x):.5f}" for x in p[i + 1][: len(words) + 1])
+                later = f" {float(p[i + 1][-1]):.5f}" if opts.causal else ""
+                out.write(f"{' '.join(words)}\t{i}\t{row}{later}\n")
+    print(f"wrote {opts.dump}")

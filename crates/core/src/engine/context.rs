@@ -55,9 +55,34 @@ pub struct Context {
     chooser: Option<std::sync::Arc<crate::chooser::Reading>>,
     /// The words are expected before any letter of them (predictions).
     predicting: bool,
+    /// The sentence's graph so far ([`crate::parser`]): each of its words'
+    /// chances of its heads (the root, the words, a word still to come).
+    graph: Option<crate::parser::Graph>,
 }
 
 impl Context {
+    /// The sentence's graph so far: for each of its words (the last the
+    /// parser reads), its chances of each head — the root (0), the words
+    /// (1..=n), and, as typed, a word still to come (n + 1).
+    pub fn graph(&self) -> Option<&[Vec<f32>]> {
+        self.graph.as_deref().map(Vec::as_slice)
+    }
+
+    /// The words waiting for a head still to come — the word being typed may
+    /// be it (a subject its predicate, an adjective its noun) — with that
+    /// chance: (place among the words the graph read, chance).
+    pub fn waiting(&self) -> Vec<(usize, f32)> {
+        self.graph().map_or(Vec::new(), |g| {
+            g.iter()
+                .enumerate()
+                .filter_map(|(i, row)| {
+                    let later = *row.last()?;
+                    (row.len() == g.len() + 2 && later >= 0.5).then_some((i, later))
+                })
+                .collect()
+        })
+    }
+
     /// The word right before, lowercase (None at the start or after
     /// punctuation).
     pub fn prev(&self) -> Option<&str> {
@@ -188,6 +213,17 @@ impl<D: AsRef<[u8]>> Engine<D> {
             cfg.w_topic.max(0.0) * TOPIC_CLAMP
         };
         let chooser = self.read_sentence(sentence);
+        // The sentence's graph, as the parser reads it word by word.
+        let graph = match (&self.parser, &self.lemmas) {
+            (Some(parser), Some(lemmas)) if parser.causal() && !sentence.is_empty() => {
+                let words: Vec<_> = sentence
+                    .iter()
+                    .filter_map(|w| self.parser_word(w))
+                    .collect();
+                Some(parser.parse_cached(lemmas, &words))
+            }
+            _ => None,
+        };
         Context {
             prev_frame,
             prev_tags,
@@ -205,6 +241,7 @@ impl<D: AsRef<[u8]>> Engine<D> {
             topics,
             chooser,
             predicting: false,
+            graph,
         }
     }
 
