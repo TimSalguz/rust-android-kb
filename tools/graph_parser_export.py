@@ -51,7 +51,7 @@ saved = torch.load(opts.model, map_location="cpu")
 g["RELS"].update(saved["rels"])
 model = g["Parser"](g["args"].d, g["args"].layers)
 model.bag_rows = saved["model"]["bag_rows"]
-model.load_state_dict(saved["model"])
+model.load_state_dict(saved["model"], strict=False)  # older models: no wait_rel
 model.eval()
 sd = saved["model"]
 grammemes = saved["grammemes"]
@@ -67,6 +67,8 @@ for i in range(layers):
 names += ["norm.weight", "norm.bias", "dep.0.weight", "dep.0.bias", "dep.2.weight", "dep.2.bias",
           "hd.0.weight", "hd.0.bias", "hd.2.weight", "hd.2.bias", "later",
           "rel.0.weight", "rel.0.bias", "rel.2.weight", "rel.2.bias"]
+if "marks.weight" in sd:
+    sys.exit("a parser that reads the marks: kbcore::parser doesn't read them yet — no blob")
 waiting = opts.causal and "wait_rel.0.weight" in sd
 if waiting:
     names += ["wait_rel.0.weight", "wait_rel.0.bias", "wait_rel.2.weight", "wait_rel.2.bias"]

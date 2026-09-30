@@ -8,6 +8,12 @@ Usage: tools/graph_parser.py [--causal] [--epochs 5] [--out data/graph/parser.pt
 
 The graph keeps every link the grammar allows (tools/graph_grammar.py: the
 true parse is in it for 99.8% of sentences); the parser only weighs them.
+The marks before each word (column 7 of the parses: tools/parse_marks.py)
+are read too — a comma, a dash, a quote say where a clause, an address, a
+parenthesis begins — and in training they are left out now and then (all
+commas of a sentence, or any mark), so the parser reads text without them
+as well: the graph then says where they belong (tools/graph_marks.py).
+
 `--causal`: as the keyboard reads a sentence, word by word — each word sees
 the words before it only, and its head is one of them, the root, or a word
 still to come; and a word waiting for its head, how it will hang on it (a
@@ -40,6 +46,7 @@ ap.add_argument("--lr", type=float, default=1e-3)
 ap.add_argument("--d", type=int, default=128)
 ap.add_argument("--layers", type=int, default=4)
 ap.add_argument("--limit", type=int, default=0)
+ap.add_argument("--places", type=int, default=12, help="words read at most")
 ap.add_argument("--out")
 args = ap.parse_args()
 dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -100,6 +107,10 @@ def bag(word):
 
 
 RELS = {}
+# Mark kinds (a word may have several before it: «», —»).
+MARK_KINDS = {",": 0, "—": 1, ":": 2, ";": 3, "(": 4, ")": 5, "«": 6, "»": 7, '"': 8,
+              ".": 9, "?": 10, "!": 11, "…": 12}
+N_MARKS = len(MARK_KINDS)
 
 
 def read(path, limit=0):
@@ -112,13 +123,16 @@ def read(path, limit=0):
             words = p[1].split()
             heads = [int(h) for h in p[3].split()]
             rels = [RELS.setdefault(r.split(":")[0], len(RELS)) for r in p[4].split()]
-            rows.append((words, heads, rels))
+            marks = p[6].split() if len(p) > 6 else ["_"] * len(words)
+            if not len(words) == len(heads) == len(rels) == len(marks) or len(words) > L - 1:
+                continue
+            rows.append((words, heads, rels, marks))
             if limit and len(rows) >= limit:
                 break
     return rows
 
 
-L = 13  # the root and at most 12 words
+L = args.places + 1  # the root and the words
 
 
 def tensors(rows):
@@ -129,8 +143,9 @@ def tensors(rows):
     mask = torch.ones((n, L), dtype=torch.bool)
     head = torch.zeros((n, L), dtype=torch.long)
     rel = torch.zeros((n, L), dtype=torch.long)
+    marks = torch.zeros((n, L, N_MARKS), dtype=torch.bool)
     mask[:, 0] = False
-    for i, (words, heads, rels) in enumerate(rows):
+    for i, (words, heads, rels, before) in enumerate(rows):
         for j, w in enumerate(words[: L - 1]):
             lem[i, j + 1] = lemma_of.get(w, UNK)
             cls[i, j + 1] = class_of.get(w, 0)
@@ -138,7 +153,22 @@ def tensors(rows):
             mask[i, j + 1] = False
             head[i, j + 1] = heads[j]
             rel[i, j + 1] = rels[j]
-    return lem, cls, bags, mask, head, rel
+            for c in before[j]:
+                k = MARK_KINDS.get(c)
+                if k is not None:
+                    marks[i, j + 1, k] = True
+    return lem, cls, bags, mask, head, rel, marks
+
+
+def drop_marks(marks):
+    """Training: half the sentences lose all their commas (typed without
+    them), and any mark goes with a chance of 0.15 — the parser learns to
+    read text with and without them."""
+    n = marks.shape[0]
+    keep = torch.rand(marks.shape, device=marks.device) >= 0.15
+    no_commas = torch.rand(n, device=marks.device) < 0.5
+    keep[:, :, MARK_KINDS[","]] &= ~no_commas.unsqueeze(-1)
+    return marks & keep
 
 
 class Parser(nn.Module):
@@ -156,14 +186,16 @@ class Parser(nn.Module):
         self.norm = nn.LayerNorm(d)
         self.dep = nn.Sequential(nn.Linear(d, d), nn.ReLU(), nn.Linear(d, d))
         self.hd = nn.Sequential(nn.Linear(d, d), nn.ReLU(), nn.Linear(d, d))
+        self.marks = nn.Linear(N_MARKS, d, bias=False)  # the marks before a word
         self.later = nn.Parameter(torch.zeros(d))  # causal: the head is still to come
         self.rel = nn.Sequential(nn.Linear(2 * d, d), nn.ReLU(), nn.Linear(d, len(RELS)))
         # Causal: a word waiting, its relation to the head still to come.
         self.wait_rel = nn.Sequential(nn.Linear(d, d), nn.ReLU(), nn.Linear(d, len(RELS)))
 
-    def forward(self, lem, cls, bags, mask):
+    def forward(self, lem, cls, bags, mask, marks):
         n = lem.shape[0]
-        x = self.lemma(self.ctx_vec[lem]) + self.cls(cls) + self.gram(self.bag_rows[bags])
+        x = self.lemma(self.ctx_vec[lem]) + self.cls(cls) + self.gram(self.bag_rows[bags]) \
+            + self.marks(marks.float())
         x[:, 0] = self.root
         x = x + self.pos.weight
         att = None
@@ -193,7 +225,7 @@ def gold_heads(head):
     return torch.where(head > pos, torch.full_like(head, L), head)
 
 
-def evaluate(model, t):
+def evaluate(model, t, marks=True):
     model.eval()
     tot = uas = las = top3 = 0
     waiting = wait_ok = 0
@@ -201,8 +233,8 @@ def evaluate(model, t):
     with torch.no_grad():
         for i in range(0, t[0].shape[0], 2048):
             b = [x[i:i + 2048].to(dev) for x in t]
-            lem, cls, bags, mask, head, rel = b
-            s, h = model(lem, cls, bags, mask)
+            lem, cls, bags, mask, head, rel, mk = b
+            s, h = model(lem, cls, bags, mask, mk if marks else torch.zeros_like(mk))
             g = gold_heads(head)
             p = torch.softmax(s, dim=-1)
             pick = p.argmax(-1)
@@ -247,8 +279,8 @@ for epoch in range(1, args.epochs + 1):
     total = 0.0
     for i in range(0, len(perm), args.batch):
         idx = perm[i:i + args.batch]
-        lem, cls, bags, mask, head, rel = [x[idx].to(dev) for x in tt]
-        s, h = model(lem, cls, bags, mask)
+        lem, cls, bags, mask, head, rel, mk = [x[idx].to(dev) for x in tt]
+        s, h = model(lem, cls, bags, mask, drop_marks(mk))
         g = gold_heads(head)
         real = ~mask
         real[:, 0] = False
@@ -267,7 +299,8 @@ for epoch in range(1, args.epochs + 1):
         sched.step()
         total += loss.item() * len(idx)
     log(f"epoch {epoch}: loss {total / len(train):.4f}")
-    print(f"epoch {epoch} ({'as typed' if args.causal else 'whole sentence'}): {evaluate(model, vt)}", flush=True)
+    print(f"epoch {epoch} ({'as typed' if args.causal else 'whole sentence'}): with the marks "
+          f"{evaluate(model, vt)}; without {evaluate(model, vt, marks=False)}", flush=True)
 params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"{params} parameters (the lemma vectors, {nc}×{D}, shared and frozen)", flush=True)
 if args.out:
