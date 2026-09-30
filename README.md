@@ -13,9 +13,10 @@ memory-mapped files. See [`docs/DESIGN.md`](docs/DESIGN.md)
 ## Highlights
 
 - **Tiny & mmap'd:** the dictionary is an FST (3.5 M words — every Russian word
-  form from OpenCorpora, English from SCOWL — with each word's frequency and
-  grammar, in 9.0 MB; `kbcore::dict`) memory-mapped at runtime — no heap
-  copy, zero start-up parsing. The engine's own heap is
+  form from OpenCorpora, English from SCOWL — with each word's grammar) and
+  its frequencies as an array by the word's number: 6.2 MB (`kbcore::dict`,
+  `kbcore::store`), memory-mapped at runtime — no heap copy, zero start-up
+  parsing. The engine's own heap is
   ~0.3 MB; the rest is clean, evictable file pages.
 - **Fast:** ~1 ms per correction query, ~0.5 ms per keystroke on real typing
   (desktop, single thread).
@@ -69,6 +70,20 @@ memory-mapped files. See [`docs/DESIGN.md`](docs/DESIGN.md)
   the word after («что», «но», «который»), the word before («например») and
   the pair; one almost surely due goes in by itself (98–99% right on held-out
   sentences), ⌫ takes it out (`tools/build_commas.py`).
+- **Lemma vectors and the chooser:** which lemma follows which (50 k lemmas,
+  `kbcore::lemmas`), and a small transformer (289 k parameters, 1.2 MB) that
+  reads the sentence and re-weighs every reading of a word: words right
+  93.74 → 94.39%, next word 17.9 → 20.8% (`kbcore::chooser`).
+- **The sentence's graph:** a student parser on the phone (0.9 MB, i8 weights;
+  taught by Stanza's parses) gives the chance of every link as you type — a
+  word waiting for its head says how it will hang on it, so a predicate agrees
+  with its real subject (`kbcore::parser`).
+- **Proofreading:** after «.», «?», «!» — or Enter with no mark — the
+  finished sentence is read whole by a second parser (0.9 MB) and the commas
+  its graph is sure of go in by the rules of Russian (`kbcore::marks`): 97% of
+  them are right on held-out sentences typed without commas, and with the
+  commas put in as typed the keyboard finds 39% of them (27% before). ⌫ right
+  after takes them out.
 - **Sense classes:** 20 k lemmas in 512 classes of words that share
   sentences (PPMI + SVD + k-means, `tools/build_topics.py`), 0.9 MB: a word
   whose class goes with the sentence's gains («рыба гниёт с головы»).
@@ -86,7 +101,8 @@ memory-mapped files. See [`docs/DESIGN.md`](docs/DESIGN.md)
   with the phone's tilt; then the keyboard tells the grip from the tilt and the
   taps, shows it (`[I ]`, `[ I]`, `[II]`, `[•]`) and shifts taps by where that
   grip lands — outward past a thumb's reach, where long reaches fall short.
-  Tilts and offsets only, never text.
+  Tilts and offsets only, never text. The one-handed layout can follow the
+  grip too (a setting, off by default).
 - **Private by construction:** nothing is learned or sent; the user dictionary
   changes only by explicit actions. So a private window keeps its suggestions —
   only passwords, addresses and e-mail fields go without.
@@ -98,7 +114,7 @@ memory-mapped files. See [`docs/DESIGN.md`](docs/DESIGN.md)
 
 | path | what |
 |------|------|
-| `crates/core` (`kbcore`)   | the engine: alphabet, keyboard geometry, config, FST search |
+| `crates/core` (`kbcore`)   | the engine: alphabet, keyboard geometry, config, FST search, grammar, lemma vectors, chooser, parser, marks |
 | `crates/android` (`kbime`) | the keyboard: layouts, touches, composing, autocorrect, draw list + JNI |
 | `crates/index-builder`     | `data/lexicon.tsv` → `dict.fst` |
 | `crates/cli` (`kbdemo`)    | terminal demo / query harness |
@@ -131,17 +147,23 @@ tools/eval.py dict.fst --types del --dump del      # show the failures
 
 ## Android
 
+Download the APK from [Releases](https://github.com/TimSalguz/rust-android-kb/releases)
+(1.0.0 is the first). Releases are signed with the author's release key and
+install over each other; a build signed with another key (a local debug
+build) has to be uninstalled first.
+
 ```sh
 nix develop -c android/build.sh          # → target/apk/rust-kb.apk (arm64)
 adb install -r target/apk/rust-kb.apk
+android/release.sh 1.1.0 notes.md        # a release: signed, tagged, published
 ```
 
-CI builds the APK on every push to `main` (artifact `rust-kb-apk`) with the
-Russian/English dictionary; the other languages' packs are built locally with
-`tools/lang/<code>.sh` (they need large downloads) and packaged when present.
-Builds are signed with the committed **debug** key (`android/debug.keystore`,
-password `android`) so each build installs over the previous one — it is not a
-release key.
+Local builds are signed with the committed **debug** key
+(`android/debug.keystore`, password `android`) so each build installs over the
+previous one — it is not a release key. The models (lemma vectors, the
+chooser, the parsers) are built locally and packaged when present; CI builds
+the APK without them (Russian/English only), and the other languages' packs
+come from `tools/lang/<code>.sh` (they need large downloads).
 
 On the phone: open the **Rust KB** app — a short guide on the first start,
 buttons to enable the keyboard in the system and to switch to it, the
@@ -158,11 +180,21 @@ emoji and what was copied lately.
 
 ## Roadmap
 
-Next: richer context rules (docs/rules-format.md), a one-handed "pseudo-cursor" pad
-that draws swipes, emoji search by name and skin tones, trigrams for prediction,
-more languages (Italian, Ukrainian), mapping the dictionaries straight from the
-APK instead of copying them, dropping dictionary pages while the keyboard is
-hidden (`MADV_DONTNEED`), a desktop build (launcher / file search).
+The detailed plan (in Russian): [`docs/roadmap-model.md`](docs/roadmap-model.md).
+
+Next:
+- the typing parser taught with the marks and literary prose — shipped once
+  the keyboard's rules measure no worse with it;
+- proofreading beyond commas: each word of a finished sentence read again
+  with the context on both sides (-тся/-ться, «в течение»), dashes and «?»;
+- the text's graph: names and pronouns across sentences, agreement over the
+  whole text; commas from the graph as you type;
+- releases built by CI, with the models;
+- swipe typing on real gestures, voice input as one more kind of evidence;
+- a one-handed "pseudo-cursor" pad that draws swipes, emoji search by name and
+  skin tones, more languages (Italian, Ukrainian), mapping the dictionaries
+  straight from the APK, dropping dictionary pages while the keyboard is
+  hidden (`MADV_DONTNEED`), a desktop build (launcher / file search).
 
 ## License
 
