@@ -3763,13 +3763,27 @@ impl<D: AsRef<[u8]>> Ime<D> {
     }
 
     fn enter(&mut self) {
-        self.commit_word(false);
+        // The word goes in as the field shows it — corrected, as a space
+        // would put it in (the app's own send button sends what is shown
+        // too); ⌫ right after a new line brings the typed word back.
+        let hints = match self.composing_input() {
+            Input::Typed { hints, .. } => hints,
+            Input::Drawn { .. } => Vec::new(),
+        };
+        let corrected = self.commit_word(true);
         self.leave_word();
-        self.undo = None;
         self.prev_word = None;
         self.out.push(Op::Enter);
         self.before.push('\n');
         self.update_shift();
+        self.undo = corrected.map(|(typed, fixed)| Undo {
+            typed,
+            fixed,
+            sep: '\n',
+            hints,
+            restore: None,
+            pairs: Vec::new(),
+        });
     }
 
     fn backspace(&mut self) {
@@ -5709,6 +5723,7 @@ mod tests {
         let action = match c {
             ' ' => Action::Space,
             '⌫' => Action::Backspace,
+            '⏎' => Action::Enter,
             _ => Action::Char(c),
         };
         press(ime, action, 80);
@@ -5763,6 +5778,20 @@ mod tests {
         // The next ⌫ takes the comma, as any.
         tap(&mut k, '⌫');
         assert!(k.take_ops().contains(&Op::Delete(1)));
+    }
+
+    #[test]
+    fn enter_puts_in_the_word_as_corrected_and_backspace_reverts() {
+        let mut k = ime(WORDS);
+        type_str(&mut k, "как дкла⏎");
+        let ops = k.take_ops();
+        assert!(ops.contains(&Op::Commit("дела".into())), "{ops:?}");
+        assert_eq!(ops.last(), Some(&Op::Enter));
+        tap(&mut k, '⌫');
+        assert_eq!(
+            k.take_ops(),
+            vec![Op::Delete(5), Op::Commit("дкла\n".into())]
+        );
     }
 
     #[test]
