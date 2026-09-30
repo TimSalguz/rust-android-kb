@@ -12,6 +12,11 @@
 //! on it. The format is kept in the FST's type field; type 0 is the plain
 //! prior in thousandths.
 //!
+//! A ranked dictionary ([`DictFormat::ranked`]) keeps no priors: above the
+//! grammar id is the word's rank, its place in alphabetical order, and the
+//! priors are an array by rank ([`crate::store`]). The output gathered on the
+//! way to a node is then the rank of its first word.
+//!
 //! A word's sense class (tools/build_topics.py) is kept apart, in the
 //! context model: it is the same for all forms of a lemma, so there it sits
 //! on the stem and the endings are shared (0.6 MB); here, next to the
@@ -33,6 +38,8 @@ pub struct DictFormat {
     /// The prior of a word never seen in the counts, tenths of a nat (0:
     /// not told) — the floor the rarest words stand on.
     pub floor: u32,
+    /// Above the grammar id the word's rank, not its prior.
+    pub ranked: bool,
 }
 
 /// Marks a type field that holds a [`DictFormat`].
@@ -44,6 +51,7 @@ impl DictFormat {
         quantum: 1,
         shift: 0,
         floor: 0,
+        ranked: false,
     };
 
     pub fn from_type(ty: u64) -> DictFormat {
@@ -54,6 +62,7 @@ impl DictFormat {
             quantum: ((ty & 0xFFFF) as u32).max(1),
             shift: ((ty >> 16) & 0x3F) as u32,
             floor: (ty >> 48) as u32,
+            ranked: ty >> 22 & 1 == 1,
         }
     }
 
@@ -61,7 +70,11 @@ impl DictFormat {
         if self == Self::PLAIN {
             return 0;
         }
-        (self.floor as u64) << 48 | MARK | (self.shift as u64) << 16 | self.quantum as u64
+        (self.floor as u64) << 48
+            | MARK
+            | (self.ranked as u64) << 22
+            | (self.shift as u64) << 16
+            | self.quantum as u64
     }
 
     /// The value of a word: its prior (thousandths of a nat) and grammar id.
@@ -80,6 +93,17 @@ impl DictFormat {
     /// seen in the counts (or barely: within `span` thousandths).
     pub fn unseen(self, prior: u64, span: u64) -> bool {
         self.floor > 0 && prior + span >= self.floor as u64 * 100
+    }
+
+    /// The rank of a value — or, of the output gathered on the way to a
+    /// node, the rank of its first word (a ranked dictionary).
+    pub fn rank(self, v: u64) -> u64 {
+        v >> self.shift
+    }
+
+    /// The value of a word of a ranked dictionary.
+    pub fn ranked_value(self, rank: u64, grammar: u64) -> u64 {
+        rank << self.shift | (grammar & mask(self.shift))
     }
 
     /// The grammar id of a value (0: none).
@@ -102,6 +126,7 @@ mod tests {
             quantum: 50,
             shift: 12,
             floor: 212,
+            ranked: false,
         };
         assert_eq!(DictFormat::from_type(f.fst_type()), f);
         assert_eq!(DictFormat::from_type(0), DictFormat::PLAIN);
@@ -116,5 +141,10 @@ mod tests {
         assert_eq!(DictFormat::PLAIN.grammar(8_000), 0);
         assert!(f.unseen(21_200, 800) && f.unseen(20_500, 800) && !f.unseen(19_000, 800));
         assert!(!DictFormat::PLAIN.unseen(99_999, 800));
+        // Ranked: the rank above the grammar.
+        let r = DictFormat { ranked: true, ..f };
+        assert_eq!(DictFormat::from_type(r.fst_type()), r);
+        let v = r.ranked_value(123_456, 3143);
+        assert_eq!((r.rank(v), r.grammar(v)), (123_456, 3143));
     }
 }

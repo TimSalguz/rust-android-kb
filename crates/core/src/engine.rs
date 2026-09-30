@@ -29,6 +29,7 @@ use crate::config::Config;
 use crate::dict::DictFormat;
 use crate::keyboard::{Keyboard, N};
 use crate::lemmas::Lemmas;
+use crate::store::Store;
 
 #[derive(Clone, Debug)]
 pub struct Candidate {
@@ -75,10 +76,105 @@ fn row_min(row: &[f32]) -> f32 {
     row.iter().copied().fold(f32::INFINITY, f32::min)
 }
 
+/// Where a node's words lie: the output gathered on the way to it, and —
+/// in a ranked dictionary ([`DictFormat::ranked`]) — the rank just past its
+/// last word (its first word's rank is the output's).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Span {
+    pub(crate) acc: u64,
+    pub(crate) hi: u64,
+    /// A quick lower bound of its words' priors ([`Store::bound`]); the
+    /// search asks for a tighter one ([`Priors::least`]) only where this
+    /// doesn't prune.
+    pub(crate) least: u64,
+}
+
+/// How a dictionary's priors read: from the outputs of its automaton, or
+/// by rank from a [`Store`].
+pub(crate) enum Priors<'a, D: AsRef<[u8]>> {
+    Outputs(DictFormat),
+    Ranked(DictFormat, &'a Store<D>),
+}
+
+impl<D: AsRef<[u8]>> Clone for Priors<'_, D> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<D: AsRef<[u8]>> Copy for Priors<'_, D> {}
+
+impl<D: AsRef<[u8]>> Priors<'_, D> {
+    /// Where all the words lie.
+    pub(crate) fn root(&self) -> Span {
+        match self {
+            Priors::Outputs(_) => Span::default(),
+            Priors::Ranked(_, store) => Span {
+                acc: 0,
+                hi: store.len() as u64,
+                least: store.bound(0, store.len() as u64),
+            },
+        }
+    }
+
+    /// Where the words of `node`'s `i`-th child lie (`span` the node's).
+    pub(crate) fn child(&self, node: &Node, i: usize, span: Span) -> Span {
+        let acc = span.acc + node.transition(i).out.value();
+        let next = match self {
+            Priors::Ranked(..) if i + 1 < node.len() => {
+                Some(span.acc + node.transition(i + 1).out.value())
+            }
+            _ => None,
+        };
+        self.span(acc, next, span)
+    }
+
+    /// The span of a child whose output so far is `acc`, the next child's
+    /// `next` (None: it is the last), `parent` its parent's.
+    pub(crate) fn span(&self, acc: u64, next: Option<u64>, parent: Span) -> Span {
+        match self {
+            Priors::Outputs(f) => Span {
+                acc,
+                hi: 0,
+                least: f.prior(acc),
+            },
+            Priors::Ranked(f, store) => {
+                let hi = next.map_or(parent.hi, |v| f.rank(v));
+                Span {
+                    acc,
+                    hi,
+                    least: store.bound(f.rank(acc), hi),
+                }
+            }
+        }
+    }
+
+    /// A lower bound of the priors of the words in `span` (thousandths of a
+    /// nat).
+    pub(crate) fn least(&self, span: Span) -> u64 {
+        match self {
+            Priors::Outputs(_) => span.least,
+            Priors::Ranked(f, store) => store.least(f.rank(span.acc), span.hi),
+        }
+    }
+
+    /// Whether [`Priors::least`] may be tighter than the quick bound.
+    pub(crate) fn refines(&self) -> bool {
+        matches!(self, Priors::Ranked(..))
+    }
+
+    /// The prior of a word by its value (thousandths of a nat).
+    pub(crate) fn word(&self, v: u64) -> u64 {
+        match self {
+            Priors::Outputs(f) => f.prior(v),
+            Priors::Ranked(f, store) => store.prior(f.rank(v)),
+        }
+    }
+}
+
 /// Best-first completion frontier entry (a min-heap on `cost`).
 struct Frontier {
     cost: f32,
-    acc: u64,
+    span: Span,
     path: Vec<u8>,
     addr: CompiledAddr,
     /// A completion's walk: the previous word's pairs down the same letters
@@ -327,6 +423,8 @@ pub struct Engine<D: AsRef<[u8]>> {
     /// Optional lemma vectors ([`crate::lemmas`]), each word's row under `0,
     /// 25, word` in the context model.
     pub(crate) lemmas: Option<Lemmas<D>>,
+    /// The priors by rank of a ranked dictionary ([`DictFormat::ranked`]).
+    pub(crate) store: Option<Store<D>>,
     /// Optional casing list: lowercase word → 1 (always Capitalized) or 2 (in
     /// CAPITALS) — names, places, abbreviations (tools/proper_nouns.py).
     casing: Option<Map<D>>,
@@ -420,8 +518,15 @@ fn map_file<P: AsRef<Path>>(path: P) -> io::Result<Map<Mmap>> {
 
 impl Engine<Mmap> {
     /// Open an FST dictionary blob by memory-mapping it (zero heap for the index).
+    /// A ranked dictionary's priors ([`crate::store`]) are beside it, in
+    /// the file of the same name ending `.bin`.
     pub fn open<P: AsRef<Path>>(path: P, cfg: Config) -> io::Result<Self> {
-        Ok(Engine::new(map_file(path)?, cfg))
+        let engine = Engine::new(map_file(&path)?, cfg);
+        if engine.format.ranked {
+            let store = Store::open(path.as_ref().with_extension("bin"))?;
+            return Ok(engine.with_store(store));
+        }
+        Ok(engine)
     }
 
     /// [`Engine::open`] plus a context model (bigram FST), also mmap'd.
@@ -430,7 +535,7 @@ impl Engine<Mmap> {
         bigrams: Q,
         cfg: Config,
     ) -> io::Result<Self> {
-        Ok(Engine::new(map_file(dict)?, cfg).with_bigrams(map_file(bigrams)?))
+        Ok(Engine::open(dict, cfg)?.with_bigrams(map_file(bigrams)?))
     }
 
     /// Add the casing list (see [`Engine::casing`]), mmap'd.
@@ -451,6 +556,7 @@ impl<D: AsRef<[u8]>> Engine<D> {
             map,
             bigrams: None,
             lemmas: None,
+            store: None,
             casing: None,
             user: None,
             kb: Keyboard::new(&cfg),
@@ -501,6 +607,20 @@ impl<D: AsRef<[u8]>> Engine<D> {
 
     /// Attach lemma vectors (with a context model that holds the words'
     /// lemma ids).
+    /// Attach a ranked dictionary's priors ([`crate::store`]).
+    pub fn with_store(mut self, store: Store<D>) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    /// How the dictionary's priors read.
+    pub(crate) fn priors(&self) -> Priors<'_, D> {
+        match (&self.store, self.format.ranked) {
+            (Some(store), true) => Priors::Ranked(self.format, store),
+            _ => Priors::Outputs(self.format),
+        }
+    }
+
     pub fn with_lemmas(mut self, lemmas: Lemmas<D>) -> Self {
         self.lemmas = Some(lemmas);
         self
@@ -941,7 +1061,10 @@ impl<D: AsRef<[u8]>> Engine<D> {
             let acc = base + t.out.value();
             heap.push(Frontier {
                 cost: cost(acc),
-                acc,
+                span: Span {
+                    acc,
+                    ..Span::default()
+                },
                 path: [start.as_slice(), &[t.inp]].concat(),
                 addr: t.addr,
                 pairs: None,
@@ -950,7 +1073,10 @@ impl<D: AsRef<[u8]>> Engine<D> {
         }
         let mut visited = 0;
         while let Some(Frontier {
-            acc, path, addr, ..
+            span: Span { acc, .. },
+            path,
+            addr,
+            ..
         }) = heap.pop()
         {
             visited += 1;
@@ -972,7 +1098,10 @@ impl<D: AsRef<[u8]>> Engine<D> {
                 let a = acc + t.out.value();
                 heap.push(Frontier {
                     cost: cost(a),
-                    acc: a,
+                    span: Span {
+                        acc: a,
+                        ..Span::default()
+                    },
                     path: p,
                     addr: t.addr,
                     pairs: None,
@@ -1009,7 +1138,7 @@ impl<D: AsRef<[u8]>> Engine<D> {
     pub fn word_cost(&self, word: &str) -> Option<f32> {
         let key = remap(word)?;
         let prior = match self.map.get(&key) {
-            Some(v) => self.format.prior(v),
+            Some(v) => self.priors().word(v),
             None => self.user.as_ref()?.get(&key)?,
         };
         Some(self.cfg.w_lm * prior as f32 * self.cfg.prior_scale)
@@ -1268,9 +1397,10 @@ impl<D: AsRef<[u8]>> Engine<D> {
         } else {
             &silent
         };
-        let mut out = self.complete_in(ctx, self.map.as_fst(), self.format, &input);
+        let mut out = self.complete_in(ctx, self.map.as_fst(), self.priors(), &input);
         if let Some(user) = &self.user {
-            for c in self.complete_in(ctx, user.as_fst(), DictFormat::PLAIN, &input) {
+            let plain = Priors::Outputs(DictFormat::PLAIN);
+            for c in self.complete_in(ctx, user.as_fst(), plain, &input) {
                 if !out.iter().any(|o| o.word == c.word) {
                     out.push(c);
                 }
@@ -1289,7 +1419,7 @@ impl<D: AsRef<[u8]>> Engine<D> {
         &self,
         ctx: &Context,
         fst: &Fst<F>,
-        format: DictFormat,
+        priors: Priors<'_, D>,
         input: &[char],
     ) -> Vec<Candidate> {
         let cfg = &self.cfg;
@@ -1303,7 +1433,7 @@ impl<D: AsRef<[u8]>> Engine<D> {
         };
         // Follow the exact prefix.
         let mut node = fst.root();
-        let mut base_out = 0u64;
+        let mut base = priors.root();
         let mut pairs = ctx.pairs;
         let mut prefix: Vec<u8> = Vec::with_capacity(input.len());
         for &c in input {
@@ -1314,28 +1444,29 @@ impl<D: AsRef<[u8]>> Engine<D> {
                 return Vec::new();
             };
             let t = node.transition(ti);
-            base_out += t.out.value();
+            base = priors.child(&node, ti, base);
             pairs = down(pairs, id);
             prefix.push(id);
             node = fst.node(t.addr);
         }
 
         let speaks = ctx.speaks();
-        let own = |acc: u64| format.prior(acc) as f32 * cfg.prior_scale;
+        let own = |v: u64| priors.word(v) as f32 * cfg.prior_scale;
+        let least = |span: Span| priors.least(span) as f32 * cfg.prior_scale;
         let typing = |extra: usize| cfg.c_complete_char * extra as f32;
         // The least a word below costs; a word's exact cost.
-        let floor = |acc: u64, pairs: Option<(CompiledAddr, u64)>, extra: usize| {
+        let floor = |span: Span, pairs: Option<(CompiledAddr, u64)>, extra: usize| {
             if speaks {
                 let pair = pairs.map(|(_, a)| a as f32 * cfg.prior_scale);
-                self.prior_floor(ctx, own(acc), pair) + typing(extra)
+                self.prior_floor(ctx, least(span), pair) + typing(extra)
             } else {
-                cfg.w_lm * own(acc) + typing(extra)
+                cfg.w_lm * least(span) + typing(extra)
             }
         };
-        let exact = |path: &[u8], acc: u64, extra: usize| {
+        let exact = |path: &[u8], v: u64, extra: usize| {
             let c = Candidate {
                 word: alphabet::ids_to_string(path),
-                cost: cfg.w_lm * own(acc) + typing(extra),
+                cost: cfg.w_lm * own(v) + typing(extra),
                 edit: typing(extra),
             };
             if speaks {
@@ -1347,20 +1478,20 @@ impl<D: AsRef<[u8]>> Engine<D> {
         let mut heap: BinaryHeap<Frontier> = BinaryHeap::new();
         let push = |heap: &mut BinaryHeap<Frontier>,
                     path: Vec<u8>,
-                    acc: u64,
+                    span: Span,
                     addr: CompiledAddr,
                     pairs: Option<(CompiledAddr, u64)>| {
             let extra = path.len() - prefix.len();
             heap.push(Frontier {
-                cost: floor(acc, pairs, extra),
-                acc,
+                cost: floor(span, pairs, extra),
+                span,
                 path,
                 addr,
                 pairs,
                 found: false,
             });
         };
-        push(&mut heap, prefix.clone(), base_out, node.addr(), pairs);
+        push(&mut heap, prefix.clone(), base, node.addr(), pairs);
         let mut out: Vec<Candidate> = Vec::new();
         let mut visited = 0usize;
         while let Some(f) = heap.pop() {
@@ -1393,25 +1524,25 @@ impl<D: AsRef<[u8]>> Engine<D> {
             }
             let n = fst.node(f.addr);
             if n.is_final() {
-                let acc = f.acc + n.final_output().value();
-                let plain = cfg.w_lm * own(acc) + typing(extra);
-                let cost = plain + exact(&f.path, acc, extra);
+                let v = f.span.acc + n.final_output().value();
+                let plain = cfg.w_lm * own(v) + typing(extra);
+                let cost = plain + exact(&f.path, v, extra);
                 heap.push(Frontier {
                     cost,
-                    acc,
+                    span: f.span,
                     path: f.path.clone(),
                     addr: f.addr,
                     pairs: None,
                     found: true,
                 });
             }
-            for t in n.transitions() {
+            for (i, t) in n.transitions().enumerate() {
                 let mut p = f.path.clone();
                 p.push(t.inp);
                 push(
                     &mut heap,
                     p,
-                    f.acc + t.out.value(),
+                    priors.child(&n, i, f.span),
                     t.addr,
                     down(f.pairs, t.inp),
                 );
@@ -1423,16 +1554,22 @@ impl<D: AsRef<[u8]>> Engine<D> {
     /// Threshold DFS over the dictionary — and the user's words — for one
     /// hypothesis at one budget.
     fn search(&self, q: &Query, budget: f32, st: &mut State) {
-        self.search_in(self.map.as_fst(), self.format, q, budget, st);
+        self.search_in(self.map.as_fst(), self.priors(), q, budget, st);
         if let Some(user) = &self.user {
-            self.search_in(user.as_fst(), DictFormat::PLAIN, q, budget, st);
+            self.search_in(
+                user.as_fst(),
+                Priors::Outputs(DictFormat::PLAIN),
+                q,
+                budget,
+                st,
+            );
         }
     }
 
     fn search_in<F: AsRef<[u8]>>(
         &self,
         fst: &Fst<F>,
-        format: DictFormat,
+        priors: Priors<'_, D>,
         q: &Query,
         budget: f32,
         st: &mut State,
@@ -1448,7 +1585,8 @@ impl<D: AsRef<[u8]>> Engine<D> {
         }
         st.path.clear();
         let pairs = st.ctx.pairs;
-        self.walk(fst, format, q, budget, st, fst.root(), 0, 0, 0, pairs);
+        let root = priors.root();
+        self.walk(fst, priors, q, budget, st, fst.root(), 0, 0, root, pairs);
     }
 
     /// A final word is accepted when `w_ch·row[m] ≤ budget`. A branch is pruned
@@ -1461,14 +1599,14 @@ impl<D: AsRef<[u8]>> Engine<D> {
     fn walk<F: AsRef<[u8]>>(
         &self,
         fst: &Fst<F>,
-        format: DictFormat,
+        priors: Priors<'_, D>,
         q: &Query,
         budget: f32,
         st: &mut State,
         node: Node,
         depth: usize,
         last: u8,
-        out_acc: u64,
+        span: Span,
         pairs: Option<(CompiledAddr, u64)>,
     ) {
         st.nodes += 1;
@@ -1485,7 +1623,7 @@ impl<D: AsRef<[u8]>> Engine<D> {
             let edit = row[m];
             if cfg.w_ch * edit <= budget {
                 let prior =
-                    format.prior(out_acc + node.final_output().value()) as f32 * cfg.prior_scale;
+                    priors.word(span.acc + node.final_output().value()) as f32 * cfg.prior_scale;
                 let channel = cfg.w_ch * edit + q.penalty;
                 let mut total = channel + cfg.w_lm * prior;
                 if st.ctx.speaks() {
@@ -1524,37 +1662,66 @@ impl<D: AsRef<[u8]>> Engine<D> {
         }
 
         let lb = cfg.w_ch * row_min(row);
-        let own = format.prior(out_acc) as f32 * cfg.prior_scale;
-        let least = if st.ctx.speaks() {
-            let pair = pairs.map(|(_, acc)| acc as f32 * cfg.prior_scale);
-            self.prior_floor(st.ctx, own, pair)
-        } else {
-            cfg.w_lm * own
+        if lb > budget {
+            return;
+        }
+        let least = |own: u64| {
+            let own = own as f32 * cfg.prior_scale;
+            if st.ctx.speaks() {
+                let pair = pairs.map(|(_, acc)| acc as f32 * cfg.prior_scale);
+                self.prior_floor(st.ctx, own, pair)
+            } else {
+                cfg.w_lm * own
+            }
         };
-        if lb > budget || lb + least + q.penalty > st.topk.bound() {
+        // The quick bound first; the tight one only if that doesn't prune.
+        if lb + least(span.least) + q.penalty > st.topk.bound() {
+            return;
+        }
+        if priors.refines() && lb + least(priors.least(span)) + q.penalty > st.topk.bound() {
             return;
         }
 
         // Visit children cheapest-first: how well each continues the input at
         // this depth, plus how much rarer its best word is.
         let jkey = depth.min(m - 1);
-        let mut kids = [(0.0f32, 0u8, 0 as CompiledAddr, 0u64); 64];
+        let mut kids = [(0.0f32, 0u8, 0 as CompiledAddr, Span::default()); 64];
         let mut n = 0;
         for t in node.transitions() {
             if n == kids.len() {
                 break;
             }
-            let key = q.sub[t.inp as usize * m + jkey]
-                + cfg.w_lm * format.prior(t.out.value()) as f32 * cfg.prior_scale;
-            kids[n] = (key, t.inp, t.addr, t.out.value());
+            let acc = span.acc + t.out.value();
+            kids[n] = (0.0, t.inp, t.addr, Span { acc, ..span });
             n += 1;
+        }
+        // Where each child's words end: where the next one's begin (the
+        // transitions read once).
+        let past = (n < node.len()).then(|| span.acc + node.transition(n).out.value());
+        for i in 0..n {
+            let next = if i + 1 < n {
+                Some(kids[i + 1].3.acc)
+            } else {
+                past
+            };
+            let child = priors.span(kids[i].3.acc, next, span);
+            // How much rarer the child's best word is (an older dictionary:
+            // the transition's own output, as it always was).
+            let rarer = match priors {
+                Priors::Outputs(f) => f.prior(child.acc - span.acc),
+                Priors::Ranked(..) => child.least,
+            };
+            let key =
+                q.sub[kids[i].1 as usize * m + jkey] + cfg.w_lm * rarer as f32 * cfg.prior_scale;
+            kids[i].0 = key;
+            kids[i].3 = child;
         }
         kids[..n].sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
 
         if st.rows.len() < (depth + 2) * w {
             st.rows.resize((depth + 2) * w, 0.0);
         }
-        for &(_, c, addr, out_val) in &kids[..n] {
+        for &(_, c, addr, child) in &kids[..n] {
             self.step(q, depth, c, last, &mut st.rows);
             st.path.push(c);
             // Down the previous word's pairs by the same letter.
@@ -1565,14 +1732,14 @@ impl<D: AsRef<[u8]>> Engine<D> {
             });
             self.walk(
                 fst,
-                format,
+                priors,
                 q,
                 budget,
                 st,
                 fst.node(addr),
                 depth + 1,
                 c,
-                out_acc + out_val,
+                child,
                 below,
             );
             st.path.pop();
@@ -1667,6 +1834,66 @@ mod tests {
         kv.dedup_by(|a, b| a.0 == b.0);
         let map = Map::from_iter(kv.iter().map(|(k, v)| (k.as_slice(), *v))).unwrap();
         Engine::new(map, cfg)
+    }
+
+    /// Words for a ranked dictionary to read as the plain one does: some
+    /// runs of forms longer than 16 (the store's minima), priors multiples
+    /// of 50.
+    fn many_words() -> Vec<(String, u64)> {
+        let stems = [
+            "кот", "кит", "ком", "кол", "кор", "мол", "мор", "дом", "дым", "сон",
+        ];
+        let ends = [
+            "", "а", "у", "ом", "е", "ы", "ов", "ам", "ами", "ах", "ик", "ики", "ище",
+        ];
+        let mut out = Vec::new();
+        for (i, s) in stems.iter().enumerate() {
+            for (j, e) in ends.iter().enumerate() {
+                let p = 50 * (40 + ((i * 37 + j * 53) % 200)) as u64;
+                out.push((format!("{s}{e}"), p));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_ranked_dictionary_reads_as_the_plain_one() {
+        let words = many_words();
+        let refs: Vec<(&str, u64)> = words.iter().map(|(w, p)| (w.as_str(), *p)).collect();
+        let plain = engine_with(&refs, Config::default());
+        let (map, store) = crate::store::ranked(&refs);
+        let ranked = Engine::new(map, Config::default()).with_store(store);
+        assert!(ranked.format.ranked);
+        let same = |a: Vec<Candidate>, b: Vec<Candidate>| {
+            assert_eq!(a.len(), b.len(), "{a:?} {b:?}");
+            for (x, y) in a.iter().zip(&b) {
+                assert_eq!(x.word, y.word, "{a:?} {b:?}");
+                assert!((x.cost - y.cost).abs() < 1e-4, "{a:?} {b:?}");
+            }
+        };
+        for typed in [
+            "кот",
+            "кто",
+            "ктоами",
+            "домх",
+            "сно",
+            "морик",
+            "клм",
+            "дымище",
+            "аа",
+        ] {
+            same(
+                plain.read(Evidence::Taps(typed, &[])),
+                ranked.read(Evidence::Taps(typed, &[])),
+            );
+            same(
+                plain.read(Evidence::Begun(typed)),
+                ranked.read(Evidence::Begun(typed)),
+            );
+        }
+        assert_eq!(plain.word_cost("котами"), ranked.word_cost("котами"));
+        assert_eq!(ranked.word_cost("котище"), plain.word_cost("котище"));
+        assert!(ranked.word_cost("котищи").is_none());
     }
 
     fn engine_from(words: &[&str]) -> Engine<Vec<u8>> {
@@ -2233,6 +2460,7 @@ mod tests {
             quantum: 50,
             shift: 2,
             floor: 0,
+            ranked: false,
         };
         let id = |w: &str| -> Vec<u8> {
             w.chars()

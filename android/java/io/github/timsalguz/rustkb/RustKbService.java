@@ -65,6 +65,8 @@ public final class RustKbService extends InputMethodService implements SensorEve
             // /sdcard/Android/data/<package>/files/typing-log.jsonl
             File ext = getExternalFilesDir(null);
             String log = ext == null ? null : new File(ext, "typing-log.jsonl").getPath();
+            // A ranked dictionary's priors lie beside it (read by the core).
+            install("dict.bin");
             handle = Native.create(install("dict.fst"), install("bigrams.fst"), install("casing.fst"),
                     install("lemmas.bin"), settingsPath(this), log, locale(),
                     getResources().getDisplayMetrics().density, Build.VERSION.SDK_INT);
@@ -255,6 +257,7 @@ public final class RustKbService extends InputMethodService implements SensorEve
         for (String pack : wanted.split(",")) {
             String dict = null, bigrams = null, casing = null;
             try {
+                install(pack + "/dict.bin");
                 dict = install(pack + "/dict.fst");
                 if (dict != null) {
                     bigrams = install(pack + "/bigrams.fst");
@@ -336,14 +339,22 @@ public final class RustKbService extends InputMethodService implements SensorEve
      * copied once per app update. Returns null if the asset isn't packaged.
      */
     private String install(String asset) throws Exception {
-        // A pack's files ("de/dict.fst") live flat: de-dict-<stamp>.fst.
-        String base = asset.substring(0, asset.lastIndexOf('.')).replace('/', '-');
+        // A pack's files ("de/dict.fst") live flat: de-dict-<stamp>.fst; a
+        // file keeps its ending (dict.bin beside dict.fst: dict-<stamp>.bin).
+        int dot = asset.lastIndexOf('.');
+        String base = asset.substring(0, dot).replace('/', '-');
+        String ext = asset.substring(dot);
         long stamp = getPackageManager().getPackageInfo(getPackageName(), 0).lastUpdateTime;
-        File file = new File(getFilesDir(), base + "-" + stamp + ".fst");
+        File file = new File(getFilesDir(), base + "-" + stamp + ext);
         if (!file.exists()) {
             File[] old = getFilesDir().listFiles();
-            if (old != null) for (File f : old) if (f.getName().startsWith(base + "-")) f.delete();
-            File tmp = new File(getFilesDir(), base + ".tmp");
+            if (old != null) {
+                for (File f : old) {
+                    String n = f.getName();
+                    if (n.startsWith(base + "-") && n.endsWith(ext)) f.delete();
+                }
+            }
+            File tmp = new File(getFilesDir(), base + ext + ".tmp");
             try (InputStream in = getAssets().open(asset); OutputStream out = new FileOutputStream(tmp)) {
                 byte[] buf = new byte[1 << 16];
                 for (int n; (n = in.read(buf)) > 0; ) out.write(buf, 0, n);
