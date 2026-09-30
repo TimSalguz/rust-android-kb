@@ -15,6 +15,7 @@ pub mod gesture;
 pub mod gram;
 pub mod keyboard;
 pub mod lemmas;
+pub mod store;
 
 pub use chooser::Chooser;
 pub use config::{Config, Latin, Profile};
@@ -22,6 +23,7 @@ pub use dict::DictFormat;
 pub use engine::{Candidate, Casing, Context, Engine, Evidence, Hint, Stats};
 pub use keyboard::{Keyboard, Layout};
 pub use lemmas::Lemmas;
+pub use store::Store;
 
 /// Re-exported so downstream crates can name the mmap-backed engine type
 /// (`Engine<Mmap>`) without depending on `memmap2` directly.

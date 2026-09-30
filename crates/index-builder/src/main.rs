@@ -8,6 +8,8 @@
 //!              values: more word tails shared)
 //!   --priors   WORD_PRIORS.tsv: `word<TAB>−ln P × 1000` given (tools/factor_priors.py),
 //!              for the words it lists, instead of the counts
+//!   --ranked   the automaton gives each word's rank (and grammar id), the
+//!              priors go beside it, OUT_FST with `.bin` (`kbcore::store`)
 //!   --grammar  CLASSES.tsv WORD_READINGS.tsv (tools/build_classes.py): each
 //!              word's grammar id — its (class, reading set) pair — in its
 //!              value below the prior (`kbcore::dict`); the context model
@@ -167,6 +169,7 @@ fn main() -> ExitCode {
             },
             "--grammar" => grammar = args.next().zip(args.next()),
             "--priors" => priors = args.next(),
+            "--ranked" => format.ranked = true,
             _ => positional.push(a),
         }
     }
@@ -283,7 +286,8 @@ fn run(
         }
         None => HashMap::new(),
     };
-    let mut entries: Vec<(Vec<u8>, u64)> = Vec::with_capacity(words.len());
+    // (key, prior, grammar id)
+    let mut raw: Vec<(Vec<u8>, u64, u64)> = Vec::with_capacity(words.len());
     let mut dropped = 0u64;
     for word in &words {
         let g = ids.get(word).copied().unwrap_or(0);
@@ -293,15 +297,50 @@ fn run(
                     Some(&p) => p,
                     None => prior_value(word, &freqs, total),
                 };
-                entries.push((key, format.value(prior, g)))
+                raw.push((key, prior, g))
             }
             None => dropped += 1,
         }
     }
 
     // FST requires strictly increasing, unique keys.
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    entries.dedup_by(|a, b| a.0 == b.0);
+    raw.sort_by(|a, b| a.0.cmp(&b.0));
+    raw.dedup_by(|a, b| a.0 == b.0);
+    let q = format.quantum as u64;
+    let entries: Vec<(Vec<u8>, u64)> = if format.ranked {
+        // The priors by rank, beside the automaton.
+        let steps: Vec<u16> = raw
+            .iter()
+            .map(|(_, p, _)| ((p + q / 2) / q).min(u16::MAX as u64) as u16)
+            .collect();
+        // The step most words share (the rarest: seen once or never) is not
+        // stored.
+        let mut count: HashMap<u16, usize> = HashMap::new();
+        for &s in &steps {
+            *count.entry(s).or_default() += 1;
+        }
+        let floor = count
+            .into_iter()
+            .max_by_key(|&(s, c)| (c, s))
+            .map_or(0, |(s, _)| s);
+        let bin = std::path::Path::new(out_path).with_extension("bin");
+        let bin = bin.to_string_lossy().into_owned();
+        std::fs::write(staged(&bin), kbcore::store::build(&steps, q as u32, floor))?;
+        std::fs::rename(staged(&bin), &bin)?;
+        println!(
+            "wrote {bin}: priors of {} words by rank, {:.2} MB",
+            steps.len(),
+            std::fs::metadata(&bin)?.len() as f64 / 1_048_576.0
+        );
+        raw.into_iter()
+            .enumerate()
+            .map(|(r, (k, _, g))| (k, format.ranked_value(r as u64, g)))
+            .collect()
+    } else {
+        raw.into_iter()
+            .map(|(k, p, g)| (k, format.value(p, g)))
+            .collect()
+    };
 
     let kept = entries.len();
     let out = BufWriter::new(File::create(staged(out_path))?);

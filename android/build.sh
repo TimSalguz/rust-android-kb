@@ -35,8 +35,10 @@ GRAMMAR=
 if [ -s data/classes.tsv ] && [ -s data/word_readings.tsv ]; then
     GRAMMAR="data/classes.tsv data/word_readings.tsv"
 fi
+# The automaton gives each word's rank and grammar; the priors are an array
+# by rank beside it, dict.bin (kbcore::store): 9.1 → 4.6 + 1.6 MB.
 cargo run --release -q -p index-builder -- data/lexicon.tsv "$OUT/assets/dict.fst" --quantum 50 \
-    $([ -n "$GRAMMAR" ] && echo --grammar $GRAMMAR)
+    --ranked $([ -n "$GRAMMAR" ] && echo --grammar $GRAMMAR)
 # The context model is optional: packaged when tools/build_bigrams.py made it.
 # Names and abbreviations written with capitals (tools/proper_nouns.py), optional.
 if [ -s data/proper.tsv ]; then

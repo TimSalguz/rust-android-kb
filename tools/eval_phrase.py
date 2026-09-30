@@ -28,7 +28,8 @@ ap.add_argument("--n", type=int, default=600)
 ap.add_argument("--jitter", type=float, default=0.4)
 ap.add_argument("--seeds", type=int, default=3, help="noisy runs per setting")
 ap.add_argument("--set", nargs="+", default=["w_phrase=0", "w_phrase=1"])
-ap.add_argument("--sentences", default=f"{ROOT}/data/tatoeba/rus_sentences.tsv.bz2")
+DATA = os.environ.get("DATA", f"{ROOT}/data")
+ap.add_argument("--sentences", default=f"{DATA}/tatoeba/rus_sentences.tsv.bz2")
 ap.add_argument("--show", type=int, default=8, help="print this many sentences the settings disagree on")
 ap.add_argument("--predict-only", action="store_true", help="only the next-word prediction")
 ap.add_argument("--swipe", type=float, help="draw the words, corners missed by this many key widths")
@@ -40,7 +41,7 @@ PREP = set("""в во на о об обо при по с со к ко за по�
 мимо против ради""".split())
 PRON = {"я", "ты", "он", "она", "оно", "мы", "вы", "они"}
 STOCK = re.compile(r"\b(?:Том|Тома|Тому|Томом|Томе|Мэри|Бостон\w*)\b")
-with open(f"{ROOT}/data/lexicon.tsv", encoding="utf-8") as f:
+with open(f"{DATA}/lexicon.tsv", encoding="utf-8") as f:
     lexicon = {line.split("\t", 1)[0] for line in f}
 
 
@@ -73,7 +74,7 @@ with bz2.open(args.sentences, "rt", encoding="utf-8") as f:
         if len(lines) >= args.n:
             break
 
-assets = f"{ROOT}/target/apk/assets"
+assets = os.environ.get("ASSETS", f"{ROOT}/target/apk/assets")
 bigrams = args.bigrams or f"{assets}/bigrams.fst"
 cmd = [f"{ROOT}/target/release/examples/typetext", f"{assets}/dict.fst", bigrams]
 if os.path.exists(f"{assets}/casing.fst"):

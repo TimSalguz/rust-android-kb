@@ -22,7 +22,7 @@ use fst::raw::{CompiledAddr, Fst, Node};
 
 use crate::alphabet;
 use crate::dict::DictFormat;
-use crate::engine::{Candidate, Context, Engine};
+use crate::engine::{Candidate, Context, Engine, Priors, Span};
 use crate::keyboard::N;
 
 /// Points a path is resampled to.
@@ -321,18 +321,18 @@ impl Gesture {
 
 /// The walk's best candidates so far, cheapest first: (cheap cost, word
 /// ids, prior, pace cost); the k-th cost bounds the search.
-struct Walk {
+struct Walk<'a, D: AsRef<[u8]>> {
     k: usize,
     best: Vec<(f32, Vec<u8>, u64, f32)>,
     nodes: usize,
     w_walk: f32,
     w_prior: f32,
     w_pace: f32,
-    /// How the FST walked now reads its values.
-    format: DictFormat,
+    /// How the FST walked now reads its priors.
+    priors: Priors<'a, D>,
 }
 
-impl Walk {
+impl<D: AsRef<[u8]>> Walk<'_, D> {
     fn bound(&self) -> f32 {
         if self.best.len() < self.k {
             f32::INFINITY
@@ -364,7 +364,7 @@ impl<D: AsRef<[u8]>> Engine<D> {
             w_walk: cfg.gesture_walk,
             w_prior: cfg.w_lm * cfg.prior_scale,
             w_pace: cfg.gesture_pace,
-            format: self.format,
+            priors: self.priors(),
         };
         let mut ids = Vec::with_capacity(24);
         let fst = self.map.as_fst();
@@ -373,14 +373,18 @@ impl<D: AsRef<[u8]>> Engine<D> {
             j: 0,
             last: 0,
             from: g.pts[0],
-            acc: 0,
+            span: w.priors.root(),
             pairs: ctx.pairs,
             cost: (0.0, 0.0),
         };
         self.trace(ctx, g, fst, fst.root(), at, &mut ids, &mut w);
         if let Some(user) = &self.user {
             let fst = user.as_fst();
-            w.format = DictFormat::PLAIN;
+            w.priors = Priors::Outputs(DictFormat::PLAIN);
+            let at = Trace {
+                span: w.priors.root(),
+                ..at
+            };
             self.trace(ctx, g, fst, fst.root(), at, &mut ids, &mut w);
         }
         w.best
@@ -501,15 +505,15 @@ struct Trace {
     j: usize,
     last: u8,
     from: Pt,
-    acc: u64,
+    span: Span,
     pairs: Option<(CompiledAddr, u64)>,
     cost: (f32, f32),
 }
 
 /// A letter the walk may take next: its (geometric, pace) cost so far, its
 /// point, id, the letter the next one comes after (itself, or the one before
-/// a hyphen) and its key, the FST outputs so far and its node.
-type Kid = ((f32, f32), usize, u8, u8, Pt, u64, CompiledAddr);
+/// a hyphen) and its key, where its words lie and its node.
+type Kid = ((f32, f32), usize, u8, u8, Pt, Span, CompiledAddr);
 
 /// A character with no key of its own that a word may have inside (a hyphen,
 /// an apostrophe): not drawn.
@@ -546,7 +550,7 @@ impl<D: AsRef<[u8]>> Engine<D> {
         node: Node,
         at: Trace,
         ids: &mut Vec<u8>,
-        w: &mut Walk,
+        w: &mut Walk<'_, D>,
     ) {
         if w.nodes >= MAX_NODES {
             return;
@@ -557,7 +561,7 @@ impl<D: AsRef<[u8]>> Engine<D> {
             j,
             last,
             from,
-            acc,
+            span,
             pairs,
             cost,
         } = at;
@@ -565,12 +569,12 @@ impl<D: AsRef<[u8]>> Engine<D> {
         let pair_fst = self.bigrams.as_ref().map(|b| b.as_fst());
         let speaks = ctx.speaks();
         // The least a word below costs by its prior at the place.
-        let floor = |acc: u64, pairs: Option<(CompiledAddr, u64)>| {
+        let floor = |least: u64, pairs: Option<(CompiledAddr, u64)>| {
             if speaks {
                 let pair = pairs.map(|(_, a)| a as f32 * scale);
-                self.prior_floor(ctx, w.format.prior(acc) as f32 * scale, pair)
+                self.prior_floor(ctx, least as f32 * scale, pair)
             } else {
-                w.w_prior * w.format.prior(acc) as f32
+                w.w_prior * least as f32
             }
         };
         let down = |pairs: Option<(CompiledAddr, u64)>, c: u8| {
@@ -582,16 +586,14 @@ impl<D: AsRef<[u8]>> Engine<D> {
         };
         let d = |p: Pt, q: Pt| (p.0 - q.0).hypot(p.1 - q.1) / g.key_w;
         let mut kids: Vec<(Kid, Option<(CompiledAddr, u64)>)> = Vec::new();
-        for t in node.transitions() {
+        for (i, t) in node.transitions().enumerate() {
             let c = t.inp;
+            let below = w.priors.child(&node, i, span);
             let Some(key) = g.pos[c as usize] else {
                 // A hyphen or apostrophe isn't drawn (как-то, don't): the way
                 // goes on from the letter before it.
                 if depth > 0 && silent(c) {
-                    kids.push((
-                        (cost, j, c, last, from, acc + t.out.value(), t.addr),
-                        down(pairs, c),
-                    ));
+                    kids.push(((cost, j, c, last, from, below, t.addr), down(pairs, c)));
                 }
                 continue;
             };
@@ -624,25 +626,29 @@ impl<D: AsRef<[u8]>> Engine<D> {
                 };
                 (at, near * near + stray * stray, paced)
             };
-            let acc = acc + t.out.value();
             let pairs = down(pairs, c);
             let c_cost = (cost.0 + step, cost.1 + paced);
-            if w.w_walk * c_cost.0 + w.w_pace * c_cost.1 + floor(acc, pairs) >= w.bound() {
+            // The quick bound first; the tight one only if that doesn't prune.
+            let geo = w.w_walk * c_cost.0 + w.w_pace * c_cost.1;
+            if geo + floor(below.least, pairs) >= w.bound() {
                 continue;
             }
-            kids.push(((c_cost, at, c, c, key, acc, t.addr), pairs));
+            if w.priors.refines() && geo + floor(w.priors.least(below), pairs) >= w.bound() {
+                continue;
+            }
+            kids.push(((c_cost, at, c, c, key, below, t.addr), pairs));
         }
         kids.sort_by(|a, b| {
             let (a, b) = (a.0 .0, b.0 .0);
             (w.w_walk * a.0 + w.w_pace * a.1).total_cmp(&(w.w_walk * b.0 + w.w_pace * b.1))
         });
-        for ((c_cost, at, c, next_last, key, acc, addr), pairs) in kids {
+        for ((c_cost, at, c, next_last, key, below, addr), pairs) in kids {
             ids.push(c);
             let child = fst.node(addr);
             if child.is_final() && depth >= 1 && at + g.slack >= M - 1 {
                 // The path after the last letter should stay on its key.
                 let tail = (at..M).map(|k| d(g.pts[k], key)).fold(0.0f32, f32::max);
-                let prior = w.format.prior(acc + child.final_output().value());
+                let prior = w.priors.word(below.acc + child.final_output().value());
                 let geo = w.w_walk * (c_cost.0 + tail * tail) + w.w_pace * c_cost.1;
                 let own = w.w_prior * prior as f32;
                 let total = if speaks {
@@ -673,7 +679,7 @@ impl<D: AsRef<[u8]>> Engine<D> {
                 j: at,
                 last: next_last,
                 from: key,
-                acc,
+                span: below,
                 pairs,
                 cost: c_cost,
             };
@@ -765,6 +771,38 @@ mod tests {
             Some("привет"),
             "{got:?}"
         );
+    }
+
+    #[test]
+    fn a_ranked_dictionary_reads_gestures_as_the_plain_one() {
+        let words = [
+            ("привет", 5000),
+            ("приват", 9000),
+            ("пет", 6000),
+            ("пора", 5000),
+            ("привал", 7000),
+            ("прибор", 8000),
+            ("примет", 6500),
+            ("ветер", 3000),
+            ("вет", 9500),
+        ];
+        let plain = engine(&words);
+        let (map, store) = crate::store::ranked(&words);
+        let ranked = Engine::new(map, Config::default()).with_store(store);
+        for (w, wobble) in [
+            ("привет", 25.0),
+            ("пора", 10.0),
+            ("ветер", 0.0),
+            ("примет", 20.0),
+        ] {
+            let a = plain.gesture(&draw(w, wobble), &keys(), 100.0);
+            let b = ranked.gesture(&draw(w, wobble), &keys(), 100.0);
+            let words = |c: &[Candidate]| c.iter().map(|c| c.word.clone()).collect::<Vec<_>>();
+            assert_eq!(words(&a), words(&b));
+            for (x, y) in a.iter().zip(&b) {
+                assert!((x.cost - y.cost).abs() < 1e-4, "{a:?} {b:?}");
+            }
+        }
     }
 
     #[test]
