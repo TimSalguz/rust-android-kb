@@ -348,11 +348,15 @@ struct PrevWord {
     alts: Vec<Candidate>,
 }
 
-/// Right after an autocorrect + space: what was typed (and how) and what
-/// replaced it — ⌫ brings the typed word back.
+/// Right after an autocorrect + space (or the punctuation that finished the
+/// word): what was typed (and how) and what replaced it — ⌫ brings the
+/// typed word back.
 struct Undo {
     typed: String,
     fixed: String,
+    /// What finished the word: a space (⌫ takes it too and the word is
+    /// typed on), or a mark (it stays: «созвон,» — only the change goes).
+    sep: char,
     hints: Vec<Hint>,
     /// Text before the word that the change replaced too (a joined or
     /// re-read previous word with its separator), put back by ⌫.
@@ -1912,12 +1916,13 @@ impl<D: AsRef<[u8]>> Ime<D> {
         let Some(Target::Key(k)) = t else {
             return t;
         };
-        // ?123 hit on its upper part or its right side in the middle of a
-        // word: the finger reaching for я or the comma came down short.
+        // ?123 hit on its top edge or its upper right corner in the middle
+        // of a word: the finger reaching for я came down short. (Not its
+        // upper half: a tap a little above the middle is ?123 meant.)
         let symbols = &self.keys[k];
         if symbols.action == Action::Symbols && self.suggest && !self.word.is_empty() {
             let (lx, ly) = symbols.local(x, y);
-            if ly < -0.1 * symbols.h || lx > 0.25 * symbols.w {
+            if ly < -0.3 * symbols.h || (lx > 0.25 * symbols.w && ly < -0.1 * symbols.h) {
                 return self
                     .keys
                     .iter()
@@ -2981,6 +2986,18 @@ impl<D: AsRef<[u8]>> Ime<D> {
             let input = self.composing_input();
             let settled = self.settled();
             let corrected = self.commit_word(correct);
+            // ⌫ right after brings the typed word back, the mark kept.
+            let undo = corrected.clone().map(|(t, f)| Undo {
+                typed: t,
+                fixed: f,
+                sep: c,
+                hints: match &input {
+                    Input::Typed { hints, .. } => hints.clone(),
+                    Input::Drawn { .. } => Vec::new(),
+                },
+                restore: None,
+                pairs: Vec::new(),
+            });
             // A comma or period hit instead of a letter above it: joined back
             // once the next letters show it (пр,вет → привет). Not after
             // short forms (т.е., и т.п.).
@@ -2992,8 +3009,12 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 let committed = corrected.map_or_else(|| typed.clone(), |(_, f)| f);
                 self.commit(c.to_string());
                 self.note_slip(typed, input, committed, tap, c, settled);
+                self.undo = undo;
                 return;
             }
+            self.commit(c.to_string());
+            self.undo = undo;
+            return;
         }
         self.commit(c.to_string());
     }
@@ -3193,6 +3214,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
         self.undo = corrected.map(|(t, f)| Undo {
             typed: t,
             fixed: f,
+            sep: ' ',
             hints,
             restore: None,
             pairs: Vec::new(),
@@ -3692,6 +3714,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
         self.undo = Some(Undo {
             typed,
             fixed: text,
+            sep: ' ',
             hints,
             restore: None,
             pairs: sp.variants,
@@ -3728,6 +3751,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
         self.undo = Some(Undo {
             typed,
             fixed: m.word,
+            sep: ' ',
             hints,
             restore: Some(restore),
             pairs: m.variants,
@@ -3816,12 +3840,26 @@ impl<D: AsRef<[u8]>> Ime<D> {
             }
             self.update_slots();
             self.show();
+        } else if let Some(u) = self
+            .undo
+            .take_if(|u| u.sep != ' ' && self.before.ends_with(&format!("{}{}", u.fixed, u.sep)))
+        {
+            // After a mark: only the change goes — «Созван,» → «созвон,».
+            self.prev_word = None;
+            self.out.push(Op::Delete(u.fixed.chars().count() + 1));
+            for _ in 0..=u.fixed.chars().count() {
+                self.before.pop();
+            }
+            self.rejected
+                .push((u.typed.to_lowercase(), u.fixed.to_lowercase()));
+            self.commit(format!("{}{}", u.typed, u.sep));
         } else if let Some(Undo {
             typed,
             fixed,
             hints,
             restore,
             pairs,
+            ..
         }) = self
             .undo
             .take()
@@ -4561,7 +4599,9 @@ impl<D: AsRef<[u8]>> Ime<D> {
         if self.shift == Shift::Caps {
             return;
         }
-        self.shift = if self.auto_caps && sentence_start(&self.before) {
+        // Inside a word (typed on, or taken up again after ⌫): no capital,
+        // though the text before it starts a sentence («Привет?» ⌫ о).
+        self.shift = if self.auto_caps && self.word.is_empty() && sentence_start(&self.before) {
             Shift::Once
         } else {
             Shift::Off
@@ -5703,6 +5743,22 @@ mod tests {
             k.take_ops(),
             vec![Op::Delete(7), Op::Composing("Привкт".into())]
         );
+    }
+
+    #[test]
+    fn backspace_after_a_comma_reverts_the_word_and_keeps_the_comma() {
+        let mut k = ime(WORDS);
+        type_str(&mut k, "привкт,");
+        let ops = k.take_ops();
+        assert!(ops.contains(&Op::Commit("Привет".into())), "{ops:?}");
+        tap(&mut k, '⌫');
+        assert_eq!(
+            k.take_ops(),
+            vec![Op::Delete(7), Op::Commit("Привкт,".into())]
+        );
+        // The next ⌫ takes the comma, as any.
+        tap(&mut k, '⌫');
+        assert!(k.take_ops().contains(&Op::Delete(1)));
     }
 
     #[test]
@@ -7164,6 +7220,34 @@ mod tests {
         k.touch(DOWN, 0, sym.x + sym.w * 0.4, sym.y + sym.h * 0.7, t);
         k.touch(UP, 0, sym.x + sym.w * 0.4, sym.y + sym.h * 0.7, t + 60);
         assert_eq!(k.layer, Layer::Symbols);
+    }
+
+    #[test]
+    fn symbols_hit_a_little_above_its_middle_mid_word_opens_the_symbols() {
+        let mut k = ime(WORDS);
+        k.start_input("", 1);
+        type_str(&mut k, "пр");
+        let sym = k
+            .keys
+            .iter()
+            .find(|b| b.action == Action::Symbols)
+            .unwrap()
+            .clone();
+        let t = now();
+        k.touch(DOWN, 0, sym.x + sym.w * 0.5, sym.y + sym.h * 0.35, t);
+        k.touch(UP, 0, sym.x + sym.w * 0.5, sym.y + sym.h * 0.35, t + 60);
+        assert_eq!(k.word, "пр");
+        assert_eq!(k.layer, Layer::Symbols);
+    }
+
+    #[test]
+    fn a_word_taken_up_again_at_a_sentence_start_goes_on_in_lowercase() {
+        let mut k = ime(WORDS);
+        k.start_input("", 0x4001);
+        type_str(&mut k, "привет.⌫");
+        assert_eq!(k.word, "Привет");
+        type_str(&mut k, "ы");
+        assert_eq!(k.word, "Приветы");
     }
 
     #[test]
