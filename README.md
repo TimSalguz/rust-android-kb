@@ -184,16 +184,20 @@ emoji and what was copied lately.
 The detailed plan (in Russian): [`docs/roadmap-model.md`](docs/roadmap-model.md).
 
 Next:
+- the sentence's graph taught on chat-like text too: short spoken phrases
+  («Угу, да, конечно», «Привет, Саша!») and lists without «и» are what the
+  commas' suite (`tests/commas-ru.tsv`, 75 of 88 right) misses most;
+- commas from the graph as you type, not only when the sentence ends;
 - proofreading beyond commas: each word of a finished sentence read again
   with the context on both sides (-тся/-ться, «в течение»), dashes and «?»;
 - the text's graph: names and pronouns across sentences, agreement over the
-  whole text; commas from the graph as you type;
-- releases built by CI, with the models;
+  whole text;
 - swipe typing on real gestures, voice input as one more kind of evidence;
-- a one-handed "pseudo-cursor" pad that draws swipes, emoji search by name and
-  skin tones, more languages (Italian, Ukrainian), mapping the dictionaries
-  straight from the APK, dropping dictionary pages while the keyboard is
-  hidden (`MADV_DONTNEED`), a desktop build (launcher / file search).
+- the dictionaries mapped straight from the APK (no copy on the phone),
+  dropped from memory while the keyboard is hidden (`MADV_DONTNEED`);
+- releases built by CI with the models; F-Droid (IzzyOnDroid);
+- emoji skin tones, a one-handed "pseudo-cursor" pad that draws swipes, more
+  languages (Italian, Ukrainian), a desktop build (launcher / file search).
 
 ## License
 
