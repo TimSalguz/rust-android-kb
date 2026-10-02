@@ -25,7 +25,6 @@ import android.view.Window;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
-import android.view.KeyEvent;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -302,6 +301,35 @@ public final class RustKbService extends InputMethodService implements SensorEve
         }
     }
 
+    private void deleteCodePoints(InputConnection ic, int count) {
+        if (count <= 0) return;
+
+        CharSequence before = ic.getTextBeforeCursor(BEFORE_UNITS, 0);
+
+        // Terminal-like editors may not expose surrounding text at all.
+        // In that case, let the InputConnection handle Backspace itself.
+        if (before == null || before.length() == 0) {
+            ic.deleteSurroundingText(count, 0);
+            return;
+        }
+
+        int utf16Length = 0;
+        int codePoints = 0;
+
+        for (int i = before.length(); i > 0 && codePoints < count;) {
+            int cp = Character.codePointBefore(before, i);
+            int chars = Character.charCount(cp);
+
+            utf16Length += chars;
+            i -= chars;
+            codePoints++;
+        }
+
+        if (utf16Length > 0) {
+            ic.deleteSurroundingText(utf16Length, 0);
+        }
+    }
+
     /**
      * Ops are separated by NUL: C commit, Z composing, F finish, D delete, E enter,
      * K step over the next char, R replace the word around the cursor, P keyboard picker,
@@ -319,7 +347,9 @@ public final class RustKbService extends InputMethodService implements SensorEve
                 case 'Z': ic.setComposingText(arg, 1); break;
                 case 'F': ic.finishComposingText(); break;
                 // Counts are in chars (code points): an emoji is one, not two.
-                case 'D': ic.deleteSurroundingTextInCodePoints(Integer.parseInt(arg), 0); break;
+                case 'D':
+                    deleteCodePoints(ic, Integer.parseInt(arg));
+                    break;
                 case 'E': if (!sendDefaultEditorAction(true)) ic.commitText("\n", 1); break;
                 case 'K': ic.commitText("", 2); break;
                 case 'R': {
