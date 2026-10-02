@@ -38,7 +38,14 @@
     {
       # `nix develop`: everything android/build.sh and the Rust workspace need.
       devShells.${system}.default = pkgs.mkShell {
-        packages = [ rust pkgs.cargo-ndk pkgs.jdk17 android.androidsdk pkgs.python3 pkgs.zip ];
+        packages = [
+          rust
+          pkgs.cargo-ndk
+          pkgs.jdk17
+          android.androidsdk
+          (pkgs.python3.withPackages (ps: [ ps.numpy ]))
+          pkgs.zip
+        ];
         ANDROID_HOME = sdk;
         ANDROID_NDK_HOME = "${sdk}/ndk/${ndkVersion}";
       };
