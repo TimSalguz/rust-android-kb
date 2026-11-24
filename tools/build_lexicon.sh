@@ -33,10 +33,18 @@ done
 # Slang inflected by analogy with a model word (needs pymorphy3).
 ${PYTHON:-python3} tools/expand_slang.py data/slang.tsv --freq "$FREQ_DIR/ru_full.txt" > data/slang_forms.tsv
 
+# Russian Wiktionary fills the gaps of the older morphological dictionaries.
+wiktionary=()
+[ -s data/wiktionary_ru.txt ] && wiktionary=(--wordlist data/wiktionary_ru.txt:1)
+supplements=()
+for lang in ru en; do
+    [ -s data/wordfreq_${lang}.tsv ] && supplements+=(--supplement data/wordfreq_${lang}.tsv)
+done
 python3 tools/make_lexicon.py "$FREQ_DIR/ru_full.txt" "$FREQ_DIR/en_full.txt" \
     --words data/opencorpora_forms.tsv --cyrillic-words-only --latin-lists-only \
     --forms data/opencorpora_forms.tsv --wordlist data/hunspell_forms.txt:1 \
-    --extra data/slang.tsv --extra data/slang_forms.tsv "${lists[@]}" --yo-variants \
+    "${wiktionary[@]}" --extra data/slang.tsv --extra data/slang_forms.tsv "${lists[@]}" \
+    "${supplements[@]}" --yo-variants \
     -o data/lexicon.tsv
 
 # Names, places and abbreviations the keyboard writes with capitals.

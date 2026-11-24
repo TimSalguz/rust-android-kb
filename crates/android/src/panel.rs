@@ -1,11 +1,12 @@
-//! The emoji and clipboard panel: it takes the letters' place — tabs in the
-//! strip, a page of emoji or of copied texts, a bottom row of keys — opened by
-//! holding the comma.
+//! The emoji and clipboard panels take the letters' place: emoji tabs and a
+//! page in the strip, or a separate clipboard with its own header. Emoji open
+//! by holding the comma; the clipboard opens from its strip button.
 //!
 //! Nothing of it is kept: the recent emoji and the copied texts live in
 //! memory only, while the keyboard runs. The emoji list ships inside the
 //! library (`emoji.txt`, from Unicode's emoji-test.txt by tools/emoji.py) and
-//! is read the first time the panel opens; only the page shown is drawn.
+//! is read the first time the panel opens; only the rows visible in the
+//! current scroll position are drawn.
 
 use std::collections::HashSet;
 use std::sync::OnceLock;
@@ -30,8 +31,8 @@ const FOUND: usize = 32;
 pub const GROUPS: usize = 9;
 const GROUP_ICONS: [&str; GROUPS] = ["😀", "👋", "🐻", "🍔", "🚗", "⚽", "💡", "🔣", "🏁"];
 
-/// Tabs: the copied texts, the recent emoji, then the groups.
-pub const TABS: usize = GROUPS + 2;
+/// Emoji tabs: the recent ones, then the groups. The clipboard is a separate panel.
+pub const TABS: usize = GROUPS + 1;
 /// Emoji on a page, and copied texts.
 pub const COLS: usize = 8;
 pub const ROWS: usize = 4;
@@ -97,27 +98,34 @@ pub fn search(lang: Lang, query: &str, max: u16) -> Vec<&'static str> {
         Lang::Pt => 5,
     }];
     let score = |terms: &str, q: &str, stem: bool| -> Option<u8> {
-        let mut best: Option<u8> = None;
-        for (k, term) in terms.split('|').enumerate() {
-            let s = if term == q {
-                Some(if k == 0 { 0 } else { 1 })
-            } else if term.split(|c: char| !c.is_alphanumeric()).any(|w| w == q) {
-                Some(2)
-            } else if term
-                .split(|c: char| !c.is_alphanumeric())
-                .any(|w| w.len() > q.len() && w.starts_with(q))
-                && (stem || q.chars().count() >= 3)
-            {
-                Some(3)
-            } else {
-                None
-            };
-            best = match (best, s) {
-                (Some(b), Some(s)) => Some(b.min(s)),
-                (b, s) => b.or(s),
-            };
+        let mut total = 0u8;
+        for query_word in q.split_whitespace() {
+            let mut best: Option<u8> = None;
+            for (k, term) in terms.split('|').enumerate() {
+                let s = if term == query_word {
+                    Some(if k == 0 { 0 } else { 1 })
+                } else if term
+                    .split(|c: char| !c.is_alphanumeric())
+                    .any(|w| w == query_word)
+                {
+                    Some(2)
+                } else if term
+                    .split(|c: char| !c.is_alphanumeric())
+                    .any(|w| w.len() > query_word.len() && w.starts_with(query_word))
+                    && (stem || query_word.chars().count() >= 3)
+                {
+                    Some(3)
+                } else {
+                    None
+                };
+                best = match (best, s) {
+                    (Some(b), Some(s)) => Some(b.min(s)),
+                    (b, s) => b.or(s),
+                };
+            }
+            total = total.saturating_add(best?);
         }
-        best
+        Some(total)
     };
     let find = |q: &str, stem: bool| -> Vec<&'static str> {
         let mut hits: Vec<(u8, usize, &'static str)> = names
@@ -160,17 +168,15 @@ pub enum Tab {
 impl Tab {
     fn index(self) -> usize {
         match self {
-            Tab::Clips => 0,
-            Tab::Recent => 1,
-            Tab::Group(g) => 2 + g as usize,
+            Tab::Clips | Tab::Recent => 0,
+            Tab::Group(g) => 1 + g as usize,
         }
     }
 
     pub fn from_index(i: usize) -> Tab {
         match i {
-            0 => Tab::Clips,
-            1 => Tab::Recent,
-            i => Tab::Group((i - 2).min(GROUPS - 1) as u8),
+            0 => Tab::Recent,
+            i => Tab::Group((i - 1).min(GROUPS - 1) as u8),
         }
     }
 
@@ -186,6 +192,7 @@ impl Tab {
 /// Where a touch on the panel landed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hit {
+    Close,
     Tab(u8),
     /// An emoji or a copied text on the page (its place on the page).
     Cell(u8),
@@ -234,11 +241,13 @@ impl Stash {
     }
 }
 
-/// The open panel: which tab, which page of it.
+/// The open panel: which tab, which page of it, and how many emoji rows are
+/// scrolled above the visible grid (a fraction while a finger drags).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Panel {
     pub tab: Tab,
     pub page: usize,
+    pub scroll: f32,
 }
 
 impl Panel {
@@ -250,6 +259,15 @@ impl Panel {
                 Tab::Recent
             },
             page: 0,
+            scroll: 0.0,
+        }
+    }
+
+    pub fn clipboard() -> Panel {
+        Panel {
+            tab: Tab::Clips,
+            page: 0,
+            scroll: 0.0,
         }
     }
 
@@ -257,7 +275,9 @@ impl Panel {
     pub fn items(tab: Tab, stash: &Stash, max: u16) -> Vec<&str> {
         match tab {
             Tab::Clips => stash.clips.iter().map(String::as_str).collect(),
-            Tab::Recent if !stash.found.is_empty() => stash.found.iter().map(String::as_str).collect(),
+            Tab::Recent if !stash.found.is_empty() => {
+                stash.found.iter().map(String::as_str).collect()
+            }
             Tab::Recent => stash.recent.iter().map(String::as_str).collect(),
             Tab::Group(g) => groups(max)
                 .get(g as usize)
@@ -289,10 +309,38 @@ impl Panel {
             .collect()
     }
 
+    /// The copied texts on the page, or the emoji rows that can touch the
+    /// visible grid at the current fractional scroll.
+    pub fn visible_items<'a>(&self, stash: &'a Stash, max: u16) -> Vec<&'a str> {
+        if self.tab == Tab::Clips {
+            return self.page_items(stash, max);
+        }
+        Self::items(self.tab, stash, max)
+            .into_iter()
+            .skip(self.scroll.floor() as usize * COLS)
+            .take((ROWS + 1) * COLS)
+            .collect()
+    }
+
+    /// Drag the emoji grid vertically; `rows` is positive when content moves up.
+    pub fn scroll_by(&mut self, rows: f32, stash: &Stash, max: u16) {
+        if self.tab == Tab::Clips {
+            return;
+        }
+        let total = Self::items(self.tab, stash, max).len().div_ceil(COLS);
+        self.scroll = (self.scroll + rows).clamp(0.0, total.saturating_sub(ROWS) as f32);
+        self.page = self.scroll as usize / ROWS;
+    }
+
     /// On to the next page (`step` 1) or back (-1): past a tab's last page
     /// into the next tab, as if they were one long strip.
     pub fn flip(&mut self, step: i32, stash: &Stash, max: u16) {
         let pages = Self::pages(self.tab, stash, max);
+        if self.tab == Tab::Clips {
+            self.page = (self.page as i32 + step.signum()).clamp(0, pages as i32 - 1) as usize;
+            self.scroll = 0.0;
+            return;
+        }
         if step > 0 {
             if self.page + 1 < pages {
                 self.page += 1;
@@ -306,11 +354,13 @@ impl Panel {
             self.tab = Tab::from_index(self.tab.index() - 1);
             self.page = Self::pages(self.tab, stash, max) - 1;
         }
+        self.scroll = (self.page * ROWS) as f32;
     }
 
     pub fn open_tab(&mut self, tab: Tab) {
         self.tab = tab;
         self.page = 0;
+        self.scroll = 0.0;
     }
 
     pub fn selected(&self) -> usize {
@@ -332,14 +382,14 @@ impl Frame {
         self.width / TABS as f32
     }
 
-    /// An emoji's cell: (x, y, w, h).
-    pub fn cell(&self, i: usize) -> (f32, f32, f32, f32) {
+    /// An emoji's cell: (x, y, w, h). `scroll` is the fractional first row.
+    pub fn cell(&self, i: usize, scroll: f32) -> (f32, f32, f32, f32) {
         let (w, h) = (
             self.width / COLS as f32,
             (self.page_bottom - self.tabs_h) / ROWS as f32,
         );
         let (c, r) = (i % COLS, i / COLS);
-        (c as f32 * w, self.tabs_h + r as f32 * h, w, h)
+        (c as f32 * w, self.tabs_h + (r as f32 - scroll) * h, w, h)
     }
 
     /// A copied text's row: (x, y, w, h); its ✕ is the last `h` of it.
@@ -348,11 +398,14 @@ impl Frame {
         (0.0, self.tabs_h + i as f32 * h, self.width, h)
     }
 
-    pub fn hit(&self, tab: Tab, x: f32, y: f32) -> Option<Hit> {
+    pub fn hit(&self, tab: Tab, x: f32, y: f32, scroll: f32) -> Option<Hit> {
         if y < 0.0 || y >= self.page_bottom {
             return None;
         }
         if y < self.tabs_h {
+            if tab == Tab::Clips {
+                return Some(Hit::Close);
+            }
             let i = (x / self.tab_w()).floor().clamp(0.0, (TABS - 1) as f32);
             return Some(Hit::Tab(i as u8));
         }
@@ -365,10 +418,11 @@ impl Frame {
                 Hit::Cell(r)
             });
         }
-        let (_, _, w, h) = self.cell(0);
+        let (_, _, w, h) = self.cell(0, 0.0);
         let c = ((x / w).floor() as usize).min(COLS - 1);
-        let r = (((y - self.tabs_h) / h).floor() as usize).min(ROWS - 1);
-        Some(Hit::Cell((r * COLS + c) as u8))
+        let first = scroll.floor();
+        let r = ((y - self.tabs_h) / h + scroll).floor().max(first) as usize;
+        Some(Hit::Cell((r * COLS + c - first as usize * COLS) as u8))
     }
 }
 
@@ -414,9 +468,10 @@ mod tests {
         p.flip(-1, &stash, u16::MAX);
         assert_eq!((p.tab, p.page), (Tab::Recent, 0));
         p.flip(-1, &stash, u16::MAX);
-        assert_eq!((p.tab, p.page), (Tab::Clips, 0));
-        p.flip(-1, &stash, u16::MAX);
-        assert_eq!((p.tab, p.page), (Tab::Clips, 0));
+        assert_eq!((p.tab, p.page), (Tab::Recent, 0));
+        let mut clips = Panel::clipboard();
+        clips.flip(1, &stash, u16::MAX);
+        assert_eq!((clips.tab, clips.page), (Tab::Clips, 0));
         // Back from a group: the last page of the one before.
         p.open_tab(Tab::Group(1));
         p.flip(-1, &stash, u16::MAX);
@@ -433,9 +488,40 @@ mod tests {
         assert!(search(Lang::Ru, "россия", u16::MAX).contains(&"🇷🇺"));
         // Another form of the word, by its first letters.
         assert!(search(Lang::Ru, "котом", u16::MAX).contains(&"😺"));
+        assert!(search(Lang::Ru, "черный кот", u16::MAX).contains(&"🐈‍⬛"));
         assert!(search(Lang::En, "cat", u16::MAX).contains(&"🐈"));
         assert!(search(Lang::Ru, "к", u16::MAX).is_empty());
         assert!(search(Lang::Ru, "фывапр", u16::MAX).is_empty());
+    }
+
+    #[test]
+    fn emoji_scroll_by_fractional_rows_and_keep_their_hit_places() {
+        let stash = Stash::default();
+        let mut p = Panel::new(&stash);
+        p.open_tab(Tab::Group(0));
+        p.scroll_by(1.25, &stash, u16::MAX);
+        assert_eq!(p.scroll, 1.25);
+        assert_eq!(
+            p.visible_items(&stash, u16::MAX)[0],
+            Panel::items(p.tab, &stash, u16::MAX)[COLS]
+        );
+        let frame = Frame {
+            width: 800.0,
+            tabs_h: 40.0,
+            page_bottom: 400.0,
+        };
+        let (x, y, w, h) = frame.cell(0, p.scroll.fract());
+        assert_eq!(
+            frame.hit(p.tab, x + w / 2.0, y + h / 2.0, p.scroll),
+            Some(Hit::Cell(0))
+        );
+        p.scroll_by(-100.0, &stash, u16::MAX);
+        assert_eq!(p.scroll, 0.0);
+        p.scroll_by(1000.0, &stash, u16::MAX);
+        assert!(p.scroll > 1.0);
+        assert!(!p.visible_items(&stash, u16::MAX).is_empty());
+        p.flip(1, &stash, u16::MAX);
+        assert_eq!(p.scroll, (p.page * ROWS) as f32);
     }
 
     #[test]

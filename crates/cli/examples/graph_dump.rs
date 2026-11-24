@@ -18,7 +18,9 @@ fn main() {
         .and_then(|e| e.open_lemmas(&a[2]))
         .and_then(|e| e.open_sentence_parser(&a[3]))
         .expect("engine");
-    let parser = engine.sentence_parser().expect("a parser of whole sentences");
+    let parser = engine
+        .sentence_parser()
+        .expect("a parser of whole sentences");
     let lemmas = engine.lemma_vectors().expect("lemma vectors");
     for line in std::fs::read_to_string(&a[4]).expect("parses").lines() {
         let f: Vec<&str> = line.split('\t').collect();
@@ -26,7 +28,11 @@ fn main() {
             continue;
         }
         let words: Vec<&str> = f[1].split(' ').collect();
-        if words.len() > parser.places() || words.iter().any(|w| w.chars().any(|c| c.is_ascii_alphabetic())) {
+        if words.len() > parser.places()
+            || words
+                .iter()
+                .any(|w| w.chars().any(|c| c.is_ascii_alphabetic()))
+        {
             continue;
         }
         let read: Option<Vec<Word>> = words.iter().map(|w| engine.parser_word(w)).collect();
@@ -36,9 +42,18 @@ fn main() {
         let heads: Vec<usize> = g
             .heads
             .iter()
-            .map(|row| (0..row.len()).max_by(|&x, &y| row[x].total_cmp(&row[y])).unwrap_or(0).min(n))
+            .map(|row| {
+                (0..row.len())
+                    .max_by(|&x, &y| row[x].total_cmp(&row[y]))
+                    .unwrap_or(0)
+                    .min(n)
+            })
             .collect();
-        let rels: Vec<&str> = g.relations.iter().map(|&(k, _)| parser.relations()[k].as_str()).collect();
+        let rels: Vec<&str> = g
+            .relations
+            .iter()
+            .map(|&(k, _)| parser.relations()[k].as_str())
+            .collect();
         let tags: Vec<String> = words
             .iter()
             .zip(&rels)
@@ -48,7 +63,11 @@ fn main() {
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             f[0],
             f[1],
-            heads.iter().map(|h| h.to_string()).collect::<Vec<_>>().join(" "),
+            heads
+                .iter()
+                .map(|h| h.to_string())
+                .collect::<Vec<_>>()
+                .join(" "),
             rels.join(" "),
             tags.join("|"),
             f[3],

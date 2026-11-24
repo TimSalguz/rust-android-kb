@@ -456,9 +456,9 @@ pub enum Casing {
 }
 
 mod commas;
-pub mod proof;
 mod context;
 mod decode;
+pub mod proof;
 pub use context::Context;
 pub use decode::Evidence;
 
@@ -524,6 +524,8 @@ fn map_file<P: AsRef<Path>>(path: P) -> io::Result<Map<Mmap>> {
     let file = File::open(path)?;
     // SAFETY: the blob is a read-only, prebuilt asset; we don't mutate it.
     let mmap = unsafe { Mmap::map(&file)? };
+    #[cfg(unix)]
+    let _ = mmap.advise(memmap2::Advice::WillNeed);
     Map::new(mmap).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
@@ -610,6 +612,12 @@ impl<D: AsRef<[u8]>> Engine<D> {
         remap(word).is_some_and(|k| {
             self.map.contains_key(&k) || self.user.as_ref().is_some_and(|u| u.contains_key(&k))
         })
+    }
+
+    /// A dictionary word or a conservatively supported new derivation. This
+    /// guards automatic replacement; it does not add candidates to the search.
+    pub fn plausible(&self, word: &str) -> bool {
+        crate::morph::plausible(word, |w| self.contains(w))
     }
 
     /// The words the user added by hand (replaces the previous set).

@@ -31,7 +31,10 @@ fn main() {
         if words.len() != marks.len() || words.len() > parser.places() {
             continue;
         }
-        if words.iter().any(|w| w.chars().any(|c| c.is_ascii_alphabetic())) {
+        if words
+            .iter()
+            .any(|w| w.chars().any(|c| c.is_ascii_alphabetic()))
+        {
             continue;
         }
         // The commas out, the other marks as written.
@@ -64,7 +67,10 @@ fn main() {
         ends += 1;
         ends_right += usize::from(want == got);
     }
-    println!("{ends} sentences, {:.1} ms each; commas in the text {gold}", t * 1e3 / ends as f64);
+    println!(
+        "{ends} sentences, {:.1} ms each; commas in the text {gold}",
+        t * 1e3 / ends as f64
+    );
     for (k, l) in levels.iter().enumerate() {
         let (n, ok) = at[k];
         println!(
@@ -73,5 +79,8 @@ fn main() {
             100.0 * ok as f64 / gold.max(1) as f64
         );
     }
-    println!("sentence ends right {:.1}%", 100.0 * ends_right as f64 / ends as f64);
+    println!(
+        "sentence ends right {:.1}%",
+        100.0 * ends_right as f64 / ends as f64
+    );
 }

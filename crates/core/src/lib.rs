@@ -16,6 +16,7 @@ pub mod gram;
 pub mod keyboard;
 pub mod lemmas;
 pub mod marks;
+pub mod morph;
 pub mod parser;
 pub mod store;
 

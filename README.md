@@ -79,20 +79,21 @@ memory-mapped files. See [`docs/DESIGN.md`](docs/DESIGN.md)
   without punctuation) gives the chance of every link as you type — a
   word waiting for its head says how it will hang on it, so a predicate agrees
   with its real subject (`kbcore::parser`).
-- **Proofreading:** after «.», «?», «!» — or Enter with no mark — the
-  finished sentence is read whole by a second parser (0.9 MB) and the commas
-  its graph is sure of go in by the rules of Russian (`kbcore::marks`): 97% of
-  them are right on held-out sentences typed without commas, and with the
-  commas put in as typed the keyboard finds 39% of them (27% before). ⌫ right
-  after takes them out.
+- **Proofreading:** during a 240 ms pause after a word, and after «.», «?»,
+  «!» — or Enter with no mark — the sentence is read whole by a second parser
+  (0.9 MB) and the commas its graph is sure of go in by the rules of Russian
+  (`kbcore::marks`): 97% of them are right on held-out sentences typed without
+  commas, and with the commas put in as typed the keyboard finds 39% of them
+  (27% before). ⌫ right after takes them out.
 - **Sense classes:** 20 k lemmas in 512 classes of words that share
   sentences (PPMI + SVD + k-means, `tools/build_topics.py`), 0.9 MB: a word
   whose class goes with the sentence's gains («рыба гниёт с головы»).
 - **Emoji and clipboard:** hold the comma — emoji by group (only those the
-  phone's font draws; the list is read on first open, only the page shown is
-  drawn), the recent ones, and the texts copied while the keyboard runs; a
-  text just copied is offered in the strip. All in memory only; texts an app
-  marks sensitive (passwords) are skipped.
+  phone's font draws; the list is read on first open, only the rows visible
+  in the current scroll position are drawn), the recent ones, and a search
+  with its own query row and a row of results. The 📋 button in the strip opens the clipboard separately from the
+  emoji; a text just copied is also offered in the strip. All in memory only;
+  texts an app marks sensitive (passwords) are skipped.
 - **Context rules** for words one slip apart, learned offline from the next
   word (decision lists): a slipped real word is put back 71% of the time
   (68.7% without the rules), with no change to correctly typed words
@@ -104,12 +105,17 @@ memory-mapped files. See [`docs/DESIGN.md`](docs/DESIGN.md)
   grip lands — outward past a thumb's reach, where long reaches fall short.
   Tilts and offsets only, never text. The one-handed layout can follow the
   grip too (a setting, off by default).
+- **Productive unknown words:** a word composed of known roots, productive
+  Russian affixes, or an English word typed in Cyrillic is not automatically
+  replaced just because the finite dictionary lacks it (`kbcore::morph`).
 - **Private by construction:** nothing is learned or sent; the user dictionary
   changes only by explicit actions. So a private window keeps its suggestions —
   only passwords, addresses and e-mail fields go without.
 - **Android IME:** a thin Java shim (the platform requires an
   `InputMethodService`) forwards touches and paints a draw list produced in Rust.
-  The APK is built without Gradle.
+  Dictionary work and frame construction run on one native worker; the Android
+  UI thread only applies editor operations and paints immutable frames. The APK
+  is built without Gradle.
 
 ## Layout
 
@@ -127,7 +133,7 @@ memory-mapped files. See [`docs/DESIGN.md`](docs/DESIGN.md)
 
 ```sh
 nix develop                     # Rust (+ aarch64-linux-android), Android SDK/NDK, JDK
-pip install pymorphy3 pymorphy3-dicts-ru   # once: OpenCorpora word forms
+pip install pymorphy3 pymorphy3-dicts-ru wordfreq   # once: word forms and frequencies
 tools/fetch_sources.sh && tools/build_lexicon.sh   # → data/lexicon.tsv (~3.5 M words)
 cargo run --release -p index-builder -- data/lexicon.tsv dict.fst
 cargo run --release -p cli                       # interactive TUI
@@ -177,7 +183,7 @@ keyboard's own words follow the phone's language (`crates/android/src/i18n.rs`).
 On the keyboard: swipe the space bar to change the language, swipe up on it
 for the next likeliest word, hold it for another keyboard or the settings;
 ⌫ right after a correction brings back what was typed; hold the comma for
-emoji and what was copied lately.
+emoji, and use 📋 in the top bar for what was copied lately.
 
 ## Roadmap
 
@@ -187,7 +193,6 @@ Next:
 - the sentence's graph taught on chat-like text too: short spoken phrases
   («Угу, да, конечно», «Привет, Саша!») and lists without «и» are what the
   commas' suite (`tests/commas-ru.tsv`, 75 of 88 right) misses most;
-- commas from the graph as you type, not only when the sentence ends;
 - proofreading beyond commas: each word of a finished sentence read again
   with the context on both sides (-тся/-ться, «в течение»), dashes and «?»;
 - the text's graph: names and pronouns across sentences, agreement over the
@@ -212,8 +217,9 @@ The data built into the app comes from open sources, each under its own
 license (details and attributions: [`data/README.md`](data/README.md) and the
 `data/<language>/README.md` of each language pack):
 
-- word lists and counts — OpenCorpora, hermitdave/FrequencyWords, LanguageTool
-  and Wiktionary (via kaikki.org): CC BY-SA; LibreOffice Hunspell dictionaries:
+- word lists and counts — OpenCorpora, hermitdave/FrequencyWords, wordfreq,
+  LanguageTool and Wiktionary (via kaikki.org): CC BY-SA and source-specific
+  notices; LibreOffice Hunspell dictionaries:
   BSD-style, MPL 2.0 or LGPL; SCOWL: permissive. The derived word lists are
   distributed under CC BY-SA 4.0;
 - context models — Tatoeba (CC BY 2.0 FR) and the Leipzig Corpora Collection

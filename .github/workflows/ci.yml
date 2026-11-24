@@ -49,7 +49,7 @@ jobs:
       - name: Dictionary
         run: |
           if [ ! -s data/lexicon.tsv ] || [ ! -s data/bigrams.tsv ]; then
-            pip install -q pymorphy3 pymorphy3-dicts-ru
+            pip install -q pymorphy3 pymorphy3-dicts-ru wordfreq
             sudo apt-get install -y -qq hunspell-tools hunspell-ru > /dev/null
             LEIPZIG=1 tools/fetch_sources.sh
             tools/build_lexicon.sh

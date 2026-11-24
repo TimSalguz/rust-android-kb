@@ -86,10 +86,13 @@ pub struct Settings {
     pub touch_points: bool,
     /// Key row height, percent of the default.
     pub height: u32,
+    /// Extra empty space below the keys, in dp, for OEM navigation bars that
+    /// report no usable inset.
+    pub bottom_padding: u32,
     /// Words drawn across the keys without lifting the finger.
     pub gestures: bool,
     /// A text just copied is offered in the strip, and the copies made while
-    /// the keyboard runs are in the panel's 📋 tab (in memory only).
+    /// the keyboard runs are in the separate 📋 panel (in memory only).
     pub clipboard: bool,
     /// A comma that is almost surely due goes in by itself (⌫ takes it out).
     pub auto_commas: bool,
@@ -140,23 +143,24 @@ impl Default for Settings {
             wallpaper_colors: true,
             autocorrect: true,
             strength: Strength::Normal,
-            live_correction: true,
-            strip: Strip::Two,
+            live_correction: false,
+            strip: Strip::Full,
             auto_caps: true,
             haptic: true,
             lang_switch: LangSwitch::Both,
             one_row: false,
             touch_points: true,
             height: 100,
+            bottom_padding: 0,
             gestures: true,
             clipboard: true,
             auto_commas: true,
             yo: true,
             gesture_pace: true,
-            grip_indicator: true,
+            grip_indicator: false,
             grip_offsets: true,
             emoji_on_enter: false,
-            borderless: false,
+            borderless: true,
             lang_from_text: true,
             arc_layout: false,
             block_offensive: true,
@@ -170,6 +174,7 @@ impl Default for Settings {
 }
 
 enum Kind {
+    Section,
     Bool,
     /// Two buttons side by side: this one and the one of the key given.
     ActionPair(&'static str),
@@ -190,6 +195,46 @@ struct Field {
 
 const FIELDS: &[Field] = &[
     Field {
+        key: "section.size",
+        kind: Kind::Section,
+    },
+    Field {
+        key: "height",
+        kind: Kind::Choice(&["90", "100", "115"]),
+    },
+    Field {
+        key: "bottom_padding",
+        kind: Kind::Choice(&["0", "8", "16", "24", "32", "48"]),
+    },
+    Field {
+        key: "haptic",
+        kind: Kind::Bool,
+    },
+    Field {
+        key: "section.appearance",
+        kind: Kind::Section,
+    },
+    Field {
+        key: "theme",
+        kind: Kind::Choice(&["system", "light", "dark", "black"]),
+    },
+    Field {
+        key: "borderless",
+        kind: Kind::Bool,
+    },
+    Field {
+        key: "wallpaper_colors",
+        kind: Kind::Bool,
+    },
+    Field {
+        key: "emoji_on_enter",
+        kind: Kind::Bool,
+    },
+    Field {
+        key: "section.general",
+        kind: Kind::Section,
+    },
+    Field {
         key: "languages",
         kind: Kind::Order(&[
             ("ru", "Русский"),
@@ -201,20 +246,8 @@ const FIELDS: &[Field] = &[
         ]),
     },
     Field {
-        key: "theme",
-        kind: Kind::Choice(&["system", "light", "dark", "black"]),
-    },
-    Field {
-        key: "borderless",
-        kind: Kind::Bool,
-    },
-    Field {
-        key: "emoji_on_enter",
-        kind: Kind::Bool,
-    },
-    Field {
-        key: "wallpaper_colors",
-        kind: Kind::Bool,
+        key: "section.correction",
+        kind: Kind::Section,
     },
     Field {
         key: "autocorrect",
@@ -253,16 +286,16 @@ const FIELDS: &[Field] = &[
         kind: Kind::Bool,
     },
     Field {
-        key: "haptic",
-        kind: Kind::Bool,
-    },
-    Field {
         key: "lang_switch",
         kind: Kind::Choice(&["both", "key", "swipe"]),
     },
     Field {
         key: "lang_from_text",
         kind: Kind::Bool,
+    },
+    Field {
+        key: "section.typing",
+        kind: Kind::Section,
     },
     Field {
         key: "one_row",
@@ -273,16 +306,16 @@ const FIELDS: &[Field] = &[
         kind: Kind::Bool,
     },
     Field {
-        key: "height",
-        kind: Kind::Choice(&["90", "100", "115"]),
-    },
-    Field {
         key: "gestures",
         kind: Kind::Bool,
     },
     Field {
         key: "gesture_pace",
         kind: Kind::Bool,
+    },
+    Field {
+        key: "section.grip",
+        kind: Kind::Section,
     },
     Field {
         key: "calibrate_left",
@@ -315,6 +348,10 @@ const FIELDS: &[Field] = &[
     Field {
         key: "grip_reset",
         kind: Kind::Action,
+    },
+    Field {
+        key: "section.developer",
+        kind: Kind::Section,
     },
     Field {
         key: "debug_log",
@@ -364,6 +401,7 @@ impl Settings {
             "one_row" => flag(self.one_row),
             "touch_points" => flag(self.touch_points),
             "height" => self.height.to_string(),
+            "bottom_padding" => self.bottom_padding.to_string(),
             "gestures" => flag(self.gestures),
             "clipboard" => flag(self.clipboard),
             "auto_commas" => flag(self.auto_commas),
@@ -447,6 +485,10 @@ impl Settings {
                 Ok(h) if (70..=140).contains(&h) => self.height = h,
                 _ => return false,
             },
+            "bottom_padding" => match value.parse::<u32>() {
+                Ok(p) if p <= 64 => self.bottom_padding = p,
+                _ => return false,
+            },
             "gestures" => self.gestures = on,
             "clipboard" => self.clipboard = on,
             "auto_commas" => self.auto_commas = on,
@@ -527,6 +569,7 @@ impl Settings {
     pub fn to_text(&self) -> String {
         FIELDS
             .iter()
+            .filter(|f| !matches!(f.kind, Kind::Section))
             .flat_map(|f| match f.kind {
                 Kind::ActionPair(second) => vec![f.key, second],
                 _ => vec![f.key],
@@ -556,6 +599,7 @@ impl Settings {
                 let value = self.get(f.key).unwrap_or_default();
                 let label = t(ui, &format!("set.{}", f.key));
                 let (kind, opts) = match f.kind {
+                    Kind::Section => ("section", String::new()),
                     Kind::Bool => ("bool", String::new()),
                     Kind::Action => ("action", String::new()),
                     Kind::ActionPair(second) => (
@@ -634,11 +678,27 @@ mod tests {
             let flipped = if was == "1" { "0" } else { "1" };
             let mut s = Settings::default();
             assert!(s.set(f.key, flipped), "{} takes a value", f.key);
-            assert_eq!(s.get(f.key).as_deref(), Some(flipped), "{} reads back", f.key);
+            assert_eq!(
+                s.get(f.key).as_deref(),
+                Some(flipped),
+                "{} reads back",
+                f.key
+            );
             for g in FIELDS.iter().filter(|g| g.key != f.key) {
-                assert_eq!(s.get(g.key), base.get(g.key), "setting {} changed {}", f.key, g.key);
+                assert_eq!(
+                    s.get(g.key),
+                    base.get(g.key),
+                    "setting {} changed {}",
+                    f.key,
+                    g.key
+                );
             }
-            assert_eq!(Settings::parse(&s.to_text()), s, "{} survives a save", f.key);
+            assert_eq!(
+                Settings::parse(&s.to_text()),
+                s,
+                "{} survives a save",
+                f.key
+            );
         }
         // A file from an older version (keys missing, one unknown): the
         // keys there keep their values, the new ones take their defaults.
@@ -659,7 +719,11 @@ mod tests {
     fn every_setting_has_a_label() {
         for f in FIELDS {
             for ui in [Lang::Ru, Lang::En, Lang::De, Lang::Fr, Lang::Es, Lang::Pt] {
-                assert!(!t(ui, &format!("set.{}", f.key)).is_empty(), "{} ({ui:?})", f.key);
+                assert!(
+                    !t(ui, &format!("set.{}", f.key)).is_empty(),
+                    "{} ({ui:?})",
+                    f.key
+                );
             }
         }
     }
@@ -704,7 +768,9 @@ mod tests {
         for entry in s.schema(Lang::Ru) {
             let f: Vec<&str> = entry.split('\t').collect();
             assert_eq!(f.len(), 5, "{entry}");
-            assert_eq!(s.get(f[0]).as_deref(), Some(f[3]));
+            if f[1] != "section" {
+                assert_eq!(s.get(f[0]).as_deref(), Some(f[3]));
+            }
         }
     }
 }

@@ -21,7 +21,10 @@ fn main() {
         .and_then(|e| e.open_lemmas(&a[2]))
         .and_then(|e| e.open_sentence_parser(&a[3]))
         .expect("engine");
-    let places = engine.sentence_parser().expect("a parser of whole sentences").places();
+    let places = engine
+        .sentence_parser()
+        .expect("a parser of whole sentences")
+        .places();
     let graph_levels = [0.0f32, 0.5, 0.8, 0.9, 0.95, 0.97];
     let odds_levels = [f32::NEG_INFINITY, -2.0, -1.0, 0.0, 1.0];
     let mut table = vec![vec![(0usize, 0usize); odds_levels.len()]; graph_levels.len()];
@@ -47,10 +50,16 @@ fn main() {
     let (mut explained, mut head_only) = ((0usize, 0usize), (0usize, 0usize));
     // The head's own commas, by the teacher's relations around the gap: the
     // word before's, the word after's — how many, how many right.
-    let mut unexplained: std::collections::BTreeMap<(String, String), (usize, usize)> = Default::default();
+    let mut unexplained: std::collections::BTreeMap<(String, String), (usize, usize)> =
+        Default::default();
     // The other marks, from the text typed with none: by kind and level —
     // put, right; and the text's own count.
-    let other = [(Mark::Dash, '—'), (Mark::Colon, ':'), (Mark::OpenQuote, '«'), (Mark::CloseQuote, '»')];
+    let other = [
+        (Mark::Dash, '—'),
+        (Mark::Colon, ':'),
+        (Mark::OpenQuote, '«'),
+        (Mark::CloseQuote, '»'),
+    ];
     let mark_levels = [0.5f32, 0.7, 0.8, 0.9, 0.95];
     let mut other_put = vec![vec![(0usize, 0usize); mark_levels.len()]; other.len()];
     let mut other_gold = vec![0usize; other.len()];
@@ -60,10 +69,12 @@ fn main() {
     let mut model = (0usize, 0usize);
     // Where the graph is sure (≥ 0.95) and the model mildly against (odds in
     // [-3, 0)): how right each rule is.
-    let mut band: std::collections::BTreeMap<(&'static str, &'static str), (usize, usize)> = Default::default();
+    let mut band: std::collections::BTreeMap<(&'static str, &'static str), (usize, usize)> =
+        Default::default();
     // Where the graph is less sure (0.6…0.8, or 0.9…0.95), by rule and by
     // whether the model is for (odds ≥ 0) or a little against (-1…0).
-    let mut less: std::collections::BTreeMap<(&'static str, &'static str), (usize, usize)> = Default::default();
+    let mut less: std::collections::BTreeMap<(&'static str, &'static str), (usize, usize)> =
+        Default::default();
     // Each comma of the text the keyboard doesn't put: why (no rule put
     // one there; the graph under 0.8; the model against it) and how the word
     // after it hangs in the teacher's parse.
@@ -77,15 +88,25 @@ fn main() {
         }
         let words: Vec<&str> = f[1].split(' ').collect();
         let marks: Vec<&str> = f[6].split(' ').collect();
-        let gold_rel: Vec<&str> = f[4].split(' ').map(|r| r.split(':').next().unwrap_or(r)).collect();
+        let gold_rel: Vec<&str> = f[4]
+            .split(' ')
+            .map(|r| r.split(':').next().unwrap_or(r))
+            .collect();
         if words.len() != marks.len() || words.len() > places {
             continue;
         }
-        if words.iter().any(|w| w.chars().any(|c| c.is_ascii_alphabetic())) {
+        if words
+            .iter()
+            .any(|w| w.chars().any(|c| c.is_ascii_alphabetic()))
+        {
             continue;
         }
         let typed: Vec<String> = marks.iter().map(|m| m.replace([',', '_'], "")).collect();
-        let pairs: Vec<(&str, &str)> = words.iter().zip(&typed).map(|(w, m)| (*w, m.as_str())).collect();
+        let pairs: Vec<(&str, &str)> = words
+            .iter()
+            .zip(&typed)
+            .map(|(w, m)| (*w, m.as_str()))
+            .collect();
         let t0 = std::time::Instant::now();
         let Some((put, _)) = engine.sentence_marks(&pairs) else {
             continue;
@@ -106,7 +127,11 @@ fn main() {
                 other_gold[k] += (0..words.len()).filter(|&i| marks[i].contains(ch)).count();
                 for p in put.iter().filter(|p| p.mark == mark) {
                     let right = usize::from(marks[p.before].contains(ch));
-                    let c = if p.learned >= 0.0 { p.learned } else { p.chance };
+                    let c = if p.learned >= 0.0 {
+                        p.learned
+                    } else {
+                        p.chance
+                    };
                     for (l, &t) in mark_levels.iter().enumerate() {
                         if c >= t {
                             other_put[k][l].0 += 1;
@@ -161,10 +186,15 @@ fn main() {
             let along = graph[i].is_some_and(|c| c >= 0.8)
                 && ["gerund", "participle after", "relative", "said"].contains(&rule[i])
                 && learned[i] >= 0.1
-                && (1..words.len()).any(|x| x != i && by[x].is_some() && by[x] == by[i] && accepted[x]);
+                && (1..words.len())
+                    .any(|x| x != i && by[x].is_some() && by[x] == by[i] && accepted[x]);
             if accepted[i] {
                 let by_rule = graph[i].is_some_and(|c| c >= 0.5);
-                let t = if by_rule { &mut explained } else { &mut head_only };
+                let t = if by_rule {
+                    &mut explained
+                } else {
+                    &mut head_only
+                };
                 t.0 += 1;
                 t.1 += right;
                 if !by_rule {
@@ -232,16 +262,27 @@ fn main() {
                                 && graph[x].is_some_and(|c| c >= g)
                                 && odds[x] >= m
                         });
-                    let floors = [("subordinate first", -3.0), ("relative", -2.0), ("said", -2.0),
-                                  ("gerund", -2.0), ("participle after", -1.0), ("ccomp", -1.0),
-                                  ("parenthetical", -1.0)];
-                    let less = [("subordinate", 0.6, 1.0), ("subordinate first", 0.6, 1.0),
-                                ("address", 0.6, 0.0), ("address", 0.9, -1.0)];
+                    let floors = [
+                        ("subordinate first", -3.0),
+                        ("relative", -2.0),
+                        ("said", -2.0),
+                        ("gerund", -2.0),
+                        ("participle after", -1.0),
+                        ("ccomp", -1.0),
+                        ("parenthetical", -1.0),
+                    ];
+                    let less = [
+                        ("subordinate", 0.6, 1.0),
+                        ("subordinate first", 0.6, 1.0),
+                        ("address", 0.6, 0.0),
+                        ("address", 0.9, -1.0),
+                    ];
                     let trusted = graph[i].is_some_and(|c| c >= 0.8) && learned[i] >= 0.5
                         || graph[i].is_some_and(|c| c >= 0.95)
-                        && floors.iter().any(|&(r, f)| r == rule[i] && odds[i] >= f)
+                            && floors.iter().any(|&(r, f)| r == rule[i] && odds[i] >= f)
                         || graph[i].is_some_and(|c| {
-                            less.iter().any(|&(r, gg, o)| r == rule[i] && c >= gg && odds[i] >= o)
+                            less.iter()
+                                .any(|&(r, gg, o)| r == rule[i] && c >= gg && odds[i] >= o)
                         });
                     if put || partner || trusted || sure {
                         paired[k][j].0 += 1;
@@ -306,14 +347,21 @@ fn main() {
         "{sentences} sentences, {:.1} ms each; commas in the text {gold}",
         t * 1e3 / sentences.max(1) as f64
     );
-    println!("the comma model alone (odds ≥ {COMMA_SURE}): {}", pct(model));
+    println!(
+        "the comma model alone (odds ≥ {COMMA_SURE}): {}",
+        pct(model)
+    );
     if head_alone.iter().any(|c| c.0 > 0) {
-        println!("the comma head (≥ t) — by itself, and with the rules' policy — put, right, found:");
+        println!(
+            "the comma head (≥ t) — by itself, and with the rules' policy — put, right, found:"
+        );
         for (h, t) in head_levels.iter().enumerate() {
             println!("  {t:>5.2}  {}   {}", pct(head_alone[h]), pct(head_with[h]));
         }
     }
-    println!("the head sure (≥ h), or a rule (≥ 0.8) the head isn't against (≥ v) — put, right, found:");
+    println!(
+        "the head sure (≥ h), or a rule (≥ 0.8) the head isn't against (≥ v) — put, right, found:"
+    );
     for (a, h) in hs.iter().enumerate() {
         print!("  h {h:.1}");
         for (b, v) in vs.iter().enumerate() {
@@ -321,14 +369,27 @@ fn main() {
         }
         println!();
     }
-    println!("h 0.7, v 0.3 and a phrase's other comma along (head ≥ 0.1): {}", pct(headed_pairs));
-    println!("the set asides' commas put (veto 0.05): {}", pct(set_phrases));
-    println!("the keyboard's commas with a rule behind them: {}; by the head alone: {}", pct(explained), pct(head_only));
+    println!(
+        "h 0.7, v 0.3 and a phrase's other comma along (head ≥ 0.1): {}",
+        pct(headed_pairs)
+    );
+    println!(
+        "the set asides' commas put (veto 0.05): {}",
+        pct(set_phrases)
+    );
+    println!(
+        "the keyboard's commas with a rule behind them: {}; by the head alone: {}",
+        pct(explained),
+        pct(head_only)
+    );
     let mut kinds: Vec<_> = unexplained.iter().collect();
     kinds.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
     println!("the head's own, by the relations around the gap (before | after): put, right");
     for ((a, b), (n, ok)) in kinds.iter().take(15) {
-        println!("  {a:>10} | {b:<10} {n:>4} {:>5.1}%", 100.0 * *ok as f64 / (*n).max(1) as f64);
+        println!(
+            "  {a:>10} | {b:<10} {n:>4} {:>5.1}%",
+            100.0 * *ok as f64 / (*n).max(1) as f64
+        );
     }
     println!("a rule's comma (≥ 0.8) the head gives at least t (0.3, 0.4, …, 0.8):");
     for (h, t) in [0.3f32, 0.4, 0.5, 0.6, 0.7, 0.8].iter().enumerate() {
@@ -357,34 +418,64 @@ fn main() {
             println!("  {ch} ({:>4})  {}", other_gold[k], cells.join(" |"));
         }
     }
-    println!("commas of the text not put ({} put), by why and the next word's relation:", put_n);
+    println!(
+        "commas of the text not put ({} put), by why and the next word's relation:",
+        put_n
+    );
     let mut by_why: std::collections::BTreeMap<&str, usize> = Default::default();
     for ((w, _), n) in &lost {
         *by_why.entry(w.as_str()).or_default() += n;
     }
     for (w, n) in &by_why {
-        let mut rels: Vec<(&String, &usize)> = lost.iter().filter(|((ww, _), _)| ww == w).map(|((_, r), n)| (r, n)).collect();
+        let mut rels: Vec<(&String, &usize)> = lost
+            .iter()
+            .filter(|((ww, _), _)| ww == w)
+            .map(|((_, r), n)| (r, n))
+            .collect();
         rels.sort_by(|a, b| b.1.cmp(a.1));
-        let top: Vec<String> = rels.iter().take(8).map(|(r, n)| format!("{r} {n}")).collect();
+        let top: Vec<String> = rels
+            .iter()
+            .take(8)
+            .map(|(r, n)| format!("{r} {n}"))
+            .collect();
         println!("  {w:<14} {n:>5}: {}", top.join(", "));
     }
     println!("the graph less sure, by rule:");
     for ((r, k), (n, ok)) in &less {
-        println!("  {r:<22} {k:<20} {n:>5} {:>5.1}%", 100.0 * *ok as f64 / (*n).max(1) as f64);
+        println!(
+            "  {r:<22} {k:<20} {n:>5} {:>5.1}%",
+            100.0 * *ok as f64 / (*n).max(1) as f64
+        );
     }
     println!("the graph sure (≥ 0.95), the model against (odds -3…0), by rule and odds:");
     for ((r, bin), (n, ok)) in &band {
-        println!("  {r:<22} {bin:<6} {n:>5} {:>5.1}%", 100.0 * *ok as f64 / (*n).max(1) as f64);
+        println!(
+            "  {r:<22} {bin:<6} {n:>5} {:>5.1}%",
+            100.0 * *ok as f64 / (*n).max(1) as f64
+        );
     }
     for (title, table) in [
         ("the graph (sure ≥ g) and the model's odds ≥ m", &table),
-        ("the same, or the model sure (as the keyboard puts them)", &union),
-        ("the same, or the other comma of its pair let through (odds ≥ -2.5)", &paired),
+        (
+            "the same, or the model sure (as the keyboard puts them)",
+            &union,
+        ),
+        (
+            "the same, or the other comma of its pair let through (odds ≥ -2.5)",
+            &paired,
+        ),
     ] {
         println!("{title} — put, right, found:");
         print!("  g \\ m ");
         for m in odds_levels {
-            print!("  {:>20}", if m.is_finite() { format!("{m}") } else { "any".into() });
+            print!(
+                "  {:>20}",
+                if m.is_finite() {
+                    format!("{m}")
+                } else {
+                    "any".into()
+                }
+            );
         }
         println!();
         for (k, g) in graph_levels.iter().enumerate() {

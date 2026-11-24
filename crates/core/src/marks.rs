@@ -74,33 +74,141 @@ struct Tag {
     short: bool,
 }
 
-const JOINING: &[&str] = &["и", "или", "а", "но", "да", "либо", "ни", "однако", "зато", "иль"];
+const JOINING: &[&str] = &[
+    "и",
+    "или",
+    "а",
+    "но",
+    "да",
+    "либо",
+    "ни",
+    "однако",
+    "зато",
+    "иль",
+];
 const SUBORDINATING: &[&str] = &[
-    "что", "чтобы", "если", "когда", "потому", "так", "как", "хотя", "пока", "раз", "будто",
-    "словно", "ибо", "ежели", "дабы", "поскольку", "чем", "лишь", "едва",
+    "что",
+    "чтобы",
+    "если",
+    "когда",
+    "потому",
+    "так",
+    "как",
+    "хотя",
+    "пока",
+    "раз",
+    "будто",
+    "словно",
+    "ибо",
+    "ежели",
+    "дабы",
+    "поскольку",
+    "чем",
+    "лишь",
+    "едва",
 ];
 const PARENTHETICAL: &[&str] = &[
-    "конечно", "наверное", "например", "кстати", "впрочем", "во-первых", "во-вторых",
-    "в-третьих", "кажется", "пожалуй", "видимо", "разумеется", "по-моему", "по-видимому",
-    "вероятно", "очевидно", "безусловно", "бесспорно", "несомненно", "право", "правда", "итак",
-    "следовательно", "напротив", "наоборот", "словом", "значит", "стало", "может", "казалось",
-    "говорят", "признаться", "по-твоему", "по-вашему", "по-нашему",
+    "конечно",
+    "наверное",
+    "например",
+    "кстати",
+    "впрочем",
+    "во-первых",
+    "во-вторых",
+    "в-третьих",
+    "кажется",
+    "пожалуй",
+    "видимо",
+    "разумеется",
+    "по-моему",
+    "по-видимому",
+    "вероятно",
+    "очевидно",
+    "безусловно",
+    "бесспорно",
+    "несомненно",
+    "право",
+    "правда",
+    "итак",
+    "следовательно",
+    "напротив",
+    "наоборот",
+    "словом",
+    "значит",
+    "стало",
+    "может",
+    "казалось",
+    "говорят",
+    "признаться",
+    "по-твоему",
+    "по-вашему",
+    "по-нашему",
 ];
 const APART_MORE: &[&str] = &[
-    "ну", "да", "нет", "ах", "ох", "эх", "ой", "вот", "наконец", "главное", "действительно",
-    "бывает", "ну-ка", "ведь", "впрочем",
+    "ну",
+    "да",
+    "нет",
+    "ах",
+    "ох",
+    "эх",
+    "ой",
+    "вот",
+    "наконец",
+    "главное",
+    "действительно",
+    "бывает",
+    "ну-ка",
+    "ведь",
+    "впрочем",
 ];
 const INTERJECTIONS: &[&str] = &[
-    "ах", "ох", "эх", "ой", "ай", "ух", "увы", "о", "ого", "угу", "ага", "эй", "фу", "ура", "хм",
-    "блин", "ба", "эге", "ну-ну",
+    "ах",
+    "ох",
+    "эх",
+    "ой",
+    "ай",
+    "ух",
+    "увы",
+    "о",
+    "ого",
+    "угу",
+    "ага",
+    "эй",
+    "фу",
+    "ура",
+    "хм",
+    "блин",
+    "ба",
+    "эге",
+    "ну-ну",
 ];
 /// Asides by what they are that start a sentence as asides all but always
 /// («Кстати, …», «Конечно, …»; not «правда», «может», «значит»).
 const ASIDE_FIRST: &[&str] = &[
-    "кстати", "конечно", "наверное", "например", "впрочем", "во-первых", "во-вторых",
-    "в-третьих", "кажется", "пожалуй", "видимо", "разумеется", "по-моему", "по-видимому",
-    "вероятно", "очевидно", "безусловно", "несомненно", "итак", "следовательно", "словом",
-    "по-твоему", "по-вашему", "по-нашему",
+    "кстати",
+    "конечно",
+    "наверное",
+    "например",
+    "впрочем",
+    "во-первых",
+    "во-вторых",
+    "в-третьих",
+    "кажется",
+    "пожалуй",
+    "видимо",
+    "разумеется",
+    "по-моему",
+    "по-видимому",
+    "вероятно",
+    "очевидно",
+    "безусловно",
+    "несомненно",
+    "итак",
+    "следовательно",
+    "словом",
+    "по-твоему",
+    "по-вашему",
+    "по-нашему",
 ];
 /// How sure a known interjection starting the sentence is set apart when the
 /// graph read it otherwise (the comma model has its say in the keyboard).
@@ -108,52 +216,180 @@ const INTERJECTION_FIRST: f32 = 0.85;
 /// Gerunds grown into adverbs with their word: no commas («сидел сложа
 /// руки», «бежал сломя голову»).
 pub const GERUND_IDIOMS: &[(&str, &str)] = &[
-    ("сложа", "руки"), ("сломя", "голову"), ("покладая", "рук"), ("спустя", "рукава"),
-    ("засучив", "рукава"), ("затаив", "дыхание"), ("разинув", "рот"), ("скрепя", "сердце"),
-    ("очертя", "голову"), ("переводя", "дыхания"), ("смыкая", "глаз"), ("высунув", "язык"),
-    ("сломя", "шею"), ("навострив", "уши"), ("опустив", "руки"),
+    ("сложа", "руки"),
+    ("сломя", "голову"),
+    ("покладая", "рук"),
+    ("спустя", "рукава"),
+    ("засучив", "рукава"),
+    ("затаив", "дыхание"),
+    ("разинув", "рот"),
+    ("скрепя", "сердце"),
+    ("очертя", "голову"),
+    ("переводя", "дыхания"),
+    ("смыкая", "глаз"),
+    ("высунув", "язык"),
+    ("сломя", "шею"),
+    ("навострив", "уши"),
+    ("опустив", "руки"),
 ];
 /// The comma head's commas where no rule puts one: from this chance on.
 const LEARNED_LEAST: f32 = 0.3;
 /// The links that set a word apart (an interjection, an aside, an address).
 const APART: &[&str] = &["discourse", "parataxis", "vocative"];
 const SAYING: &[&str] = &[
-    "сказа", "говор", "сообщ", "заяв", "отмет", "подчеркн", "добав", "пояснил", "уточн",
-    "рассказ", "признал", "написал", "спрос", "ответ", "отвеча", "продолж", "прибав", "повтор",
-    "крикн", "закрич", "прошепт", "шепн", "проговор", "восклик", "думал", "подумал", "решил",
-    "заметил", "возраз", "объясн", "указ", "призна", "констатир", "передает", "пишет",
-    "считает", "полагает", "уверен",
+    "сказа",
+    "говор",
+    "сообщ",
+    "заяв",
+    "отмет",
+    "подчеркн",
+    "добав",
+    "пояснил",
+    "уточн",
+    "рассказ",
+    "признал",
+    "написал",
+    "спрос",
+    "ответ",
+    "отвеча",
+    "продолж",
+    "прибав",
+    "повтор",
+    "крикн",
+    "закрич",
+    "прошепт",
+    "шепн",
+    "проговор",
+    "восклик",
+    "думал",
+    "подумал",
+    "решил",
+    "заметил",
+    "возраз",
+    "объясн",
+    "указ",
+    "призна",
+    "констатир",
+    "передает",
+    "пишет",
+    "считает",
+    "полагает",
+    "уверен",
 ];
 const ADVERSATIVE: &[&str] = &["а", "но", "однако", "зато", "да", "же"];
 const JOINING_CC: &[&str] = &["и", "или", "либо", "ни", "да"];
 const PAREN_PHRASES: &[&str] = &[
-    "в частности", "кроме того", "к тому же", "таким образом", "с одной стороны",
-    "с другой стороны", "в первую очередь", "в свою очередь", "по крайней мере", "на самом деле",
-    "по сути", "как правило", "как известно", "как оказалось", "как выяснилось", "как сообщается",
-    "как говорится", "к сожалению", "к счастью", "к слову", "по-видимому", "без сомнения",
-    "конечно же", "по его словам", "по ее словам", "по их словам", "по моему мнению",
-    "по словам", "по данным", "по мнению", "по информации", "по сообщению", "по оценкам",
-    "по прогнозам", "по подсчетам", "по сведениям", "по версии",
+    "в частности",
+    "кроме того",
+    "к тому же",
+    "таким образом",
+    "с одной стороны",
+    "с другой стороны",
+    "в первую очередь",
+    "в свою очередь",
+    "по крайней мере",
+    "на самом деле",
+    "по сути",
+    "как правило",
+    "как известно",
+    "как оказалось",
+    "как выяснилось",
+    "как сообщается",
+    "как говорится",
+    "к сожалению",
+    "к счастью",
+    "к слову",
+    "по-видимому",
+    "без сомнения",
+    "конечно же",
+    "по его словам",
+    "по ее словам",
+    "по их словам",
+    "по моему мнению",
+    "по словам",
+    "по данным",
+    "по мнению",
+    "по информации",
+    "по сообщению",
+    "по оценкам",
+    "по прогнозам",
+    "по подсчетам",
+    "по сведениям",
+    "по версии",
 ];
 /// Asides of several words, set apart whole (not «может быть», «в общем»,
 /// «в самом деле», «в конце концов»: a predicate, a phrase, an adverb as
 /// often).
 const ASIDE_PHRASES: &[&str] = &[
-    "честно говоря", "по правде говоря", "откровенно говоря", "собственно говоря",
-    "иначе говоря", "короче говоря", "мягко говоря", "грубо говоря", "строго говоря",
-    "вообще говоря", "попросту говоря", "по слухам", "как всегда", "как обычно",
-    "судя по всему", "между прочим", "скорее всего",
-    "на мой взгляд", "на твой взгляд", "на наш взгляд", "другими словами",
-    "иными словами", "так сказать", "по всей видимости", "по всей вероятности",
-    "как ни странно", "кроме шуток", "само собой разумеется", "к несчастью",
+    "честно говоря",
+    "по правде говоря",
+    "откровенно говоря",
+    "собственно говоря",
+    "иначе говоря",
+    "короче говоря",
+    "мягко говоря",
+    "грубо говоря",
+    "строго говоря",
+    "вообще говоря",
+    "попросту говоря",
+    "по слухам",
+    "как всегда",
+    "как обычно",
+    "судя по всему",
+    "между прочим",
+    "скорее всего",
+    "на мой взгляд",
+    "на твой взгляд",
+    "на наш взгляд",
+    "другими словами",
+    "иными словами",
+    "так сказать",
+    "по всей видимости",
+    "по всей вероятности",
+    "как ни странно",
+    "кроме шуток",
+    "само собой разумеется",
+    "к несчастью",
     "без всякого сомнения",
 ];
 const QUESTION: &[&str] = &["ли", "разве", "неужели", "неужто", "что-ли"];
 const ASKING: &[&str] = &[
-    "кто", "что", "где", "куда", "откуда", "когда", "почему", "зачем", "отчего", "как", "сколько",
-    "насколько", "какой", "какая", "какое", "какие", "каков", "какова", "чей", "чья", "чье", "чьи",
-    "каким", "какую", "какого", "какому", "каком", "каких", "кого", "кому", "кем", "ком", "чего",
-    "чему", "чем", "чего-нибудь",
+    "кто",
+    "что",
+    "где",
+    "куда",
+    "откуда",
+    "когда",
+    "почему",
+    "зачем",
+    "отчего",
+    "как",
+    "сколько",
+    "насколько",
+    "какой",
+    "какая",
+    "какое",
+    "какие",
+    "каков",
+    "какова",
+    "чей",
+    "чья",
+    "чье",
+    "чьи",
+    "каким",
+    "какую",
+    "какого",
+    "какому",
+    "каком",
+    "каких",
+    "кого",
+    "кому",
+    "кем",
+    "ком",
+    "чего",
+    "чему",
+    "чем",
+    "чего-нибудь",
 ];
 
 /// A word's part of speech and form as text («Verb/Fin», «Adj short»,
@@ -203,7 +439,11 @@ fn tag(word: &str, readings: &[u64], rel: &str) -> Tag {
     }
     if has(PRTF | PRTS) && matches!(rel, "acl" | "amod" | "conj" | "root" | "advcl" | "xcomp") {
         verb(&mut t, Form::Part);
-        let r = readings.iter().find(|&&r| r & (PRTF | PRTS) != 0).copied().unwrap_or(0);
+        let r = readings
+            .iter()
+            .find(|&&r| r & (PRTF | PRTS) != 0)
+            .copied()
+            .unwrap_or(0);
         t.short = r & PRTS != 0;
         t.nominative = r & NOMN != 0;
         return t;
@@ -220,7 +460,16 @@ fn tag(word: &str, readings: &[u64], rel: &str) -> Tag {
     if has(VERB)
         && matches!(
             rel,
-            "root" | "conj" | "advcl" | "ccomp" | "acl" | "parataxis" | "csubj" | "xcomp" | "cop" | "aux"
+            "root"
+                | "conj"
+                | "advcl"
+                | "ccomp"
+                | "acl"
+                | "parataxis"
+                | "csubj"
+                | "xcomp"
+                | "cop"
+                | "aux"
         )
     {
         // (A copula or an auxiliary is a verb to the rules: «был» in «у нее был».)
@@ -250,7 +499,11 @@ fn tag(word: &str, readings: &[u64], rel: &str) -> Tag {
         if want & (NOUN | NPRO | ADJF | NUMR) != 0 {
             // The nominative when the link wants it (a subject).
             let nominative = readings.iter().any(|&r| r & want != 0 && r & NOMN != 0);
-            t.nominative = if rel == "nsubj" { nominative } else { first & NOMN != 0 };
+            t.nominative = if rel == "nsubj" {
+                nominative
+            } else {
+                first & NOMN != 0
+            };
         }
         t.short = want == ADJS;
         return t;
@@ -381,7 +634,11 @@ pub fn place(
                 Some(p) => p
                     .iter()
                     .enumerate()
-                    .filter(|&(k, _)| relations.get(k).is_some_and(|r| APART.contains(&r.as_str())))
+                    .filter(|&(k, _)| {
+                        relations
+                            .get(k)
+                            .is_some_and(|r| APART.contains(&r.as_str()))
+                    })
                     .map(|(_, &x)| x)
                     .sum(),
                 None => graph.relations[i].1,
@@ -390,10 +647,14 @@ pub fn place(
         })
         .collect();
     let interjection: Vec<bool> = (0..n)
-        .map(|i| INTERJECTIONS.contains(&words[i].as_str()) || readings[i].iter().any(|&r| r & INTJ != 0))
+        .map(|i| {
+            INTERJECTIONS.contains(&words[i].as_str()) || readings[i].iter().any(|&r| r & INTJ != 0)
+        })
         .collect();
     let mut chance_by: Vec<Option<f32>> = vec![None; n];
-    let tags = (0..n).map(|i| tag(&words[i], &readings[i], rels[i])).collect();
+    let tags = (0..n)
+        .map(|i| tag(&words[i], &readings[i], rels[i]))
+        .collect();
     let s = Read {
         w: words,
         heads,
@@ -420,22 +681,38 @@ pub fn place(
             && n > 1
             && (INTERJECTIONS.contains(&word) || ASIDE_FIRST.contains(&word))
             && s.kids[i].is_empty()
-            && !matches!(b, "case" | "det" | "amod" | "nummod" | "fixed" | "flat" | "compound")
+            && !matches!(
+                b,
+                "case" | "det" | "amod" | "nummod" | "fixed" | "flat" | "compound"
+            )
         {
             // A known interjection first, whatever the parser made of it: its
             // other readings («блин» a noun, the subject of «опоздал») are
             // the grammar's, not the sense's.
             chance_by[i - 1] = Some(apart[i - 1].max(INTERJECTION_FIRST));
-            set(2, if ASIDE_FIRST.contains(&word) { "aside first" } else { "interjection first" }, i);
+            set(
+                2,
+                if ASIDE_FIRST.contains(&word) {
+                    "aside first"
+                } else {
+                    "interjection first"
+                },
+                i,
+            );
         } else if b == "advcl"
             && t.form == Some(Form::Conv)
             && (i < n && GERUND_IDIOMS.contains(&(word, s.word(i + 1)))
-                || i > 1 && s.word(i - 1) == "не" && i < n && GERUND_IDIOMS.contains(&(word, s.word(i + 1))))
+                || i > 1
+                    && s.word(i - 1) == "не"
+                    && i < n
+                    && GERUND_IDIOMS.contains(&(word, s.word(i + 1))))
         {
             // An idiom: no commas.
         } else if b == "advcl"
             && (t.form == Some(Form::Conv)
-                || s.kids[i].iter().any(|&k| s.rel(k) == "cop" && s.tag(k).form == Some(Form::Conv)))
+                || s.kids[i]
+                    .iter()
+                    .any(|&k| s.rel(k) == "cop" && s.tag(k).form == Some(Form::Conv)))
         {
             // A gerund phrase — «будучи» the copula of its word too («даже
             // будучи спокойным человеком»).
@@ -467,7 +744,11 @@ pub fn place(
             chance_by[i - 1] = Some(apart[i - 1]);
             // The words that are asides by what they are («кажется»,
             // «конечно»), and the ones set apart only now and then («вот»).
-            around(if PARENTHETICAL.contains(&word) { "parenthetical" } else { "apart word" });
+            around(if PARENTHETICAL.contains(&word) {
+                "parenthetical"
+            } else {
+                "apart word"
+            });
         } else if s.kids[i].is_empty()
             && matches!(b, "discourse" | "parataxis")
             && (interjection[i - 1] || lo == 1 && head > 1 && b == "parataxis")
@@ -475,7 +756,11 @@ pub fn place(
             // An interjection («О, а тут…», «Угу, …»), or a word alone at the
             // sentence's start set apart from what follows («Слушай, ты…»).
             chance_by[i - 1] = Some(apart[i - 1]);
-            around(if interjection[i - 1] { "interjection" } else { "apart at the start" });
+            around(if interjection[i - 1] {
+                "interjection"
+            } else {
+                "apart at the start"
+            });
         } else if b == "parataxis" && lo > head && SAYING.iter().any(|p| word.starts_with(p)) {
             around("said");
         } else if b == "parataxis" || b == "appos" {
@@ -508,9 +793,9 @@ pub fn place(
                         && s.has_kid(i, "nsubj")
                         && head >= 1
                         && s.has_kid(head, "nsubj")
-                        && !s.kids[head]
-                            .iter()
-                            .any(|&k| k < head && !matches!(s.rel(k), "nsubj" | "cc" | "punct" | "mark"));
+                        && !s.kids[head].iter().any(|&k| {
+                            k < head && !matches!(s.rel(k), "nsubj" | "cc" | "punct" | "mark")
+                        });
                     // «и…, и…»: the same joining word before the first part too
                     // (whatever it hangs on).
                     let repeated = s.kids.get(head).is_some_and(|ks| {
@@ -580,13 +865,16 @@ pub fn place(
             // participle phrase that qualifies a noun after it («на луну
             // трепещущей в небе бабочки»), unless the word before qualifies
             // that noun too («уставший, промокший до нитки путник»).
-            let idiom = j + 1 < n && GERUND_IDIOMS.contains(&(words[j].as_str(), words[j + 1].as_str()));
+            let idiom =
+                j + 1 < n && GERUND_IDIOMS.contains(&(words[j].as_str(), words[j + 1].as_str()));
             let w = j + 1; // Read's numbering
             let before_its_noun = matches!(s.rel(w), "amod" | "acl")
                 && s.tag(w).form == Some(Form::Part)
                 && !s.kids[w].is_empty()
                 && s.heads[w - 1] > w
-                && !(w > 1 && s.heads[w - 2] == s.heads[w - 1] && matches!(s.rel(w - 1), "amod" | "acl"));
+                && !(w > 1
+                    && s.heads[w - 2] == s.heads[w - 1]
+                    && matches!(s.rel(w - 1), "amod" | "acl"));
             if c >= LEARNED_LEAST
                 && !idiom
                 && !before_its_noun
@@ -609,7 +897,12 @@ pub fn place(
         for p in out.iter_mut().filter(|p| p.mark == Mark::Dash) {
             p.learned = graph.marks[p.before][1];
         }
-        for (k, mark) in [(1, Mark::Dash), (2, Mark::Colon), (6, Mark::OpenQuote), (7, Mark::CloseQuote)] {
+        for (k, mark) in [
+            (1, Mark::Dash),
+            (2, Mark::Colon),
+            (6, Mark::OpenQuote),
+            (7, Mark::CloseQuote),
+        ] {
             for j in 0..n {
                 let c = graph.marks[j][k];
                 // An opening quote may stand before the first word; the others
@@ -642,7 +935,11 @@ fn dashes(s: &Read) -> Vec<Placed> {
         if s.kids[i].iter().any(|&k| matches!(s.rel(k), "cop" | "aux")) {
             continue;
         }
-        let Some(&k) = s.kids[i].iter().filter(|&&k| k < i && s.rel(k) == "nsubj").max() else {
+        let Some(&k) = s.kids[i]
+            .iter()
+            .filter(|&&k| k < i && s.rel(k) == "nsubj")
+            .max()
+        else {
             continue;
         };
         let (ti, tk) = (s.tag(i), s.tag(k));
@@ -655,14 +952,22 @@ fn dashes(s: &Read) -> Vec<Placed> {
             continue;
         }
         let lo = s.span(i).0;
-        let eto = s.kids[i].iter().copied().filter(|&j| j < i && s.word(j) == "это").min();
+        let eto = s.kids[i]
+            .iter()
+            .copied()
+            .filter(|&j| j < i && s.word(j) == "это")
+            .min();
         let at = eto.map_or(lo, |e| e.min(lo));
         if at > s.span(k).1 && at >= 2 {
             out.push(Placed {
                 before: at - 1,
                 mark: Mark::Dash,
                 chance: s.sure[i - 1],
-                rule: if nominal { "zero copula" } else { "infinitives" },
+                rule: if nominal {
+                    "zero copula"
+                } else {
+                    "infinitives"
+                },
                 by: i - 1,
                 learned: -1.0,
             });
@@ -676,14 +981,19 @@ fn end_mark(s: &Read) -> Mark {
     let Some(root) = (1..=s.n()).find(|&i| s.heads[i - 1] == 0) else {
         return Mark::Period;
     };
-    let asking = |j: usize| ASKING.contains(&s.word(j)) && !matches!(s.rel(j), "mark" | "cc" | "fixed");
-    let clause: Vec<usize> = std::iter::once(root).chain(s.kids[root].iter().copied()).collect();
+    let asking =
+        |j: usize| ASKING.contains(&s.word(j)) && !matches!(s.rel(j), "mark" | "cc" | "fixed");
+    let clause: Vec<usize> = std::iter::once(root)
+        .chain(s.kids[root].iter().copied())
+        .collect();
     for &j in &clause {
         if QUESTION.contains(&s.word(j)) || (j != root && asking(j)) {
             return Mark::Question;
         }
-        if matches!(s.rel(j), "obl" | "obj" | "nsubj" | "advmod" | "nmod" | "iobj")
-            && s.kids[j].iter().any(|&k| asking(k))
+        if matches!(
+            s.rel(j),
+            "obl" | "obj" | "nsubj" | "advmod" | "nmod" | "iobj"
+        ) && s.kids[j].iter().any(|&k| asking(k))
         {
             return Mark::Question;
         }

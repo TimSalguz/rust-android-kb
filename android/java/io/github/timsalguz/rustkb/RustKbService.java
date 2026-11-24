@@ -9,6 +9,7 @@ import android.graphics.Color;
 import android.os.Build;
 import android.os.FileObserver;
 import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.Looper;
 import android.os.PersistableBundle;
 import android.os.SystemClock;
@@ -34,16 +35,20 @@ import java.io.OutputStream;
 
 /**
  * Thin shim over the Rust core (libkbime.so): it forwards editor events,
- * applies the text operations the core returns and schedules its timers.
- * Every keyboard decision is made in Rust.
+ * applies text operations and schedules timers. Native decisions and frame
+ * construction run on one worker; the UI thread receives immutable frames.
  */
 public final class RustKbService extends InputMethodService implements SensorEventListener {
     // Response flags (crates/android/src/ime.rs); timer delay in the high 16 bits.
     private static final int REDRAW = 1, OUTPUT = 2, HAPTIC = 4, RELAYOUT = 8, PACKS = 16;
 
-    private long handle;
+    private volatile long handle;
     private KeyboardView view;
-    private final Runnable timer = () -> respond(Native.timer(handle));
+    private final Object nativeLock = new Object();
+    private HandlerThread nativeThread;
+    private Handler nativeHandler;
+    private final Handler main = new Handler(Looper.getMainLooper());
+    private final Runnable timer = () -> postNative(() -> Native.timer(handle));
     /** Tilt, for telling the grip: only while the keyboard is up, at the UI rate. */
     private SensorManager sensors;
     private boolean listening;
@@ -52,10 +57,48 @@ public final class RustKbService extends InputMethodService implements SensorEve
      * the new settings at once, even while it is on screen. Inotify, no polling.
      */
     private FileObserver settingsWatch;
-    private final Handler main = new Handler(Looper.getMainLooper());
     /** Copied texts go to the core, which keeps them in memory only (never on disk). */
     private ClipboardManager clipboard;
     private final ClipboardManager.OnPrimaryClipChangedListener clipListener = this::clipChanged;
+
+    private interface NativeCall {
+        int call();
+    }
+
+    /** One native caller at a time, off the UI thread; the UI gets an immutable frame. */
+    private void postNative(NativeCall call) {
+        Handler worker = nativeHandler;
+        if (worker == null) return;
+        worker.post(() -> {
+            final int flags;
+            final int[] ops;
+            final String[] texts;
+            synchronized (nativeLock) {
+                flags = call.call();
+                if ((flags & (REDRAW | RELAYOUT)) != 0 && handle != 0) {
+                    ops = Native.drawOps(handle);
+                    texts = Native.drawTexts(handle);
+                } else {
+                    ops = null;
+                    texts = null;
+                }
+            }
+            main.post(() -> {
+                if (view != null && ops != null && texts != null) view.setDrawList(ops, texts);
+                respond(flags);
+            });
+        });
+    }
+
+    void touch(int action, int pointer, float x, float y, long time) {
+        postNative(() -> Native.touch(handle, action, pointer, x, y, time));
+    }
+
+    int measure(int width) {
+        synchronized (nativeLock) {
+            return Native.measure(handle, width);
+        }
+    }
 
     @Override
     public void onCreate() {
@@ -76,15 +119,19 @@ public final class RustKbService extends InputMethodService implements SensorEve
         } catch (Exception e) {
             Log.e("rustkb", "cannot open the dictionary", e);
         }
+        nativeThread = new HandlerThread("rustkb-input");
+        nativeThread.start();
+        nativeHandler = new Handler(nativeThread.getLooper());
         String name = new File(settingsPath(this)).getName();
         settingsWatch = new FileObserver(getFilesDir().getPath(), FileObserver.MOVED_TO | FileObserver.CLOSE_WRITE) {
             @Override
             public void onEvent(int event, String path) {
                 if (!name.equals(path)) return;
-                main.post(() -> {
-                    if (handle == 0) return;
-                    respond(Native.reloadSettings(handle));
-                    systemColors();
+                postNative(() -> {
+                    if (handle == 0) return 0;
+                    int flags = Native.reloadSettings(handle);
+                    main.post(RustKbService.this::systemColors);
+                    return flags;
                 });
             }
         };
@@ -111,7 +158,10 @@ public final class RustKbService extends InputMethodService implements SensorEve
             // Not the current keyboard (Android 10+ lets only it read the clipboard).
             return;
         }
-        respond(Native.clip(handle, text, sensitive, SystemClock.uptimeMillis()));
+        final String copied = text;
+        final boolean isSensitive = sensitive;
+        long time = SystemClock.uptimeMillis();
+        postNative(() -> Native.clip(handle, copied, isSensitive, time));
     }
 
     @Override
@@ -119,8 +169,19 @@ public final class RustKbService extends InputMethodService implements SensorEve
         if (settingsWatch != null) settingsWatch.stopWatching();
         if (clipboard != null) clipboard.removePrimaryClipChangedListener(clipListener);
         stopTilt();
-        Native.destroy(handle);
-        handle = 0;
+        if (nativeHandler != null) {
+            nativeHandler.post(() -> {
+                synchronized (nativeLock) {
+                    Native.destroy(handle);
+                    handle = 0;
+                }
+            });
+            nativeThread.quitSafely();
+            nativeHandler = null;
+        } else {
+            Native.destroy(handle);
+            handle = 0;
+        }
         super.onDestroy();
     }
 
@@ -136,8 +197,11 @@ public final class RustKbService extends InputMethodService implements SensorEve
         // Only the settings screen's own test field is logged.
         boolean own = getPackageName().equals(info.packageName);
         systemColors();
-        respond(Native.startInput(handle, textBefore(), textAfter(), info.inputType, info.imeOptions,
-                hintLocales(info), own));
+        String before = textBefore();
+        String after = textAfter();
+        String hints = hintLocales(info);
+        postNative(() -> Native.startInput(handle, before, after, info.inputType, info.imeOptions,
+                hints, own));
         startTilt();
     }
 
@@ -178,7 +242,18 @@ public final class RustKbService extends InputMethodService implements SensorEve
             wallpaper = new int[ids.length];
             for (int i = 0; i < ids.length; i++) wallpaper[i] = getColor(ids[i]);
         }
-        int bg = Native.systemColors(handle, night, wallpaper);
+        final int bg;
+        final int[] ops;
+        final String[] texts;
+        synchronized (nativeLock) {
+            bg = Native.systemColors(handle, night, wallpaper);
+            ops = view == null || handle == 0 ? null : Native.drawOps(handle);
+            texts = view == null || handle == 0 ? null : Native.drawTexts(handle);
+        }
+        if (view != null && ops != null && texts != null) {
+            view.setDrawList(ops, texts);
+            view.invalidate();
+        }
         Window w = getWindow() == null ? null : getWindow().getWindow();
         if (w == null) return;
         w.setNavigationBarColor(bg);
@@ -204,7 +279,8 @@ public final class RustKbService extends InputMethodService implements SensorEve
 
     @Override
     public void onSensorChanged(SensorEvent e) {
-        respond(Native.tilt(handle, e.values[0], e.values[1], e.values[2]));
+        float x = e.values[0], y = e.values[1], z = e.values[2];
+        postNative(() -> Native.tilt(handle, x, y, z));
     }
 
     @Override
@@ -247,8 +323,11 @@ public final class RustKbService extends InputMethodService implements SensorEve
             CharSequence s = ic.getSelectedText(0);
             if (s != null && s.length() <= 64) selected = s.toString();
         }
-        respond(Native.selection(handle, newSelStart, newSelEnd, candidatesStart, candidatesEnd, textBefore(),
-                textAfter(), selected));
+        String before = textBefore();
+        String after = textAfter();
+        String word = selected;
+        postNative(() -> Native.selection(handle, newSelStart, newSelEnd, candidatesStart, candidatesEnd,
+                before, after, word));
     }
 
     /** The phone's language ("de"): the first settings start with it. */
@@ -258,7 +337,10 @@ public final class RustKbService extends InputMethodService implements SensorEve
 
     /** Install the language packs the settings ask for and hand them to the core. */
     private void installPacks() {
-        String wanted = Native.wantedPacks(handle);
+        final String wanted;
+        synchronized (nativeLock) {
+            wanted = Native.wantedPacks(handle);
+        }
         if (wanted == null || wanted.isEmpty()) return;
         for (String pack : wanted.split(",")) {
             String dict = null, bigrams = null, casing = null;
@@ -273,7 +355,9 @@ public final class RustKbService extends InputMethodService implements SensorEve
                 Log.e("rustkb", "cannot install " + pack, e);
                 dict = null;
             }
-            Native.addPack(handle, pack, dict, bigrams, casing);
+            synchronized (nativeLock) {
+                Native.addPack(handle, pack, dict, bigrams, casing);
+            }
         }
     }
 
@@ -289,7 +373,13 @@ public final class RustKbService extends InputMethodService implements SensorEve
     /** Act on a response from the core: text operations, haptics, redraw, timer. */
     void respond(int flags) {
         if ((flags & PACKS) != 0) installPacks();
-        if ((flags & OUTPUT) != 0) apply(Native.takeOutput(handle));
+        if ((flags & OUTPUT) != 0) {
+            String ops;
+            synchronized (nativeLock) {
+                ops = Native.takeOutput(handle);
+            }
+            apply(ops);
+        }
         if (view == null) return;
         if ((flags & HAPTIC) != 0) view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
         if ((flags & RELAYOUT) != 0) view.requestLayout();

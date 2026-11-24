@@ -15,6 +15,8 @@ into `data/lexicon.tsv` (`word<TAB>count`, ~3.2 M words; CI does the same).
 | [OpenCorpora](http://opencorpora.org) dictionary (via `pymorphy3-dicts-ru`, rev. 417150) | every Russian word form (~3 M): `балалаечного`, `проверяемыми` | CC BY-SA 3.0 |
 | LibreOffice ru_RU Hunspell dictionary (A. Lebedev), expanded with `unmunch` | a second source of Russian forms (~1.4 M; +105 k words OpenCorpora lacks: балдёж, канальчики) | BSD-style, see `HUNSPELL-RU-COPYRIGHT` |
 | [SCOWL](http://wordlist.aspell.net) 2020.12.07, levels ≤ 70 | English words, forms, contractions, names | permissive, see `SCOWL-COPYRIGHT` |
+| [wordfreq](https://github.com/rspeer/wordfreq) (`tools/wordfreq_export.py`) | additional Russian and English words with corpus frequencies; only words missing from the earlier sources join | Apache-2.0 code; corpus-specific data notices in the package |
+| [Russian Wiktionary via Kaikki/wiktextract](https://kaikki.org/dictionary/Russian/), optional with `WIKTIONARY=1` | additional entries and inflected forms (`tools/wiktionary_words.py`) | CC BY-SA 4.0 + GFDL, Wiktionary contributors |
 | [Tatoeba](https://tatoeba.org) sentence exports `rus_sentences`, `eng_sentences` (tatoeba.org contributors) | everyday sentences → word pairs for the context model (`bigrams.tsv`, `tools/build_bigrams.py`) | CC BY 2.0 FR |
 | [Leipzig Corpora Collection](https://wortschatz.uni-leipzig.de): rus-ru_web-public_2019_1M, eng-com_web-public_2018_1M — © 2025 Universität Leipzig / Sächsische Akademie der Wissenschaften / InfAI | significant neighbour pairs → the context model | CC BY |
 | `slang.tsv` (this repo) | chat slang, abbreviations, loanwords (го, тс, кринж, lol) | same as the code |
@@ -22,8 +24,8 @@ into `data/lexicon.tsv` (`word<TAB>count`, ~3.2 M words; CI does the same).
 
 How the pieces combine:
 
-- Russian: every OpenCorpora form, plus every Hunspell ru_RU form (count from
-  the subtitles if seen, else 1), plus the е spelling of every word with ё
+- Russian: every OpenCorpora form, plus every Hunspell ru_RU and Russian
+  Wiktionary form (count from the subtitles if seen, else 1), plus the е spelling of every word with ё
   (people type еще, актерская — that's a word, not a typo to fix). A form seen in the subtitles keeps its
   count; an unseen one gets 2 % of its lemma's most frequent form (at least 1),
   so forms of common words are plausible and forms of rare ones stay rare.
@@ -77,6 +79,11 @@ Known bias: subtitles are mostly translated films, so some everyday words are
 underweighted (москва: 477). A broader frequency source would help.
 
 The derived lexicon is distributed under CC BY-SA 4.0.
+
+For local coverage checks, `tools/dict_coverage.py data/private/reference.txt`
+compares a reference list without merging it. `data/private` is ignored by git;
+proprietary references are never build inputs and may be analyzed only where
+their terms permit it.
 
 ## Models: `lemmas.bin`, `chooser.bin`, `parser.bin`
 

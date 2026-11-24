@@ -10,6 +10,9 @@
 #   data/hunspell_forms.txt     — every form of the LibreOffice ru_RU Hunspell
 #                                 dictionary (needs `unmunch`; $HUNSPELL_DIR
 #                                 holds ru_RU.dic, default /usr/share/hunspell)
+#   data/wordfreq_{ru,en}.tsv   — open wordfreq lists (build-only Python package)
+#   data/wiktionary_ru.txt      — optional (WIKTIONARY=1) Russian Wiktionary via
+#                                 Kaikki (CC BY-SA 4.0 + GFDL), streaming export
 set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p data/freq data/scowl
@@ -24,6 +27,21 @@ fi
 [ -s data/opencorpora_forms.tsv ] || python3 tools/opencorpora_forms.py > data/opencorpora_forms.tsv
 if [ ! -s data/hunspell_forms.txt ]; then
     python3 tools/hunspell_forms.py "${HUNSPELL_DIR:-/usr/share/hunspell}" "${UNMUNCH:-unmunch}" > data/hunspell_forms.txt
+fi
+for lang in ru en; do
+    [ -s data/wordfreq_${lang}.tsv ] || ${PYTHON:-python3} tools/wordfreq_export.py "$lang" \
+        --limit 500000 -o data/wordfreq_${lang}.tsv
+done
+# Optional second supplement: much larger and not every network reaches Kaikki.
+if [ "${WIKTIONARY:-0}" = 1 ]; then
+    mkdir -p data/wiktionary
+    if [ ! -s data/wiktionary/kaikki-Russian.jsonl.gz ] || ! gzip -t data/wiktionary/kaikki-Russian.jsonl.gz 2>/dev/null; then
+        curl -fsSL -C - -o data/wiktionary/kaikki-Russian.jsonl.gz \
+            "https://kaikki.org/dictionary/Russian/kaikki.org-dictionary-Russian.jsonl.gz"
+    fi
+    gzip -t data/wiktionary/kaikki-Russian.jsonl.gz
+    [ -s data/wiktionary_ru.txt ] || python3 tools/wiktionary_words.py \
+        data/wiktionary/kaikki-Russian.jsonl.gz --lang ru -o data/wiktionary_ru.txt
 fi
 if [ "${LEIPZIG:-0}" = 1 ]; then
     mkdir -p data/leipzig data/tatoeba

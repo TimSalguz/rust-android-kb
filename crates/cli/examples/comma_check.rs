@@ -29,7 +29,12 @@ fn main() {
         for i in 1..words.len() {
             text.push_str(words[i - 1]);
             if let Some(odds) = engine.comma_odds_in(&text, words[i - 1], words[i]) {
-                println!("{}\t{}\t{odds:.3}\t{}", f[0], i + 1, u8::from(marks[i].contains(',')));
+                println!(
+                    "{}\t{}\t{odds:.3}\t{}",
+                    f[0],
+                    i + 1,
+                    u8::from(marks[i].contains(','))
+                );
             }
             text.push(' ');
         }

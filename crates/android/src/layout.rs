@@ -124,8 +124,7 @@ pub enum Action {
     Column(u8),
     /// The emoji panel's page back (-1) or on (1).
     Page(i8),
-    /// The emoji panel: search the emoji by name (the letters type the
-    /// query, the strip shows what it finds).
+    /// The emoji panel: search by name in a query row, with a results row below.
     EmojiSearch,
 }
 
@@ -460,18 +459,20 @@ pub fn build_compact(lang: Lang, width: f32, top: f32, row_h: f32, lang_key: boo
     keys
 }
 
-/// The emoji panel's bottom row at `top`: letters, page back, space, page
-/// on, ⌫, Enter.
-pub fn build_panel_row(width: f32, top: f32, row_h: f32) -> Vec<Key> {
-    let row = [
-        (1.5, Action::Letters),
-        (1.0, Action::EmojiSearch),
+/// The panel's bottom row at `top`: letters, page back, space, page on, ⌫,
+/// Enter; emoji also have their search key.
+pub fn build_panel_row(width: f32, top: f32, row_h: f32, clipboard: bool) -> Vec<Key> {
+    let mut row = vec![(1.5, Action::Letters)];
+    if !clipboard {
+        row.push((1.0, Action::EmojiSearch));
+    }
+    row.extend([
         (1.0, Action::Page(-1)),
         (3.0, Action::Space),
         (1.0, Action::Page(1)),
         (1.5, Action::Backspace),
         (1.0, Action::Enter),
-    ];
+    ]);
     let unit = width / row.iter().map(|k| k.0).sum::<f32>();
     let mut x = 0.0;
     row.iter()

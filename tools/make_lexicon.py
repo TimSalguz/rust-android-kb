@@ -38,6 +38,8 @@ ap.add_argument("--words")
 ap.add_argument("--min-count", type=int, default=3)
 ap.add_argument("--keep-frequent", type=int, default=300)
 ap.add_argument("--extra", action="append", default=[], help="word<TAB>count list added as is")
+ap.add_argument("--supplement", action="append", default=[],
+                help="word<TAB>count list used only for words still missing")
 ap.add_argument("--forms", help="form<TAB>lemma list; every form joins the lexicon")
 ap.add_argument("--form-share", type=float, default=0.02)
 ap.add_argument("--wordlist", action="append", default=[], help="LIST:FLOOR plain word list")
@@ -152,6 +154,15 @@ if args.forms:
                 added += form not in counts
                 counts[form] = c
     print(f"--forms: {added} new forms")
+
+for path in args.supplement:
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            if line.startswith("#") or "\t" not in line:
+                continue
+            w, c = line.rstrip("\n").split("\t")[:2]
+            if w not in counts and WORD.fullmatch(w):
+                counts[w] = int(c)
 
 if args.yo_variants:
     for w, c in list(counts.items()):

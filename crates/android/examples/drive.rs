@@ -208,8 +208,11 @@ impl Hands {
                 .field
                 .composing
                 .map_or((-1, -1), |(a, b)| (a as i32, b as i32));
-            let selected: Option<String> = (self.field.sel.0 != self.field.sel.1)
-                .then(|| self.field.text[self.field.sel.0..self.field.sel.1].iter().collect());
+            let selected: Option<String> = (self.field.sel.0 != self.field.sel.1).then(|| {
+                self.field.text[self.field.sel.0..self.field.sel.1]
+                    .iter()
+                    .collect()
+            });
             let f = self.ime.selection(
                 self.field.sel.0 as i32,
                 self.field.sel.1 as i32,
@@ -265,7 +268,10 @@ impl Hands {
         let Some((x, y)) = self.key(action) else {
             return false;
         };
-        let (dx, dy) = (rng.gauss() * sigma * self.key_w, rng.gauss() * sigma * self.key_w * 1.3);
+        let (dx, dy) = (
+            rng.gauss() * sigma * self.key_w,
+            rng.gauss() * sigma * self.key_w * 1.3,
+        );
         let gap = 140 + (rng.unit() * 140.0) as i64;
         match self.ime.action_at(x + dx, y + dy) {
             Some(Action::Char(c)) => self.hit.push(c),
@@ -381,7 +387,9 @@ fn main() {
             engine = engine.open_parser(beside("parser.bin")).expect("parser");
         }
         if beside("sentence.bin").exists() {
-            engine = engine.open_sentence_parser(beside("sentence.bin")).expect("sentence parser");
+            engine = engine
+                .open_sentence_parser(beside("sentence.bin"))
+                .expect("sentence parser");
         }
     }
     let session = &args[3];
@@ -476,7 +484,10 @@ fn main() {
                 }
             }
             "at" => {
-                let xy: Vec<f32> = rest.split_whitespace().filter_map(|v| v.parse().ok()).collect();
+                let xy: Vec<f32> = rest
+                    .split_whitespace()
+                    .filter_map(|v| v.parse().ok())
+                    .collect();
                 if let [x, y] = xy[..] {
                     hands.tap_at(x, y, 300);
                 }

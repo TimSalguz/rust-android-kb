@@ -314,6 +314,8 @@ impl Store<memmap2::Mmap> {
         let file = std::fs::File::open(path)?;
         // SAFETY: the blob is a read-only, prebuilt asset; we don't mutate it.
         let mmap = unsafe { memmap2::Mmap::map(&file)? };
+        #[cfg(unix)]
+        let _ = mmap.advise(memmap2::Advice::WillNeed);
         Store::new(mmap)
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "not a word store"))
     }

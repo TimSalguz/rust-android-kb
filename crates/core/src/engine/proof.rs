@@ -30,7 +30,10 @@ pub fn tokens(text: &str) -> Vec<Token<'_>> {
                     end = j + d.len_utf8();
                     chars.next();
                 } else if matches!(d, '-' | '\'' | '’')
-                    && text[j + d.len_utf8()..].chars().next().is_some_and(char::is_alphanumeric)
+                    && text[j + d.len_utf8()..]
+                        .chars()
+                        .next()
+                        .is_some_and(char::is_alphanumeric)
                 {
                     chars.next();
                 } else {
@@ -85,7 +88,10 @@ mod tests {
     fn words_and_the_marks_before_them() {
         let t = tokens("Ну, кто-то придёт — «наверное» в 5 часов");
         let words: Vec<&str> = t.iter().map(|t| t.text).collect();
-        assert_eq!(words, ["Ну", "кто-то", "придёт", "наверное", "в", "5", "часов"]);
+        assert_eq!(
+            words,
+            ["Ну", "кто-то", "придёт", "наверное", "в", "5", "часов"]
+        );
         let before: Vec<&str> = t.iter().map(|t| t.before.as_str()).collect();
         assert_eq!(before, ["", ",", "", "—«", "»", "", ""]);
         assert_eq!(&"Ну, кто-то"[t[1].start..t[1].end], "кто-то");

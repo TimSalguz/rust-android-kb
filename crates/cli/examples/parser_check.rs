@@ -53,7 +53,9 @@ fn main() {
             rels_same += usize::from(r.parse::<usize>().ok() == Some(got));
         }
     }
-    println!("{n} chances, largest difference {worst:.5}; relations the same {rels_same} of {rels}");
+    println!(
+        "{n} chances, largest difference {worst:.5}; relations the same {rels_same} of {rels}"
+    );
     // The sentences read word by word, as the keyboard does (each start
     // read once, the rest from the cache): the same graphs.
     let mut worst = 0f32;
@@ -64,7 +66,10 @@ fn main() {
         if !seen.insert(s.to_string()) {
             continue;
         }
-        let words: Vec<_> = s.split(' ').map(|w| engine.parser_word(w).unwrap()).collect();
+        let words: Vec<_> = s
+            .split(' ')
+            .map(|w| engine.parser_word(w).unwrap())
+            .collect();
         for k in 1..=words.len() {
             let t = std::time::Instant::now();
             let whole = parser.parse(lemmas, &words[..k]);
@@ -83,7 +88,10 @@ fn main() {
         let (mut same, mut rows, mut worst) = (0, 0, 0f32);
         let argmax = |r: &[f32]| (0..r.len()).max_by(|&i, &j| r[i].total_cmp(&r[j])).unwrap();
         for s in &seen {
-            let words: Vec<_> = s.split(' ').map(|w| engine.parser_word(w).unwrap()).collect();
+            let words: Vec<_> = s
+                .split(' ')
+                .map(|w| engine.parser_word(w).unwrap())
+                .collect();
             for k in 1..=words.len() {
                 let x = parser.parse(lemmas, &words[..k]);
                 let y = other.parse_cached(lemmas, &words[..k]);

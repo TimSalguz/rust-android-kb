@@ -3,6 +3,7 @@
 //! forwards events, applies text operations and paints the draw list — so all
 //! of this is testable on a desktop.
 
+use std::cell::RefCell;
 use std::collections::VecDeque;
 
 use kbcore::engine::proof::tokens;
@@ -266,13 +267,15 @@ pub const OP_TEXT: i32 = 2; // center x, baseline y, size, color, text index, bo
 pub const OP_ROTATE: i32 = 3; // center x, center y, millidegrees clockwise: until OP_RESTORE
 pub const OP_RESTORE: i32 = 4;
 pub const OP_ICON: i32 = 5; // center x, center y, size, color, icon: a line drawing in one color
+pub const OP_CLIP: i32 = 6; // x, y, w, h: save and clip until OP_RESTORE
+pub const OP_TEXT_LEFT: i32 = 7; // left x, baseline y, size, color, text index, bold
 /// [`OP_ICON`]'s icons.
 pub const ICON_SMILE: i32 = 1;
 pub const ICON_SEARCH: i32 = 2;
-/// The emoji search's strip: the query on this share of it, the emoji found
-/// in this many cells after it.
-const QUERY_SHARE: f32 = 0.3;
-const SEARCH_CELLS: usize = 7;
+pub const ICON_CLIPBOARD: i32 = 3;
+const AUX_DP: f32 = 40.0;
+const SEARCH_BACK_DP: f32 = 48.0;
+const SEARCH_CELLS: usize = 8;
 
 /// A text operation for the editor.
 #[derive(Clone, Debug, PartialEq)]
@@ -305,11 +308,13 @@ enum Shift {
 enum Target {
     Key(usize),
     Slot(usize),
-    /// The emoji search's query in the strip (a tap ends the search)…
+    /// The emoji search's back button.
     Query,
-    /// …and an emoji it found.
+    /// An emoji the search found.
     Found(usize),
-    /// The emoji and clipboard panel, above its bottom row.
+    /// The clipboard button in the strip.
+    Clipboard,
+    /// The emoji or clipboard panel, above its bottom row.
     Panel(Hit),
 }
 
@@ -365,6 +370,8 @@ const PROOF_LESS_SURE: &[(&str, f32, f32)] = &[
 ];
 /// No comma the graph is less sure of than this is looked at.
 const PROOF_LEAST: f32 = 0.6;
+/// A whole-sentence reading during a pause after a word, before its final mark.
+const PROOF_DELAY_MS: i32 = 240;
 /// A comma the parser's comma head puts by itself (the rules or not): from
 /// this chance on. The head reads the whole sentence without its commas and
 /// says where they stand; it also judges the rules' commas (see
@@ -423,6 +430,8 @@ struct Pointer {
     travel: f32,
     /// Drawing a word across the keys (see [`GESTURE_KEYS`]).
     gesture: bool,
+    /// Dragging the emoji grid instead of tapping one cell.
+    scrolling: bool,
     /// Trail points already read for the live preview of a drawn word.
     previewed: usize,
     /// Where the finger likely aimed: the landing point moved back by the
@@ -473,7 +482,7 @@ struct Undo {
     pairs: Vec<String>,
 }
 
-/// A finished sentence's proofreading: the text from its first new comma
+/// A sentence's proofreading: the text from its first new comma
 /// on as it was and as it is now, and the word pairs the commas went
 /// between (⌫ right after puts it back; those commas don't come again).
 struct ProofUndo {
@@ -569,6 +578,7 @@ enum Timer {
     None,
     LongPress(i32),
     Repeat(i32),
+    Proofread,
 }
 
 pub struct Ime<D: AsRef<[u8]>> {
@@ -577,6 +587,8 @@ pub struct Ime<D: AsRef<[u8]>> {
     engine_pack: &'static str,
     /// …and those of the other packs, swapped in with their language.
     spare: Vec<(&'static str, Engine<D>)>,
+    /// A few places already read, shared by the searches of one keystroke.
+    contexts: RefCell<Vec<(String, Context)>>,
     /// Packs the shim has no data for (not asked for again).
     missing: Vec<&'static str>,
     dp: f32,
@@ -637,7 +649,7 @@ pub struct Ime<D: AsRef<[u8]>> {
     calib_wanted: Option<Grip>,
     /// Shown in the strip until the next touch.
     notice: Option<String>,
-    /// The emoji and clipboard panel, when open, and what it remembers (in
+    /// The emoji or clipboard panel, when open, and what it remembers (in
     /// memory only).
     panel: Option<Panel>,
     stash: Stash,
@@ -690,8 +702,7 @@ pub struct Ime<D: AsRef<[u8]>> {
     /// pairs whose comma the user took out in this field.
     comma_undo: Option<(String, String)>,
     commas_rejected: Vec<(String, String)>,
-    /// The commas a finished sentence's proofreading just put in (⌫ takes
-    /// them out).
+    /// The commas a sentence's proofreading just put in (⌫ takes them out).
     proof_undo: Option<ProofUndo>,
     /// The emoji search's query while it is open: the letters type it.
     emoji_search: Option<String>,
@@ -735,6 +746,9 @@ pub struct Ime<D: AsRef<[u8]>> {
     /// …and one forced by a swipe up on ?123 / Enter (`Some(None)`: forced
     /// off); `None` follows the setting and the grip.
     arc_forced: Option<Option<Hand>>,
+    /// Automatic grip following is armed only by an explicit swipe in this
+    /// input view, never merely by opening the keyboard.
+    arc_auto: bool,
     /// A two-word change undone by ⌫, for the swipe up (see [`PairUndo`]).
     pair_undo: Option<PairUndo>,
     /// The words committed in this field, as typed and with the touches
@@ -977,6 +991,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
             engine,
             engine_pack: "base",
             spare: Vec::new(),
+            contexts: RefCell::new(Vec::new()),
             missing: Vec::new(),
             dp: density.max(0.5),
             width: 0.0,
@@ -1055,6 +1070,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
             recorrect: None,
             arc: None,
             arc_forced: None,
+            arc_auto: false,
             ui: Lang::Ru,
             system_dark: true,
             wallpaper: None,
@@ -1069,6 +1085,22 @@ impl<D: AsRef<[u8]>> Ime<D> {
         STRIP_DP * self.dp
     }
 
+    fn clipboard_button(&self) -> bool {
+        self.settings.clipboard
+            && self.panel.is_none()
+            && self.emoji_search.is_none()
+            && self.strip_prompt().is_none()
+    }
+
+    fn strip_width(&self) -> f32 {
+        self.width
+            - if self.clipboard_button() {
+                AUX_DP * self.dp
+            } else {
+                0.0
+            }
+    }
+
     fn row_h(&self) -> f32 {
         ROW_DP * self.dp * self.settings.height as f32 / 100.0
     }
@@ -1079,11 +1111,17 @@ impl<D: AsRef<[u8]>> Ime<D> {
             && self.layer == Layer::Letters
             && self.calib.is_none()
             && self.panel.is_none()
+            && self.emoji_search.is_none()
     }
 
     fn height(&self) -> f32 {
         let rows = if self.compact() { 2.0 } else { 4.0 };
-        self.strip_h() + rows * self.row_h() + BOTTOM_PAD_DP * self.dp
+        let top = if self.emoji_search.is_some() {
+            2.0
+        } else {
+            1.0
+        } * self.strip_h();
+        top + rows * self.row_h() + (BOTTOM_PAD_DP + self.settings.bottom_padding as f32) * self.dp
     }
 
     /// The thumb the arc layout is for, if it is on: forced by a swipe, or
@@ -1094,7 +1132,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
         }
         match self.arc_forced {
             Some(forced) => forced,
-            None if self.settings.arc_layout => match self.sense.shown() {
+            None if self.arc_auto && self.settings.arc_layout => match self.sense.shown() {
                 Some(Grip::Left) => Some(Hand::Left),
                 Some(Grip::Right) => Some(Hand::Right),
                 _ => None,
@@ -1138,11 +1176,13 @@ impl<D: AsRef<[u8]>> Ime<D> {
             self.slots = [None, None, None];
             return REDRAW | HAPTIC;
         }
-        self.arc_forced = Some(if self.arc == Some(hand) {
+        let enable = self.arc != Some(hand);
+        self.arc_auto = enable && self.settings.arc_layout;
+        self.arc_forced = if self.arc_auto {
             None
         } else {
-            Some(hand)
-        });
+            Some(enable.then_some(hand))
+        };
         self.relayout();
         REDRAW | RELAYOUT | HAPTIC
     }
@@ -1166,7 +1206,20 @@ impl<D: AsRef<[u8]>> Ime<D> {
             // The panel's page over the letter rows, its keys below.
             self.arc = None;
             let top = self.strip_h() + 3.0 * self.row_h();
-            self.keys = layout::build_panel_row(self.width, top, self.row_h());
+            let clips = self.panel.is_some_and(|p| p.tab == Tab::Clips);
+            self.keys = layout::build_panel_row(self.width, top, self.row_h(), clips);
+            return;
+        }
+        if self.emoji_search.is_some() {
+            self.arc = None;
+            self.keys = layout::build(
+                self.lang,
+                Layer::Letters,
+                self.width,
+                2.0 * self.strip_h(),
+                self.row_h(),
+                self.lang_key(),
+            );
             return;
         }
         self.arc = if self.compact() {
@@ -1422,6 +1475,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
             .filter(|w| !w.is_empty())
             .map(String::from)
             .collect();
+        self.contexts.borrow_mut().clear();
         self.engine.set_user_words(&self.user_words);
     }
 
@@ -1469,6 +1523,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
         }
         self.log_event("dict-add", &[("word", jstr(&w))]);
         self.user_words.push(w.clone());
+        self.contexts.borrow_mut().clear();
         self.engine.set_user_words(&self.user_words);
         self.user_dirty = true;
         self.notice = Some(t(self.ui, "dict.added").replace("{}", &w));
@@ -1478,6 +1533,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
     fn remove_user_word(&mut self, w: &str) {
         let lower = w.to_lowercase();
         self.user_words.retain(|u| u.to_lowercase() != lower);
+        self.contexts.borrow_mut().clear();
         self.engine.set_user_words(&self.user_words);
         self.user_dirty = true;
         self.notice = Some(t(self.ui, "dict.removed").replace("{}", w));
@@ -1523,6 +1579,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
 
     /// Apply user settings (from the settings screen).
     pub fn set_settings(&mut self, settings: Settings) {
+        self.contexts.borrow_mut().clear();
         if settings.one_row != self.engine.config().one_row_input {
             let mut cfg = self.engine.config().clone();
             cfg.one_row_input = settings.one_row;
@@ -1853,6 +1910,9 @@ impl<D: AsRef<[u8]>> Ime<D> {
         self.emoji_search = None;
         self.commas_rejected.clear();
         self.recorrect = None;
+        self.arc = None;
+        self.arc_forced = Some(None);
+        self.arc_auto = false;
         self.lang_for_field();
         self.shift = Shift::Off;
         self.update_shift();
@@ -2066,19 +2126,23 @@ impl<D: AsRef<[u8]>> Ime<D> {
         if let Some(panel) = &self.panel {
             let frame = self.panel_frame();
             if y < frame.page_bottom {
-                return frame.hit(panel.tab, x, y).map(Target::Panel);
+                return frame.hit(panel.tab, x, y, panel.scroll).map(Target::Panel);
             }
         }
-        if self.emoji_search.is_some() && y < self.strip_h() {
-            let qw = self.width * QUERY_SHARE;
-            if x < qw {
-                return Some(Target::Query);
+        if self.emoji_search.is_some() && y < 2.0 * self.strip_h() {
+            if y < self.strip_h() {
+                return (x < SEARCH_BACK_DP * self.dp).then_some(Target::Query);
             }
-            let cell = ((x - qw) / ((self.width - qw) / SEARCH_CELLS as f32)).floor() as usize;
-            return (cell < self.stash.found.len().min(SEARCH_CELLS)).then_some(Target::Found(cell));
+            let cell = (x / (self.width / SEARCH_CELLS as f32)).floor() as usize;
+            return (cell < self.stash.found.len().min(SEARCH_CELLS))
+                .then_some(Target::Found(cell));
         }
         if y < self.strip_h() {
-            let slot = ((x / self.width) * 3.0).floor().clamp(0.0, 2.0) as usize;
+            let strip_w = self.strip_width();
+            if x >= strip_w {
+                return self.clipboard_button().then_some(Target::Clipboard);
+            }
+            let slot = ((x / strip_w) * 3.0).floor().clamp(0.0, 2.0) as usize;
             return self.slots[slot].as_ref().map(|_| Target::Slot(slot));
         }
         // Nearest key: taps in the gaps between keys still land somewhere.
@@ -2341,6 +2405,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
             Some(Target::Panel(h)) => format!("{h:?}").to_lowercase(),
             Some(Target::Query) => "query".into(),
             Some(Target::Found(i)) => format!("found{i}"),
+            Some(Target::Clipboard) => "clipboard".into(),
             None => String::new(),
         }
     }
@@ -2360,6 +2425,9 @@ impl<D: AsRef<[u8]>> Ime<D> {
         }
         if self.calib.is_some() {
             return self.calibration_touch(action, x, y);
+        }
+        if action == DOWN && self.timer == Timer::Proofread {
+            self.timer = Timer::None;
         }
         if action == DOWN && self.notice.take().is_some() {
             self.update_slots();
@@ -2481,6 +2549,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
                     trail_ms: vec![time_ms],
                     travel: 0.0,
                     gesture: false,
+                    scrolling: false,
                     aim: self.grip_shift(x, y),
                     previewed: 0,
                 };
@@ -2563,13 +2632,25 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 if p.done {
                     return 0;
                 }
-                // On the panel: a sideways swipe turns the page.
+                // On the panel: a sideways swipe turns the page; a vertical
+                // drag scrolls the emoji grid row by row, without paging it.
                 if let Some(Target::Panel(_)) = p.origin {
                     let (dx, dy) = (x - p.start_x, y - p.start_y);
                     if dx.abs() > swipe && dx.abs() > 2.0 * dy.abs() {
                         p.done = true;
                         self.flip_page(if dx < 0.0 { 1 } else { -1 });
                         return REDRAW | HAPTIC;
+                    }
+                    let emoji = self.panel.is_some_and(|panel| panel.tab != Tab::Clips);
+                    if emoji && (p.scrolling || dy.abs() > slide && dy.abs() > dx.abs()) {
+                        let last_y = p.trail.last().map_or(p.start_y, |&(_, y)| y);
+                        p.scrolling = true;
+                        p.target = None;
+                        p.trail.push((x, y));
+                        if let Some(panel) = self.panel.as_mut() {
+                            panel.scroll_by((last_y - y) / row_h, &self.stash, self.emoji_max);
+                        }
+                        return REDRAW;
                     }
                     return 0;
                 }
@@ -2745,7 +2826,13 @@ impl<D: AsRef<[u8]>> Ime<D> {
                         self.pending = None;
                     }
                 }
-                REDRAW | OUTPUT
+                REDRAW
+                    | OUTPUT
+                    | if self.timer == Timer::Proofread {
+                        timer_flag(PROOF_DELAY_MS)
+                    } else {
+                        0
+                    }
             }
             _ => {
                 self.pointers.clear();
@@ -2832,6 +2919,14 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 });
                 REDRAW | HAPTIC
             }
+            Timer::Proofread => {
+                self.timer = Timer::None;
+                if self.word.is_empty() {
+                    self.proofread(false, true);
+                    return REDRAW | OUTPUT;
+                }
+                0
+            }
             Timer::Repeat(id) if self.pointers.iter().any(|p| p.id == id) => {
                 self.held_bksp += 1;
                 if self.held_bksp <= CHAR_REPEATS {
@@ -2863,6 +2958,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 }
             }
             Target::Slot(i) => self.pick_slot(i),
+            Target::Clipboard => self.open_clipboard(),
             Target::Panel(h) => self.panel_tap(h),
             Target::Key(k) => match self.keys[k].action {
                 Action::Char(c) => {
@@ -2926,8 +3022,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
         }
     }
 
-    /// The panel's 🔍: the letters come back to type the query, the strip
-    /// shows the emoji it finds (as Gboard does).
+    /// The panel's 🔍: a query row and a separate results row over the letters.
     fn start_search(&mut self) {
         if !self.word.is_empty() {
             self.commit_word(false);
@@ -2969,6 +3064,17 @@ impl<D: AsRef<[u8]>> Ime<D> {
         self.relayout();
     }
 
+    fn open_clipboard(&mut self) {
+        if !self.settings.clipboard {
+            return;
+        }
+        self.popup = None;
+        self.emoji_search = None;
+        self.stash.found.clear();
+        self.panel = Some(Panel::clipboard());
+        self.relayout();
+    }
+
     /// Hold the comma: the emoji (the recent ones first, if any).
     /// With a word typed there (or just before the cursor), the emoji its
     /// name finds first, in the recent ones' tab (🔍); one picked goes after
@@ -2982,7 +3088,11 @@ impl<D: AsRef<[u8]>> Ime<D> {
             self.word.clone()
         } else {
             let text = self.before.strip_suffix(' ').unwrap_or(&self.before);
-            let rev: String = text.chars().rev().take_while(|c| c.is_alphabetic()).collect();
+            let rev: String = text
+                .chars()
+                .rev()
+                .take_while(|c| c.is_alphabetic())
+                .collect();
             rev.chars().rev().collect()
         };
         let found = panel::search(self.lang, &word, self.emoji_max);
@@ -3009,6 +3119,11 @@ impl<D: AsRef<[u8]>> Ime<D> {
             return;
         };
         match hit {
+            Hit::Close => {
+                self.panel = None;
+                self.relayout();
+                return;
+            }
             Hit::Tab(i) => {
                 self.stash.settle();
                 p.open_tab(Tab::from_index(i as usize));
@@ -3024,7 +3139,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
             }
             Hit::Cell(i) | Hit::Remove(i) => {
                 let item = p
-                    .page_items(&self.stash, self.emoji_max)
+                    .visible_items(&self.stash, self.emoji_max)
                     .get(i as usize)
                     .map(|s| s.to_string());
                 match item {
@@ -3138,7 +3253,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
         }
         self.type_char_now(c);
         if matches!(c, '.' | '!' | '?') {
-            self.proofread(false);
+            self.proofread(false, false);
         }
     }
 
@@ -3510,6 +3625,18 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 p.variant = 0;
             }
         }
+        self.schedule_proofread();
+    }
+
+    fn schedule_proofread(&mut self) {
+        if self.settings.auto_commas
+            && self.suggest
+            && self.lang == Lang::Ru
+            && self.word.is_empty()
+            && self.engine.sentence_parser().is_some()
+        {
+            self.timer = Timer::Proofread;
+        }
     }
 
     /// `word` just went in with a space after another word, a space between
@@ -3584,12 +3711,11 @@ impl<D: AsRef<[u8]>> Ime<D> {
         true
     }
 
-    /// A sentence just finished — by `.`, `!` or `?` (`by_enter`: by Enter,
-    /// no mark after its last word): the commas the graph of the whole
-    /// sentence is sure of ([`PROOF_SURE`]) go in where no mark stands, the
-    /// comma model not against them ([`PROOF_ODDS`]); ⌫ right after takes
-    /// them out.
-    fn proofread(&mut self, by_enter: bool) {
+    /// Read the whole current sentence after its final mark, by Enter, or in a
+    /// pause between words (`live`). Put the commas its graph is sure of where
+    /// no mark stands; ⌫ right after takes them out. Live reading leaves dashes
+    /// and the final question mark until the sentence's end.
+    fn proofread(&mut self, by_enter: bool, live: bool) {
         self.proof_undo = None;
         if !self.settings.auto_commas || !self.suggest || self.lang != Lang::Ru {
             return;
@@ -3604,7 +3730,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
             if rest.chars().any(|c| !c.is_whitespace()) {
                 return; // proofread at its mark already
             }
-        } else if !sentence_start(&format!("{} ", text.trim_end())) {
+        } else if !live && !sentence_start(&format!("{} ", text.trim_end())) {
             return; // a short form's period (т. е.), not the sentence's end
         }
         let toks = tokens(body);
@@ -3624,7 +3750,9 @@ impl<D: AsRef<[u8]>> Ime<D> {
         let sent = &toks[first..];
         if sent.len() < 2
             || sent.len() > places
-            || sent.iter().any(|t| t.text.chars().any(|c| c.is_ascii_alphabetic()))
+            || sent
+                .iter()
+                .any(|t| t.text.chars().any(|c| c.is_ascii_alphabetic()))
         {
             return;
         }
@@ -3641,7 +3769,11 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 }
             })
             .collect();
-        let words: Vec<(&str, &str)> = sent.iter().zip(&marks).map(|(t, m)| (t.text, m.as_str())).collect();
+        let words: Vec<(&str, &str)> = sent
+            .iter()
+            .zip(&marks)
+            .map(|(t, m)| (t.text, m.as_str()))
+            .collect();
         let Some((put, end)) = self.engine.sentence_marks(&words) else {
             return;
         };
@@ -3671,7 +3803,9 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 if self.commas_rejected.contains(&pair) {
                     return None;
                 }
-                let odds = self.engine.comma_odds_in(&text[..prev.end], &pair.0, &pair.1)?;
+                let odds = self
+                    .engine
+                    .comma_odds_in(&text[..prev.end], &pair.0, &pair.1)?;
                 Some(Cand {
                     pos: prev.end,
                     by: p.by,
@@ -3701,8 +3835,15 @@ impl<D: AsRef<[u8]>> Ime<D> {
             if PROOF_HEAD_VETO {
                 // The head judges the rules: a rule's comma stands unless the
                 // head is against it.
-                let veto = if c.rule == "set aside" { PROOF_VETO_SET } else { PROOF_VETO };
-                return PROOF_RULES && c.rule != "learned" && c.chance >= PROOF_SURE && c.learned >= veto;
+                let veto = if c.rule == "set aside" {
+                    PROOF_VETO_SET
+                } else {
+                    PROOF_VETO
+                };
+                return PROOF_RULES
+                    && c.rule != "learned"
+                    && c.chance >= PROOF_SURE
+                    && c.learned >= veto;
             }
             if c.rule == "learned" || !PROOF_RULES {
                 return false;
@@ -3724,19 +3865,30 @@ impl<D: AsRef<[u8]>> Ime<D> {
             let pair_of = |o: &&Cand| o.pos != c.pos && o.by == c.by;
             // The phrase's other comma stands, or goes in by itself — a
             // sure rule's pair on a firmer «no» only.
-            let opened = cands.iter().filter(pair_of).any(|o| o.there || alone(o) && c.floor.is_some());
+            let opened = cands
+                .iter()
+                .filter(pair_of)
+                .any(|o| o.there || alone(o) && c.floor.is_some());
             let partner = cands.iter().filter(pair_of).any(|o| alone(o));
-            let sure = c.chance >= PROOF_SURE && c.rule != "learned" && PROOF_RULES && !PROOF_HEAD_VETO;
-            if alone(c) || sure && (c.odds >= PROOF_RESCUE && partner || c.odds >= PROOF_OPENED && opened) {
+            let sure =
+                c.chance >= PROOF_SURE && c.rule != "learned" && PROOF_RULES && !PROOF_HEAD_VETO;
+            if alone(c)
+                || sure && (c.odds >= PROOF_RESCUE && partner || c.odds >= PROOF_OPENED && opened)
+            {
                 at.push((c.pos, c.pair.clone()));
             }
         }
         // What goes in: the commas, then the dashes the graph is sure of
         // where no mark stands or goes, and — a sentence ended by Enter with
         // no mark — «?» when it asks.
-        let mut ins: Vec<(usize, &str, Option<(String, String)>)> =
-            at.into_iter().map(|(pos, pair)| (pos, ",", Some(pair))).collect();
-        for p in put.iter().filter(|p| p.mark == Mark::Dash && p.before > 0 && p.learned >= PROOF_DASH) {
+        let mut ins: Vec<(usize, &str, Option<(String, String)>)> = at
+            .into_iter()
+            .map(|(pos, pair)| (pos, ",", Some(pair)))
+            .collect();
+        for p in put
+            .iter()
+            .filter(|p| !live && p.mark == Mark::Dash && p.before > 0 && p.learned >= PROOF_DASH)
+        {
             let (prev, next) = (&sent[p.before - 1], &sent[p.before]);
             let pair = (prev.text.to_lowercase(), next.text.to_lowercase());
             if next.before.is_empty()
@@ -4262,7 +4414,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
         self.prev_word = None;
         // A sentence ended by Enter, no mark after it: proofread as a mark
         // would have it (before the app sends it).
-        self.proofread(true);
+        self.proofread(true, false);
         self.out.push(Op::Enter);
         self.before.push('\n');
         if let Some(u) = self.proof_undo.as_mut() {
@@ -5186,11 +5338,25 @@ impl<D: AsRef<[u8]>> Ime<D> {
     /// phrase, the sentence ([`kbcore::Context`]): every reading of a word,
     /// typed, completed, drawn or predicted, is weighed by it.
     fn context_at(&self, text: &str) -> Context {
-        self.engine.context(
+        let key = format!("{}\0{text}", self.engine_pack);
+        if let Some(found) = self
+            .contexts
+            .borrow()
+            .iter()
+            .find(|(place, _)| place == &key)
+            .map(|(_, ctx)| ctx.clone())
+        {
+            return found;
+        }
+        let ctx = self.engine.context(
             self.word_before(text).as_deref(),
             &Self::phrase_of(text),
             &Self::sentence_of(text),
-        )
+        );
+        let mut cache = self.contexts.borrow_mut();
+        cache.insert(0, (key, ctx.clone()));
+        cache.truncate(8);
+        ctx
     }
 
     /// The words of `text` back to the end of the sentence before (at most
@@ -5337,7 +5503,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
         let n = lower.chars().count();
         if self.settings.autocorrect && !shaped && !insisted && n >= 2 {
             let (per_letter, lead, known_margin) = self.settings.strength.limits();
-            let known = self.engine.contains(&lower);
+            let known = self.engine.plausible(&lower);
             // A real word typed is guarded: kept unless a cheap slip, or a
             // form the grammar asks for. Not at «Always»: there it gives way
             // to any reading clearly likelier (the margin still protects what
@@ -5678,6 +5844,24 @@ impl<D: AsRef<[u8]>> Ime<D> {
             ]);
             texts.push(s);
         };
+        let text_left = |ops: &mut Vec<i32>,
+                         texts: &mut Vec<String>,
+                         s: String,
+                         x: f32,
+                         cy: f32,
+                         size: f32,
+                         color: i32| {
+            ops.extend([
+                OP_TEXT_LEFT,
+                x as i32,
+                (cy + size * 0.35) as i32,
+                size as i32,
+                color,
+                texts.len() as i32,
+                0,
+            ]);
+            texts.push(s);
+        };
 
         // A pixel more than the view: rounding must not leave a line uncovered.
         rect(
@@ -5690,7 +5874,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
             0.0,
         );
 
-        // The emoji and clipboard panel: its tabs where the strip is, a page
+        // The emoji or clipboard panel: its header where the strip is, a page
         // over the letter rows (the keys below are its bottom row).
         let (gx, gy) = (GAP_X_DP * dp / 2.0, GAP_Y_DP * dp / 2.0);
         if let Some(p) = &self.panel {
@@ -5699,39 +5883,62 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 Some(Target::Panel(h)) if !q.done => Some(h),
                 _ => None,
             });
-            let tw = frame.tab_w();
-            for i in 0..panel::TABS {
-                if i == p.selected() {
-                    let (x, y) = (i as f32 * tw + 4.0 * dp, frame.tabs_h - 5.0 * dp);
-                    rect(
-                        &mut ops,
-                        x,
-                        y,
-                        tw - 8.0 * dp,
-                        3.0 * dp,
-                        pal.accent,
-                        1.5 * dp,
-                    );
-                }
-                let icon = if i == 1 && !self.stash.found.is_empty() {
-                    "🔍".to_string()
-                } else {
-                    Tab::from_index(i).icon().to_string()
-                };
-                let cx = (i as f32 + 0.5) * tw;
-                let size = (19.0 * dp).min(tw * 0.55);
+            if p.tab == Tab::Clips {
                 text(
                     &mut ops,
                     &mut texts,
-                    icon,
-                    cx,
+                    t(self.ui, "panel.clipboard").into(),
+                    self.width / 2.0,
                     frame.tabs_h / 2.0,
-                    size,
+                    17.0 * dp,
                     pal.text,
+                    true,
+                );
+                text(
+                    &mut ops,
+                    &mut texts,
+                    "✕".into(),
+                    self.width - 24.0 * dp,
+                    frame.tabs_h / 2.0,
+                    18.0 * dp,
+                    pal.text_dim,
                     false,
                 );
+            } else {
+                let tw = frame.tab_w();
+                for i in 0..panel::TABS {
+                    if i == p.selected() {
+                        let (x, y) = (i as f32 * tw + 4.0 * dp, frame.tabs_h - 5.0 * dp);
+                        rect(
+                            &mut ops,
+                            x,
+                            y,
+                            tw - 8.0 * dp,
+                            3.0 * dp,
+                            pal.accent,
+                            1.5 * dp,
+                        );
+                    }
+                    let icon = if i == 0 && !self.stash.found.is_empty() {
+                        "🔍".to_string()
+                    } else {
+                        Tab::from_index(i).icon().to_string()
+                    };
+                    let cx = (i as f32 + 0.5) * tw;
+                    let size = (19.0 * dp).min(tw * 0.55);
+                    text(
+                        &mut ops,
+                        &mut texts,
+                        icon,
+                        cx,
+                        frame.tabs_h / 2.0,
+                        size,
+                        pal.text,
+                        false,
+                    );
+                }
             }
-            let items = p.page_items(&self.stash, self.emoji_max);
+            let items = p.visible_items(&self.stash, self.emoji_max);
             if items.is_empty() {
                 let key = if p.tab == Tab::Clips {
                     "panel.clips_empty"
@@ -5793,10 +6000,19 @@ impl<D: AsRef<[u8]>> Ime<D> {
                     );
                 }
             } else {
-                let (_, _, cw, ch) = frame.cell(0);
+                let (_, _, cw, ch) = frame.cell(0, 0.0);
                 let size = (ch * 0.6).min(cw * 0.6);
+                ops.extend([
+                    OP_CLIP,
+                    0,
+                    frame.tabs_h as i32,
+                    self.width as i32,
+                    (frame.page_bottom - frame.tabs_h) as i32,
+                    0,
+                    0,
+                ]);
                 for (i, e) in items.iter().enumerate() {
-                    let (x, y, w, h) = frame.cell(i);
+                    let (x, y, w, h) = frame.cell(i, p.scroll.fract());
                     if pressed == Some(Hit::Cell(i as u8)) {
                         rect(
                             &mut ops,
@@ -5819,11 +6035,12 @@ impl<D: AsRef<[u8]>> Ime<D> {
                         false,
                     );
                 }
+                ops.extend([OP_RESTORE, 0, 0, 0, 0, 0, 0]);
             }
         }
 
         // Suggestion strip — or the calibration prompt / a notice.
-        let slot_w = self.width / 3.0;
+        let slot_w = self.strip_width() / 3.0;
         let strip_mid = self.strip_h() / 2.0;
         let prompt = self.strip_prompt().filter(|_| self.panel.is_none());
         if let Some((line, way_out)) = &prompt {
@@ -5858,28 +6075,88 @@ impl<D: AsRef<[u8]>> Ime<D> {
             }
         }
         if let Some(q) = &self.emoji_search {
-            // The query in its box (a lens before it), the emoji it finds after.
-            let qw = self.width * QUERY_SHARE;
-            rect(&mut ops, 6.0 * dp, strip_mid - 15.0 * dp, qw - 12.0 * dp, 30.0 * dp, pal.key_special, 15.0 * dp);
-            ops.extend([OP_ICON, (20.0 * dp) as i32, strip_mid as i32, (14.0 * dp) as i32, pal.text_dim, ICON_SEARCH, 0]);
+            // A full search row, then a separate row of results above the letters.
+            let back = SEARCH_BACK_DP * dp;
+            text(
+                &mut ops,
+                &mut texts,
+                "←".into(),
+                back / 2.0,
+                strip_mid,
+                24.0 * dp,
+                pal.text,
+                false,
+            );
+            rect(
+                &mut ops,
+                back,
+                strip_mid - 15.0 * dp,
+                self.width - back - 6.0 * dp,
+                30.0 * dp,
+                pal.key_special,
+                15.0 * dp,
+            );
+            ops.extend([
+                OP_ICON,
+                (back + 20.0 * dp) as i32,
+                strip_mid as i32,
+                (14.0 * dp) as i32,
+                pal.text_dim,
+                ICON_SEARCH,
+                0,
+            ]);
             let (line, color) = if q.is_empty() {
                 (t(self.ui, "emoji.search").to_string(), pal.text_dim)
             } else {
-                (format!("{q}│"), pal.text)
+                (q.clone(), pal.text)
             };
-            let size = (15.0 * dp).min((qw - 40.0 * dp) / (line.chars().count() as f32 * 0.55).max(1.0));
-            text(&mut ops, &mut texts, line, (qw + 22.0 * dp) / 2.0, strip_mid, size, color, false);
-            let cw = (self.width - qw) / SEARCH_CELLS as f32;
+            let room = self.width - back - 48.0 * dp;
+            let size = 15.0 * dp;
+            let fits = (room / (size * 0.58)).floor().max(4.0) as usize - 1;
+            let line = if line.chars().count() > fits {
+                let tail: String = line.chars().rev().take(fits - 1).collect();
+                format!("…{}", tail.chars().rev().collect::<String>())
+            } else {
+                line
+            };
+            let line = if q.is_empty() {
+                line
+            } else {
+                format!("{line}│")
+            };
+            let left = back + 36.0 * dp;
+            ops.extend([
+                OP_CLIP,
+                left as i32,
+                (strip_mid - 16.0 * dp) as i32,
+                (self.width - left - 8.0 * dp) as i32,
+                (32.0 * dp) as i32,
+                0,
+                0,
+            ]);
+            text_left(&mut ops, &mut texts, line, left, strip_mid, size, color);
+            ops.extend([OP_RESTORE, 0, 0, 0, 0, 0, 0]);
+            let cw = self.width / SEARCH_CELLS as f32;
             for (i, e) in self.stash.found.iter().take(SEARCH_CELLS).enumerate() {
-                let cx = qw + (i as f32 + 0.5) * cw;
-                text(&mut ops, &mut texts, e.clone(), cx, strip_mid, (22.0 * dp).min(cw * 0.7), pal.text, false);
+                let cx = (i as f32 + 0.5) * cw;
+                text(
+                    &mut ops,
+                    &mut texts,
+                    e.clone(),
+                    cx,
+                    1.5 * self.strip_h(),
+                    (24.0 * dp).min(cw * 0.7),
+                    pal.text,
+                    false,
+                );
             }
         }
-        let slots: &[Option<String>] = if prompt.is_some() || self.panel.is_some() || self.emoji_search.is_some() {
-            &[]
-        } else {
-            &self.slots
-        };
+        let slots: &[Option<String>] =
+            if prompt.is_some() || self.panel.is_some() || self.emoji_search.is_some() {
+                &[]
+            } else {
+                &self.slots
+            };
         for (i, s) in slots.iter().enumerate() {
             if i > 0 {
                 rect(
@@ -5940,15 +6217,28 @@ impl<D: AsRef<[u8]>> Ime<D> {
             }
         }
 
+        if self.clipboard_button() {
+            ops.extend([
+                OP_ICON,
+                (self.width - AUX_DP * dp / 2.0) as i32,
+                strip_mid as i32,
+                (19.0 * dp) as i32,
+                pal.text_dim,
+                ICON_CLIPBOARD,
+                0,
+            ]);
+        }
+
         // The guessed grip, top right of the strip.
-        if let (true, true, Some(g), None, None) = (
+        if let (true, true, Some(g), None, None, None) = (
             self.settings.grip_indicator,
             self.grips.calibrated(),
             self.sense.shown(),
             &self.calib,
             &self.panel,
+            &self.emoji_search,
         ) {
-            let (x, y) = (self.width - 18.0 * dp, 9.0 * dp);
+            let (x, y) = (self.strip_width() - 18.0 * dp, 9.0 * dp);
             text(
                 &mut ops,
                 &mut texts,
@@ -6047,7 +6337,15 @@ impl<D: AsRef<[u8]>> Ime<D> {
             };
             text(&mut ops, &mut texts, label, cx, cy, size, fg, bold);
             if key.action == Action::EmojiSearch {
-                ops.extend([OP_ICON, cx as i32, cy as i32, (18.0 * dp) as i32, fg, ICON_SEARCH, 0]);
+                ops.extend([
+                    OP_ICON,
+                    cx as i32,
+                    cy as i32,
+                    (18.0 * dp) as i32,
+                    fg,
+                    ICON_SEARCH,
+                    0,
+                ]);
             }
             let alt = Self::alt_of(key, self.settings.emoji_on_enter);
             if alt == Some(EMOJI_KEY) {
@@ -6580,12 +6878,21 @@ mod tests {
         k.start_input("привет ", 1);
         k.open_panel();
         k.activate(Target::Key(
-            k.keys.iter().position(|q| q.action == Action::EmojiSearch).unwrap(),
+            k.keys
+                .iter()
+                .position(|q| q.action == Action::EmojiSearch)
+                .unwrap(),
         ));
         assert!(k.panel.is_none() && k.emoji_search.is_some());
+        assert!(k.keys.iter().all(|key| key.y >= 2.0 * k.strip_h()));
         type_str(&mut k, "огон");
         assert_eq!(k.emoji_search.as_deref(), Some("огон"));
-        assert!(k.stash.found.iter().any(|e| e == "🔥"), "{:?}", k.stash.found);
+        assert!(k.draw().1.iter().any(|s| s == "огон│"));
+        assert!(
+            k.stash.found.iter().any(|e| e == "🔥"),
+            "{:?}",
+            k.stash.found
+        );
         assert_eq!(k.before, "привет ", "the query stays out of the text");
         type_str(&mut k, "⌫");
         assert_eq!(k.emoji_search.as_deref(), Some("ого"));
@@ -6599,12 +6906,34 @@ mod tests {
     }
 
     #[test]
+    fn emoji_scroll_vertically_without_inserting_one() {
+        let mut k = ime(WORDS);
+        k.start_input("", 1);
+        k.open_panel();
+        k.panel.as_mut().unwrap().open_tab(Tab::Group(0));
+        let frame = k.panel_frame();
+        let (x, y, w, h) = frame.cell(2 * panel::COLS, 0.0);
+        let x = x + w / 2.0;
+        let y = y + h / 2.0;
+        k.touch(DOWN, 0, x, y, 1_000);
+        k.touch(MOVE, 0, x, y - h * 0.7, 1_020);
+        k.touch(MOVE, 0, x, y - h * 1.4, 1_040);
+        k.touch(UP, 0, x, y - h * 1.4, 1_060);
+        assert!(k.panel.unwrap().scroll > 1.0);
+        assert!(k.before.is_empty());
+    }
+
+    #[test]
     fn a_word_typed_finds_its_emoji() {
         let mut k = ime(WORDS);
         k.start_input("", 1);
         type_str(&mut k, "огонь");
         k.open_panel();
-        assert!(k.stash.found.iter().any(|e| e == "🔥"), "{:?}", k.stash.found);
+        assert!(
+            k.stash.found.iter().any(|e| e == "🔥"),
+            "{:?}",
+            k.stash.found
+        );
         assert_eq!(k.panel.unwrap().tab, Tab::Recent);
         // Just before the cursor, with its space: the same.
         k.start_input("", 1);
@@ -8110,7 +8439,24 @@ mod tests {
     }
 
     #[test]
-    fn holding_the_comma_opens_the_emoji_and_the_copies() {
+    fn opening_a_field_never_restores_or_arms_the_one_handed_layout() {
+        let mut k = ime(WORDS);
+        k.set_settings(Settings {
+            arc_layout: true,
+            ..Settings::default()
+        });
+        k.arc = Some(Hand::Left);
+        k.arc_forced = None;
+        k.arc_auto = true;
+        k.start_input("", 1);
+        assert_eq!(k.arc, None);
+        assert_eq!(k.arc_forced, Some(None));
+        assert!(!k.arc_auto);
+        assert_eq!(k.arc_hand(), None);
+    }
+
+    #[test]
+    fn holding_the_comma_opens_the_emoji() {
         let mut k = ime(WORDS);
         k.start_input("", 1);
         type_str(&mut k, "привет");
@@ -8131,7 +8477,7 @@ mod tests {
         assert_eq!(tab, Tab::Recent);
         let first = k.stash.found[0].clone();
         let frame = k.panel_frame();
-        let (cx, cy, w, h) = frame.cell(0);
+        let (cx, cy, w, h) = frame.cell(0, 0.0);
         k.touch(DOWN, 0, cx + w / 2.0, cy + h / 2.0, 2_000);
         k.touch(UP, 0, cx + w / 2.0, cy + h / 2.0, 2_050);
         assert_eq!(k.before, format!("привет {first}"));
@@ -8174,6 +8520,17 @@ mod tests {
         type_str(&mut k, "⌫");
         assert!(k.slots.iter().flatten().all(|s| !s.starts_with(CLIP_MARK)));
         assert_eq!(k.stash.clips, vec!["второй", "https://example.org"]);
+        k.start_input("", 1);
+        k.open_clipboard();
+        assert_eq!(k.panel.unwrap().tab, Tab::Clips);
+        assert!(k.keys.iter().all(|key| key.action != Action::EmojiSearch));
+        k.take_ops();
+        k.panel_tap(Hit::Cell(0));
+        assert_eq!(k.take_ops(), vec![Op::Commit("второй".into())]);
+        k.panel_tap(Hit::Close);
+        assert!(k.panel.is_none());
+        k.open_panel();
+        assert!(k.panel.unwrap().tab != Tab::Clips);
     }
 
     #[test]
@@ -8181,6 +8538,22 @@ mod tests {
         let mut k = ime(WORDS);
         type_str(&mut k, "при ");
         assert!(k.take_ops().contains(&Op::Commit("При".into())));
+    }
+
+    #[test]
+    fn plausible_new_words_are_not_replaced() {
+        let mut k = ime(&[
+            ("пар", 3000),
+            ("ход", 3000),
+            ("prompt", 3000),
+            ("паром", 2500),
+        ]);
+        k.start_input("", 1);
+        type_str(&mut k, "пароход");
+        assert!(k.autocorrect.is_none(), "a compound of known roots");
+        k.start_input("", 1);
+        type_str(&mut k, "промпт");
+        assert!(k.autocorrect.is_none(), "an English word in Cyrillic");
     }
 
     #[test]
@@ -8654,7 +9027,11 @@ mod tests {
     #[test]
     fn two_slot_strip_keeps_the_typed_word_left_and_does_not_repeat_the_fix() {
         let mut k = ime(WORDS);
-        k.set_settings(Settings::default()); // live correction, strip: typed + fix
+        k.set_settings(Settings {
+            live_correction: true,
+            strip: crate::settings::Strip::Two,
+            ..Settings::default()
+        });
         k.start_input("", 1);
         type_str(&mut k, "привкт");
         assert_eq!(
@@ -8900,12 +9277,15 @@ mod tests {
         let (ops, texts) = k.draw();
         assert_eq!(ops.len() % 7, 0);
         for op in ops.chunks(7) {
-            assert!(matches!(op[0], OP_RECT | OP_TEXT | OP_ROTATE | OP_RESTORE | OP_ICON));
+            assert!(matches!(
+                op[0],
+                OP_RECT | OP_TEXT | OP_ROTATE | OP_RESTORE | OP_ICON
+            ));
             if op[0] == OP_TEXT {
                 assert!((op[5] as usize) < texts.len());
             }
             if op[0] == OP_ICON {
-                assert!(matches!(op[5], ICON_SMILE | ICON_SEARCH));
+                assert!(matches!(op[5], ICON_SMILE | ICON_SEARCH | ICON_CLIPBOARD));
             }
         }
     }

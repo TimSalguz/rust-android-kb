@@ -13,8 +13,6 @@ import android.widget.CheckBox;
 import android.text.InputType;
 import android.widget.EditText;
 import android.widget.LinearLayout;
-import android.widget.RadioButton;
-import android.widget.RadioGroup;
 import android.os.Build;
 import android.view.WindowInsets;
 import android.widget.ScrollView;
@@ -73,13 +71,13 @@ public final class SettingsActivity extends Activity {
             seen.setVisibility(View.VISIBLE);
             again.setVisibility(View.GONE);
         });
-        list.addView(guide);
-        list.addView(seen);
-
+        list.addView(heading(text("ui.setup"), pad));
         list.addView(button(text("ui.enable"),
                 v -> startActivity(new Intent(Settings.ACTION_INPUT_METHOD_SETTINGS))));
         list.addView(button(text("ui.pick"),
                 v -> ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE)).showInputMethodPicker()));
+        list.addView(guide);
+        list.addView(seen);
         list.addView(again);
 
         EditText test = new EditText(this);
@@ -87,12 +85,15 @@ public final class SettingsActivity extends Activity {
         test.setInputType(InputType.TYPE_CLASS_TEXT
                 | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
                 | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+        list.addView(test);
 
         String[] rows = Native.settingsSchema(path, RustKbService.locale());
         for (String row : rows == null ? new String[0] : rows) {
             String[] f = row.split("\t", -1);
             String key = f[0];
-            if (f[1].equals("actionpair")) {
+            if (f[1].equals("section")) {
+                list.addView(heading(f[2], pad));
+            } else if (f[1].equals("actionpair")) {
                 // Two buttons in a row: calibrate a grip | undo it.
                 String[] second = f[4].split(":", 3);
                 LinearLayout pair = new LinearLayout(this);
@@ -137,29 +138,35 @@ public final class SettingsActivity extends Activity {
                 toggle.setText(f[2]);
                 toggle.setChecked(f[3].equals("1"));
                 toggle.setPadding(0, pad / 2, 0, pad / 2);
-                toggle.setOnCheckedChangeListener((b, on) -> Native.setSetting(path, key, on ? "1" : "0"));
+                toggle.setOnCheckedChangeListener((b, on) -> setSetting(path, key, on ? "1" : "0", test));
                 list.addView(toggle);
             } else {
-                TextView label = new TextView(this);
-                label.setText(f[2]);
-                label.setPadding(0, pad, 0, 0);
-                list.addView(label);
-                RadioGroup group = new RadioGroup(this);
-                group.setOrientation(RadioGroup.VERTICAL);
-                for (String option : f[4].split("\\|")) {
-                    String[] kv = option.split(":", 2);
-                    RadioButton choice = new RadioButton(this);
-                    choice.setId(View.generateViewId());
-                    choice.setText(kv[1]);
-                    group.addView(choice);
-                    if (kv[0].equals(f[3])) group.check(choice.getId());
-                    choice.setOnClickListener(v -> Native.setSetting(path, key, kv[0]));
+                String[] options = f[4].split("\\|");
+                String[] labels = new String[options.length];
+                int selected = 0;
+                for (int i = 0; i < options.length; i++) {
+                    String[] kv = options[i].split(":", 2);
+                    labels[i] = kv[1];
+                    if (kv[0].equals(f[3])) selected = i;
                 }
-                list.addView(group);
+                Button choice = button(f[2] + " — " + labels[selected], null);
+                choice.setAllCaps(false);
+                final int[] checked = {selected};
+                choice.setOnClickListener(v -> new android.app.AlertDialog.Builder(this)
+                        .setTitle(f[2])
+                        .setSingleChoiceItems(labels, checked[0], (dialog, which) -> {
+                            String value = options[which].split(":", 2)[0];
+                            setSetting(path, key, value, test);
+                            checked[0] = which;
+                            choice.setText(f[2] + " — " + labels[which]);
+                            dialog.dismiss();
+                        })
+                        .setNegativeButton(android.R.string.cancel, null)
+                        .show());
+                list.addView(choice);
             }
         }
 
-        list.addView(test);
         list.addView(button(text("ui.github"),
                 v -> startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(REPO)))));
         list.addView(button(text("ui.licenses"), v -> showLicenses(pad)));
@@ -255,6 +262,30 @@ public final class SettingsActivity extends Activity {
                 .setView(scroll)
                 .setPositiveButton(android.R.string.ok, null)
                 .show();
+    }
+
+    private TextView heading(String label, int pad) {
+        TextView heading = new TextView(this);
+        heading.setText(label);
+        heading.setTextSize(18);
+        heading.setTypeface(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD);
+        heading.setPadding(0, pad, 0, pad / 3);
+        return heading;
+    }
+
+    private void setSetting(String path, String key, String value, EditText test) {
+        Native.setSetting(path, key, value);
+        boolean visual = key.equals("height") || key.equals("bottom_padding")
+                || key.equals("theme") || key.equals("borderless")
+                || key.equals("wallpaper_colors") || key.equals("one_row")
+                || key.equals("arc_layout");
+        if (visual) {
+            test.post(() -> {
+                test.requestFocus();
+                ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE))
+                        .showSoftInput(test, InputMethodManager.SHOW_IMPLICIT);
+            });
+        }
     }
 
     private String text(String key) {

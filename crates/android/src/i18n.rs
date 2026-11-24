@@ -62,6 +62,13 @@ const TEXTS: &[(&str, [&str; 6])] = &[
     ("grip.both", ["Двумя", "Both hands", "Beide Hände", "Deux mains", "Dos manos", "Duas mãos"]),
     ("grip.finger", ["Одним пальцем", "One finger", "Ein Finger", "Un doigt", "Un dedo", "Um dedo"]),
     // --- settings ---
+    ("set.section.size", ["Размер и расположение", "Size and position", "Größe und Position", "Taille et position", "Tamaño y posición", "Tamanho e posição"]),
+    ("set.section.appearance", ["Оформление", "Appearance", "Darstellung", "Apparence", "Apariencia", "Aparência"]),
+    ("set.section.general", ["Языки", "Languages", "Sprachen", "Langues", "Idiomas", "Idiomas"]),
+    ("set.section.correction", ["Текст и исправления", "Text and corrections", "Text und Korrekturen", "Texte et corrections", "Texto y correcciones", "Texto e correções"]),
+    ("set.section.typing", ["Клавиатура и жесты", "Keyboard and gestures", "Tastatur und Gesten", "Clavier et gestes", "Teclado y gestos", "Teclado e gestos"]),
+    ("set.section.grip", ["Хват и одна рука", "Grip and one hand", "Griff und eine Hand", "Prise et une main", "Agarre y una mano", "Pegada e uma mão"]),
+    ("set.section.developer", ["Для разработчиков", "For developers", "Für Entwickler", "Pour les développeurs", "Para desarrolladores", "Para desenvolvedores"]),
     ("set.languages", [
         "Языки — в этом порядке их перебирают кнопка языка и свайп по пробелу",
         "Languages — in the order the language key and a swipe on the space bar go through them",
@@ -145,6 +152,20 @@ const TEXTS: &[(&str, [&str; 6])] = &[
     ("set.height.90", ["Ниже", "Lower", "Niedriger", "Plus bas", "Más baja", "Mais baixo"]),
     ("set.height.100", ["Обычная", "Normal", "Normal", "Normale", "Normal", "Normal"]),
     ("set.height.115", ["Выше", "Taller", "Höher", "Plus haut", "Más alta", "Mais alto"]),
+    ("set.bottom_padding", [
+        "Дополнительный отступ снизу (если системная панель накрывает клавиши)",
+        "Extra bottom padding (if the system bar covers the keys)",
+        "Zusätzlicher Abstand unten (falls die Systemleiste Tasten überdeckt)",
+        "Marge inférieure supplémentaire (si la barre système couvre les touches)",
+        "Margen inferior adicional (si la barra del sistema cubre las teclas)",
+        "Margem inferior extra (se a barra do sistema cobrir as teclas)",
+    ]),
+    ("set.bottom_padding.0", ["Нет", "None", "Keiner", "Aucune", "Ninguno", "Nenhuma"]),
+    ("set.bottom_padding.8", ["8 dp", "8 dp", "8 dp", "8 dp", "8 dp", "8 dp"]),
+    ("set.bottom_padding.16", ["16 dp", "16 dp", "16 dp", "16 dp", "16 dp", "16 dp"]),
+    ("set.bottom_padding.24", ["24 dp", "24 dp", "24 dp", "24 dp", "24 dp", "24 dp"]),
+    ("set.bottom_padding.32", ["32 dp", "32 dp", "32 dp", "32 dp", "32 dp", "32 dp"]),
+    ("set.bottom_padding.48", ["48 dp", "48 dp", "48 dp", "48 dp", "48 dp", "48 dp"]),
     ("set.gestures", [
         "Набор свайпом: вести палец по буквам, не отрывая",
         "Swipe typing: slide the finger over the letters without lifting it",
@@ -162,12 +183,12 @@ const TEXTS: &[(&str, [&str; 6])] = &[
         "Deslize: considerar onde o dedo desacelerou ou parou",
     ]),
     ("set.clipboard", [
-        "Буфер обмена: предлагать вставить только что скопированное; недавние копии — во вкладке 📋 у эмодзи (только в памяти)",
-        "Clipboard: offer to paste what was just copied; recent copies in the 📋 tab by the emoji (in memory only)",
-        "Zwischenablage: gerade Kopiertes zum Einfügen anbieten; letzte Kopien im 📋-Tab bei den Emoji (nur im Speicher)",
-        "Presse-papiers : proposer de coller ce qui vient d'être copié ; copies récentes dans l'onglet 📋 des emoji (en mémoire seulement)",
-        "Portapapeles: ofrecer pegar lo que se acaba de copiar; copias recientes en la pestaña 📋 de los emojis (solo en memoria)",
-        "Área de transferência: oferecer colar o que acabou de ser copiado; cópias recentes na aba 📋 dos emojis (só na memória)",
+        "Буфер обмена: кнопка 📋 в верхней панели; предлагать вставить только что скопированное (только в памяти)",
+        "Clipboard: a 📋 button in the top bar; offer to paste what was just copied (in memory only)",
+        "Zwischenablage: 📋-Knopf in der oberen Leiste; gerade Kopiertes anbieten (nur im Speicher)",
+        "Presse-papiers : bouton 📋 dans la barre supérieure ; proposer le texte qui vient d'être copié (en mémoire seulement)",
+        "Portapapeles: botón 📋 en la barra superior; ofrecer pegar lo que se acaba de copiar (solo en memoria)",
+        "Área de transferência: botão 📋 na barra superior; oferecer colar o que acabou de ser copiado (só na memória)",
     ]),
     ("set.auto_commas", [
         "Запятые: ставить сами, где почти наверняка нужны (перед «что», «который», «но»…); ⌫ сразу после убирает",
@@ -185,6 +206,7 @@ const TEXTS: &[(&str, [&str; 6])] = &[
         "Ё (ruso): escribir «ещё», «пошёл», «её» cuando se teclea con е",
         "Ё (russo): escrever «ещё», «пошёл», «её» quando digitado com е",
     ]),
+    ("panel.clipboard", ["Буфер обмена", "Clipboard", "Zwischenablage", "Presse-papiers", "Portapapeles", "Área de transferência"]),
     ("panel.clips_empty", [
         "Здесь будет то, что вы скопируете, пока клавиатура работает. Нигде не сохраняется.",
         "What you copy while the keyboard runs shows up here. It is never saved.",
@@ -206,12 +228,12 @@ const TEXTS: &[(&str, [&str; 6])] = &[
     ("set.calibrate_both", ["[II] Двумя руками: фраза", "[II] Both hands: a phrase", "[II] Beide Hände: ein Satz", "[II] Deux mains : une phrase", "[II] Dos manos: una frase", "[II] Duas mãos: uma frase"]),
     ("set.calibrate_finger", ["[•] Одним пальцем, телефон на столе: фраза", "[•] One finger, the phone on a table: a phrase", "[•] Ein Finger, Telefon auf dem Tisch: ein Satz", "[•] Un doigt, téléphone sur la table : une phrase", "[•] Un dedo, teléfono en la mesa: una frase", "[•] Um dedo, telefone na mesa: uma frase"]),
     ("set.arc_layout", [
-        "Одной рукой: клавиатура сама подстраивается под левый или правый большой палец по наклону телефона (нужна калибровка хвата)",
-        "One-handed: the keyboard follows the left or right thumb by the phone's tilt (needs the grip calibration)",
-        "Einhändig: die Tastatur folgt dem linken oder rechten Daumen nach der Neigung des Telefons (braucht die Griff-Kalibrierung)",
-        "À une main : le clavier suit le pouce gauche ou droit selon l'inclinaison du téléphone (calibrage de la prise requis)",
-        "A una mano: el teclado sigue al pulgar izquierdo o derecho según la inclinación del teléfono (requiere calibrar el agarre)",
-        "Com uma mão: o teclado segue o polegar esquerdo ou direito pela inclinação do telefone (requer calibrar a pegada)",
+        "После ручного включения однорукого режима менять сторону по наклону телефона; сам при открытии не включается",
+        "After one-handed mode is enabled manually, follow the phone's tilt; never turn it on just because the keyboard opened",
+        "Nach manuellem Aktivieren der Einhandtastatur der Telefonneigung folgen; nie allein beim Öffnen aktivieren",
+        "Après l'activation manuelle du mode à une main, suivre l'inclinaison du téléphone ; ne jamais l'activer à l'ouverture",
+        "Tras activar manualmente el modo a una mano, seguir la inclinación; no activarlo solo al abrir el teclado",
+        "Depois de ativar manualmente o modo de uma mão, seguir a inclinação; nunca ativá-lo só ao abrir o teclado",
     ]),
     ("set.grip_undo", ["Откатить", "Undo", "Zurück", "Annuler", "Deshacer", "Desfazer"]),
     ("set.grip_indicator", [
@@ -240,6 +262,7 @@ const TEXTS: &[(&str, [&str; 6])] = &[
         "Para desenvolvedores: registro de digitação no campo de teste (typing-log.jsonl)",
     ]),
     // --- the settings screen's own texts (Java) ---
+    ("ui.setup", ["1. Включение клавиатуры", "1. Set up the keyboard", "1. Tastatur einrichten", "1. Activer le clavier", "1. Configurar el teclado", "1. Configurar o teclado"]),
     ("ui.enable", ["Включить Rust KB в системе", "Enable Rust KB in the system", "Rust KB im System aktivieren", "Activer Rust KB dans le système", "Activar Rust KB en el sistema", "Ativar o Rust KB no sistema"]),
     ("ui.pick", ["Выбрать клавиатуру", "Choose the keyboard", "Tastatur wählen", "Choisir le clavier", "Elegir el teclado", "Escolher o teclado"]),
     ("ui.try", ["Попробовать клавиатуру здесь", "Try the keyboard here", "Tastatur hier ausprobieren", "Essayer le clavier ici", "Probar el teclado aquí", "Experimentar o teclado aqui"]),
@@ -261,7 +284,7 @@ const TEXTS: &[(&str, [&str; 6])] = &[
 • Язык: смахните пробел влево или вправо (или нажмите кнопку языка). Какие языки и в каком порядке — в настройках ниже.\n\
 • Долгое нажатие на пробел — другая клавиатура или эти настройки.\n\
 • ⌫ сразу после исправления возвращает то, что вы написали. Свайп вверх по пробелу — следующий вариант слова.\n\
-• Долгое нажатие на букву — цифра, ё и буквы с акцентами. Долгое нажатие на запятую — эмодзи и недавно скопированное (📋).\n\
+• Долгое нажатие на букву — цифра, ё и буквы с акцентами. Долгое нажатие на запятую — эмодзи; кнопка 📋 в верхней панели — недавно скопированное.\n\
 • Выделите новое слово — клавиатура предложит добавить его в словарь.\n\
 • Клавиатура работает без интернета и ничего не отправляет и не запоминает о вас.",
         "How to use it\n\n\
@@ -270,7 +293,7 @@ const TEXTS: &[(&str, [&str; 6])] = &[
 • Language: swipe the space bar left or right (or tap the language key). Which languages and in what order — in the settings below.\n\
 • Hold the space bar for another keyboard or these settings.\n\
 • ⌫ right after a correction brings back what you typed. Swipe up on the space bar for the next likeliest word.\n\
-• Hold a letter for its digit and accented letters. Hold the comma for emoji and what you copied lately (📋).\n\
+• Hold a letter for its digit and accented letters. Hold the comma for emoji; the 📋 button in the top bar opens what you copied lately.\n\
 • Select a new word and the keyboard offers to add it to the dictionary.\n\
 • The keyboard works offline and never sends or remembers anything about you.",
         "So geht's\n\n\
@@ -279,7 +302,7 @@ const TEXTS: &[(&str, [&str; 6])] = &[
 • Sprache: die Leertaste nach links oder rechts wischen (oder die Sprachtaste tippen). Welche Sprachen in welcher Reihenfolge — unten in den Einstellungen.\n\
 • Leertaste gedrückt halten: eine andere Tastatur oder diese Einstellungen.\n\
 • ⌫ direkt nach einer Korrektur holt zurück, was du getippt hast. Nach oben über die Leertaste wischen: das nächstwahrscheinliche Wort.\n\
-• Einen Buchstaben gedrückt halten: Ziffer und Buchstaben mit Akzent. Das Komma gedrückt halten: Emoji und zuletzt Kopiertes (📋).\n\
+• Einen Buchstaben gedrückt halten: Ziffer und Buchstaben mit Akzent. Das Komma gedrückt halten: Emoji; 📋 in der oberen Leiste: zuletzt Kopiertes.\n\
 • Ein neues Wort markieren — die Tastatur bietet an, es ins Wörterbuch aufzunehmen.\n\
 • Die Tastatur arbeitet offline und sendet oder speichert nichts über dich.",
         "Mode d'emploi\n\n\
@@ -288,7 +311,7 @@ const TEXTS: &[(&str, [&str; 6])] = &[
 • Langue : glissez sur la barre d'espace vers la gauche ou la droite (ou touchez la touche de langue). Quelles langues et dans quel ordre — dans les réglages ci-dessous.\n\
 • Maintenez l'espace : un autre clavier ou ces réglages.\n\
 • ⌫ juste après une correction rend ce que vous aviez tapé. Glissez vers le haut sur l'espace : le mot suivant le plus probable.\n\
-• Maintenez une lettre : son chiffre et ses lettres accentuées. Maintenez la virgule : les emoji et ce que vous avez copié récemment (📋).\n\
+• Maintenez une lettre : son chiffre et ses lettres accentuées. Maintenez la virgule : les emoji ; 📋 dans la barre supérieure : ce que vous avez copié récemment.\n\
 • Sélectionnez un nouveau mot : le clavier propose de l'ajouter au dictionnaire.\n\
 • Le clavier fonctionne hors ligne et n'envoie ni ne retient rien sur vous.",
         "Cómo se usa\n\n\
@@ -297,7 +320,7 @@ const TEXTS: &[(&str, [&str; 6])] = &[
 • Idioma: desliza la barra espaciadora a la izquierda o a la derecha (o toca la tecla de idioma). Qué idiomas y en qué orden, en los ajustes de abajo.\n\
 • Mantén pulsado el espacio: otro teclado o estos ajustes.\n\
 • ⌫ justo después de una corrección recupera lo que escribiste. Desliza hacia arriba sobre el espacio: la siguiente palabra más probable.\n\
-• Mantén pulsada una letra: su número y sus letras con tilde. Mantén pulsada la coma: emojis y lo que copiaste hace poco (📋).\n\
+• Mantén pulsada una letra: su número y sus letras con tilde. Mantén pulsada la coma: emojis; 📋 en la barra superior: lo que copiaste hace poco.\n\
 • Selecciona una palabra nueva y el teclado te ofrece añadirla al diccionario.\n\
 • El teclado funciona sin conexión y no envía ni recuerda nada sobre ti.",
         "Como usar\n\n\
@@ -306,7 +329,7 @@ const TEXTS: &[(&str, [&str; 6])] = &[
 • Idioma: deslize a barra de espaço para a esquerda ou a direita (ou toque na tecla de idioma). Quais idiomas e em que ordem — nos ajustes abaixo.\n\
 • Segure o espaço: outro teclado ou estes ajustes.\n\
 • ⌫ logo depois de uma correção traz de volta o que você digitou. Deslize para cima no espaço: a próxima palavra mais provável.\n\
-• Segure uma letra: o número e as letras com acento. Segure a vírgula: emojis e o que você copiou há pouco (📋).\n\
+• Segure uma letra: o número e as letras com acento. Segure a vírgula: emojis; 📋 na barra superior: o que você copiou há pouco.\n\
 • Selecione uma palavra nova e o teclado oferece adicioná-la ao dicionário.\n\
 • O teclado funciona offline e não envia nem guarda nada sobre você.",
     ]),

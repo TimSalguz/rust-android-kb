@@ -5,18 +5,50 @@ use kbcore::{gram, Config, Engine};
 const NAMES: [(u64, &str); 34] = {
     use gram::bit::*;
     [
-        (NOUN, "NOUN"), (ADJF, "ADJF"), (ADJS, "ADJS"), (VERB, "VERB"), (INFN, "INFN"),
-        (PRTF, "PRTF"), (PRTS, "PRTS"), (GRND, "GRND"), (NUMR, "NUMR"), (ADVB, "ADVB"),
-        (NPRO, "NPRO"), (PREP, "PREP"), (CONJ, "CONJ"), (PRCL, "PRCL"), (MASC, "masc"),
-        (FEMN, "femn"), (NEUT, "neut"), (MSF, "ms-f"), (SING, "sing"), (PLUR, "plur"),
-        (NOMN, "nomn"), (GENT, "gent"), (DATV, "datv"), (ACCS, "accs"), (ABLT, "ablt"),
-        (LOCT, "loct"), (PER1, "1per"), (PER2, "2per"), (PER3, "3per"), (PAST, "past"),
-        (PRES, "pres"), (FUTR, "futr"), (ANIM, "anim"), (INAN, "inan"),
+        (NOUN, "NOUN"),
+        (ADJF, "ADJF"),
+        (ADJS, "ADJS"),
+        (VERB, "VERB"),
+        (INFN, "INFN"),
+        (PRTF, "PRTF"),
+        (PRTS, "PRTS"),
+        (GRND, "GRND"),
+        (NUMR, "NUMR"),
+        (ADVB, "ADVB"),
+        (NPRO, "NPRO"),
+        (PREP, "PREP"),
+        (CONJ, "CONJ"),
+        (PRCL, "PRCL"),
+        (MASC, "masc"),
+        (FEMN, "femn"),
+        (NEUT, "neut"),
+        (MSF, "ms-f"),
+        (SING, "sing"),
+        (PLUR, "plur"),
+        (NOMN, "nomn"),
+        (GENT, "gent"),
+        (DATV, "datv"),
+        (ACCS, "accs"),
+        (ABLT, "ablt"),
+        (LOCT, "loct"),
+        (PER1, "1per"),
+        (PER2, "2per"),
+        (PER3, "3per"),
+        (PAST, "past"),
+        (PRES, "pres"),
+        (FUTR, "futr"),
+        (ANIM, "anim"),
+        (INAN, "inan"),
     ]
 };
 
 fn show(r: u64) -> String {
-    NAMES.iter().filter(|(b, _)| r & b != 0).map(|(_, n)| *n).collect::<Vec<_>>().join(",")
+    NAMES
+        .iter()
+        .filter(|(b, _)| r & b != 0)
+        .map(|(_, n)| *n)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn main() -> std::io::Result<()> {
@@ -30,10 +62,18 @@ fn main() -> std::io::Result<()> {
             .collect();
         println!("{s:?}");
         for (w, r) in &phrase {
-            println!("  {w}: {}", r.iter().map(|&x| show(x)).collect::<Vec<_>>().join(" | "));
+            println!(
+                "  {w}: {}",
+                r.iter().map(|&x| show(x)).collect::<Vec<_>>().join(" | ")
+            );
         }
         let walk = gram::walk(&phrase);
-        println!("  walk: governor {:?} subject {:?} next {}", walk.governor, walk.subject.map(show), walk.subject_next);
+        println!(
+            "  walk: governor {:?} subject {:?} next {}",
+            walk.governor,
+            walk.subject.map(show),
+            walk.subject_next
+        );
     }
     Ok(())
 }

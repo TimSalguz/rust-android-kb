@@ -634,7 +634,10 @@ pub fn active_participle(word: &str, readings: &[u64]) -> bool {
     if !readings.iter().any(|&r| r & PRTF != 0) {
         return false;
     }
-    let w = word.strip_suffix("ся").or_else(|| word.strip_suffix("сь")).unwrap_or(word);
+    let w = word
+        .strip_suffix("ся")
+        .or_else(|| word.strip_suffix("сь"))
+        .unwrap_or(word);
     const ENDINGS: [&str; 24] = [
         "ими", "ыми", "его", "ого", "ему", "ому", "ая", "яя", "ое", "ее", "ие", "ые", "ий", "ый",
         "ой", "ей", "ую", "юю", "им", "ым", "ем", "ом", "их", "ых",
@@ -928,13 +931,24 @@ mod tests {
 
     #[test]
     fn active_participles_by_their_form() {
-        for w in ["сдавшие", "читающего", "учащийся", "принесший", "идущими", "лежащая"] {
+        for w in [
+            "сдавшие",
+            "читающего",
+            "учащийся",
+            "принесший",
+            "идущими",
+            "лежащая",
+        ] {
             assert!(active_participle(w, &[PRTF]), "{w}");
         }
-        for w in ["написанное", "забытый", "читаемый", "построенного", "умный"] {
+        for w in ["написанное", "забытый", "читаемый", "построенного", "умный"]
+        {
             assert!(!active_participle(w, &[PRTF]), "{w}");
         }
-        assert!(!active_participle("сдавшие", &[ADJF]), "a participle's reading needed");
+        assert!(
+            !active_participle("сдавшие", &[ADJF]),
+            "a participle's reading needed"
+        );
     }
 
     fn r(tags: &[&str]) -> Vec<u64> {

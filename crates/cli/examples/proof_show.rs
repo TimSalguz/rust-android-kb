@@ -19,7 +19,9 @@ fn main() {
         .and_then(|e| e.open_lemmas(&a[2]))
         .and_then(|e| e.open_sentence_parser(&a[3]))
         .expect("engine");
-    let parser = engine.sentence_parser().expect("a parser of whole sentences");
+    let parser = engine
+        .sentence_parser()
+        .expect("a parser of whole sentences");
     for line in std::io::stdin().lock().lines() {
         let line = line.expect("stdin");
         let toks = tokens(&line);
@@ -37,9 +39,19 @@ fn main() {
             .collect();
         let graph = parser.parse_full(engine.lemma_vectors().unwrap(), &read);
         for (i, (row, &(rel, p))) in graph.heads.iter().zip(&graph.relations).enumerate() {
-            let h = (0..row.len()).max_by(|&x, &y| row[x].total_cmp(&row[y])).unwrap_or(0);
-            let head = if h == 0 { "ROOT".to_string() } else { lower[h - 1].clone() };
-            let kinds: Vec<String> = engine.readings(&lower[i]).iter().map(|r| format!("{r:x}")).collect();
+            let h = (0..row.len())
+                .max_by(|&x, &y| row[x].total_cmp(&row[y]))
+                .unwrap_or(0);
+            let head = if h == 0 {
+                "ROOT".to_string()
+            } else {
+                lower[h - 1].clone()
+            };
+            let kinds: Vec<String> = engine
+                .readings(&lower[i])
+                .iter()
+                .map(|r| format!("{r:x}"))
+                .collect();
             println!(
                 "  {:<12} → {:<12} {:<10} head {:.2} rel {:.2}  readings {}",
                 lower[i],
@@ -80,7 +92,12 @@ fn main() {
                 text.push_str(&lower[i - 1]);
                 let o = engine.comma_odds_in(&text, &lower[i - 1], &lower[i]);
                 text.push(' ');
-                format!("{}|{} {}", lower[i - 1], lower[i], o.map_or("—".into(), |o| format!("{o:.1}")))
+                format!(
+                    "{}|{} {}",
+                    lower[i - 1],
+                    lower[i],
+                    o.map_or("—".into(), |o| format!("{o:.1}"))
+                )
             })
             .collect();
         println!("  comma odds: {}", gaps.join(", "));

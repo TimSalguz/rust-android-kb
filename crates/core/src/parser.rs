@@ -34,7 +34,9 @@ pub struct Word {
 
 /// The kinds of marks a word may have before it, in the parser's order
 /// (tools/graph_parser.py).
-pub const MARK_KINDS: [char; 13] = [',', '—', ':', ';', '(', ')', '«', '»', '"', '.', '?', '!', '…'];
+pub const MARK_KINDS: [char; 13] = [
+    ',', '—', ':', ';', '(', ')', '«', '»', '"', '.', '?', '!', '…',
+];
 
 /// The marks in `text` (the text between the word before and this one), as
 /// a word's `marks`: «, —» → comma and dash.
@@ -173,18 +175,8 @@ impl<D: AsRef<[u8]>> Parser<D> {
             return None;
         }
         let h: Vec<usize> = (0..10).map(|i| u32_at(b, 8 + 4 * i) as usize).collect();
-        let (d, n_layers, heads, ff, dv, classes, places, n_gram, n_rel, causal) = (
-            h[0],
-            h[1],
-            h[2],
-            h[3],
-            h[4],
-            h[5],
-            h[6],
-            h[7],
-            h[8],
-            h[9],
-        );
+        let (d, n_layers, heads, ff, dv, classes, places, n_gram, n_rel, causal) =
+            (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], h[8], h[9]);
         // The causal field: 0 whole sentence, 1 causal, 2 causal and the
         // waiting word's relation; + 4: the marks read; + 8: the comma head;
         // + 16: the marks head (every kind of mark, MARK_KINDS' order).
@@ -224,13 +216,21 @@ impl<D: AsRef<[u8]>> Parser<D> {
             if version == 1 {
                 let at = *off;
                 *off += 4 * rows * cols;
-                Mat { at, scales: None, cols }
+                Mat {
+                    at,
+                    scales: None,
+                    cols,
+                }
             } else {
                 let scales = *off;
                 let at = scales + 4 * rows;
                 *off = at + rows * cols;
                 *off += (4 - *off % 4) % 4;
-                Mat { at, scales: Some(scales), cols }
+                Mat {
+                    at,
+                    scales: Some(scales),
+                    cols,
+                }
             }
         };
         let linear = |rows: usize, cols: usize, off: &mut usize| {
@@ -261,7 +261,12 @@ impl<D: AsRef<[u8]>> Parser<D> {
         let rel = [linear(d, 2 * d, &mut off), linear(n_rel, d, &mut off)];
         let wait_rel = waiting.then(|| [linear(d, d, &mut off), linear(n_rel, d, &mut off)]);
         let comma = commas.then(|| [linear(d, d, &mut off), linear(1, d, &mut off)]);
-        let mark_head = marks_head.then(|| [linear(d, d, &mut off), linear(MARK_KINDS.len(), d, &mut off)]);
+        let mark_head = marks_head.then(|| {
+            [
+                linear(d, d, &mut off),
+                linear(MARK_KINDS.len(), d, &mut off),
+            ]
+        });
         if b.len() != off {
             return None;
         }
@@ -384,7 +389,11 @@ impl<D: AsRef<[u8]>> Parser<D> {
                 let q = &self.bytes()[m.at..][..out.len() * n];
                 for (o, y) in out.iter_mut().enumerate() {
                     let row = &q[o * n..][..n];
-                    let dot = row.iter().zip(x).map(|(&a, b)| a as i8 as f32 * b).sum::<f32>();
+                    let dot = row
+                        .iter()
+                        .zip(x)
+                        .map(|(&a, b)| a as i8 as f32 * b)
+                        .sum::<f32>();
                     *y = bias[o] + scales[o] * dot;
                 }
             }
@@ -420,11 +429,19 @@ impl<D: AsRef<[u8]>> Parser<D> {
         if !self.causal {
             return std::sync::Arc::new(self.parse_full(lemmas, words));
         }
-        let common = |r: &Read| r.words.iter().zip(words).take_while(|(a, b)| a == b).count();
+        let common = |r: &Read| {
+            r.words
+                .iter()
+                .zip(words)
+                .take_while(|(a, b)| a == b)
+                .count()
+        };
         let mut read = {
             let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
             match (0..cache.len()).max_by_key(|&i| common(&cache[i])) {
-                Some(i) if common(&cache[i]) == words.len() && cache[i].words.len() == words.len() => {
+                Some(i)
+                    if common(&cache[i]) == words.len() && cache[i].words.len() == words.len() =>
+                {
                     let r = cache.remove(i);
                     let g = std::sync::Arc::new(self.graph_of(&r));
                     cache.insert(0, r);
@@ -635,7 +652,9 @@ impl<D: AsRef<[u8]>> Parser<D> {
         let relations = relation_chances
             .iter()
             .map(|p| {
-                let k = (0..p.len()).max_by(|&a, &b| p[a].total_cmp(&p[b])).unwrap_or(0);
+                let k = (0..p.len())
+                    .max_by(|&a, &b| p[a].total_cmp(&p[b]))
+                    .unwrap_or(0);
                 (k, p[k])
             })
             .collect();
@@ -779,6 +798,8 @@ impl Parser<memmap2::Mmap> {
         let file = std::fs::File::open(path)?;
         // SAFETY: the blob is a read-only, prebuilt asset; we don't mutate it.
         let mmap = unsafe { memmap2::Mmap::map(&file)? };
+        #[cfg(unix)]
+        let _ = mmap.advise(memmap2::Advice::WillNeed);
         Parser::new(mmap).ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "not a parser blob")
         })
