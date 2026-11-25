@@ -584,12 +584,13 @@ struct Popup {
 /// finished stationary tap (for the rhythm).
 type PressInfo = (Hint, Option<f32>);
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Timer {
     None,
     LongPress(i32),
     Repeat(i32),
     Proofread,
+    Fling { velocity: f32, last_ms: i64 },
 }
 
 pub struct Ime<D: AsRef<[u8]>> {
@@ -2439,7 +2440,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
         if self.calib.is_some() {
             return self.calibration_touch(action, x, y);
         }
-        if action == DOWN && self.timer == Timer::Proofread {
+        if action == DOWN && matches!(self.timer, Timer::Proofread | Timer::Fling { .. }) {
             self.timer = Timer::None;
         }
         if action == DOWN && self.notice.take().is_some() {
@@ -2660,6 +2661,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
                         p.scrolling = true;
                         p.target = None;
                         p.trail.push((x, y));
+                        p.trail_ms.push(time_ms);
                         if let Some(panel) = self.panel.as_mut() {
                             panel.scroll_by((last_y - y) / row_h, &self.stash, self.emoji_max);
                         }
@@ -2818,6 +2820,9 @@ impl<D: AsRef<[u8]>> Ime<D> {
                     }
                     self.timer = Timer::None;
                 }
+                if p.scrolling {
+                    self.start_fling(&p, time_ms);
+                }
                 if p.gesture && !p.done {
                     let (mut trail, mut ms) = (p.trail, p.trail_ms);
                     trail.push((x, y));
@@ -2841,10 +2846,10 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 }
                 REDRAW
                     | OUTPUT
-                    | if self.timer == Timer::Proofread {
-                        timer_flag(PROOF_DELAY_MS)
-                    } else {
-                        0
+                    | match self.timer {
+                        Timer::Proofread => timer_flag(PROOF_DELAY_MS),
+                        Timer::Fling { .. } => timer_flag(16),
+                        _ => 0,
                     }
             }
             _ => {
@@ -2857,6 +2862,26 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 REDRAW | OUTPUT
             }
         }
+    }
+
+    fn start_fling(&mut self, p: &Pointer, up_ms: i64) {
+        let (Some(&t0), Some(&t1)) = (p.trail_ms.first(), p.trail_ms.last()) else {
+            return;
+        };
+        let dt = t1 - t0;
+        if dt <= 0 {
+            return;
+        }
+        let y0 = p.trail.first().map_or(p.start_y, |&(_, y)| y);
+        let y1 = p.trail.last().map_or(p.start_y, |&(_, y)| y);
+        let velocity = (y1 - y0) / (dt as f32 * self.row_h());
+        if velocity.abs() < 0.001 {
+            return;
+        }
+        self.timer = Timer::Fling {
+            velocity: velocity.clamp(-0.02, 0.02),
+            last_ms: up_ms,
+        };
     }
 
     /// The delay requested by the last response elapsed.
@@ -2950,6 +2975,28 @@ impl<D: AsRef<[u8]>> Ime<D> {
                     anchor: 0.5,
                 });
                 REDRAW | HAPTIC
+            }
+            Timer::Fling { velocity, last_ms } => {
+                let dt = (self.now_ms - last_ms).clamp(0, 50) as f32 / 1000.0;
+                if dt <= 0.0 {
+                    return timer_flag(16);
+                }
+                let Some(panel) = self.panel.as_mut() else {
+                    self.timer = Timer::None;
+                    return REDRAW;
+                };
+                panel.scroll_by(-velocity * dt, &self.stash, self.emoji_max);
+                let velocity = velocity * (-4.0 * dt).exp();
+                if velocity.abs() < 0.0002 {
+                    self.timer = Timer::None;
+                    REDRAW
+                } else {
+                    self.timer = Timer::Fling {
+                        velocity,
+                        last_ms: self.now_ms,
+                    };
+                    REDRAW | timer_flag(16)
+                }
             }
             Timer::Proofread => {
                 self.timer = Timer::None;
@@ -4157,9 +4204,24 @@ impl<D: AsRef<[u8]>> Ime<D> {
         let prev = self.prev_here().filter(|p| p.sep == ' ')?;
         let head = prev.typed.to_lowercase();
         let joined = format!("{head}-{lower}");
-        if !self.engine.contains(&joined) {
-            return None;
-        }
+        let mut candidates = if self.engine.contains(&joined) {
+            vec![Candidate {
+                word: joined.clone(),
+                cost: self.engine.word_cost(&joined)?,
+                edit: 0.0,
+            }]
+        } else {
+            if !matches!(head.as_str(), "что" | "кое") || lower != "тат" {
+                return None;
+            }
+            self.engine
+                .read(Evidence::Taps(&joined, &[]))
+                .into_iter()
+                .filter(|c| c.word.starts_with(&format!("{head}-")))
+                .take(3)
+                .collect()
+        };
+        candidates.sort_by(|a, b| a.cost.total_cmp(&b.cost));
         let rest = self
             .before
             .strip_suffix(' ')
@@ -4175,15 +4237,17 @@ impl<D: AsRef<[u8]>> Ime<D> {
             Some(c[0].cost)
         };
         let here = self.context_at(rest);
-        let one = at(&here, &joined)?;
         let apart = match (at(&here, &head), self.engine.contains(lower)) {
             (Some(first), true) => first + at(&self.context_at(&self.before), lower)?,
             _ => f32::INFINITY,
         };
-        (one + HYPHEN_MARGIN < apart).then(|| Merge {
-            word: self.cased(&prev.typed, &joined),
-            variants: Vec::new(),
-            delete: prev.committed.chars().count() + 1,
+        candidates.into_iter().find_map(|c| {
+            let one = at(&here, &c.word)?;
+            (one + HYPHEN_MARGIN < apart).then(|| Merge {
+                word: self.cased(&prev.typed, &c.word),
+                variants: Vec::new(),
+                delete: prev.committed.chars().count() + 1,
+            })
         })
     }
 
@@ -5528,11 +5592,23 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 .iter()
                 .find(|c| self.engine.contains(&c.word) || c.word == lower)
                 .map_or(f32::INFINITY, |c| c.cost);
-            self.merge = self
-                .find_hyphen(&lower)
-                .or_else(|| self.find_merge(&lower, alone));
+            let hyphen = self.find_hyphen(&lower);
+            self.merge = hyphen.clone().or_else(|| self.find_merge(&lower, alone));
             if self.merge.is_none() {
                 self.split = self.find_split(&lower, alone);
+            }
+            if self.settings.autocorrect {
+                if let Some(m) = hyphen
+                    .filter(|m| matches!(m.word.to_lowercase().as_str(), "что-то" | "кое-что"))
+                {
+                    self.apply_merge(m);
+                    self.auto_space = true;
+                    self.word.clear();
+                    self.shown.clear();
+                    self.hints.clear();
+                    self.durs.clear();
+                    return;
+                }
             }
         }
         let plain: Vec<Candidate> = corrections
@@ -5584,6 +5660,9 @@ impl<D: AsRef<[u8]>> Ime<D> {
             .iter()
             .filter(|c| !self.engine.contains(&c.word))
             .any(|c| ordinary_correction - c.cost >= PRODUCTIVE_MARGIN);
+        if productive_correction {
+            self.split = None;
+        }
         let productive_completion = completions.iter().any(|c| {
             !self.engine.contains(&c.word) && self.engine.productive_root(&c.word).is_some()
         });
@@ -5652,7 +5731,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 .collect();
             if !guarded && n >= COMPLETE_FROM {
                 for c in &completions {
-                    if dictionary_fix && !self.engine.contains(&c.word) {
+                    if (dictionary_fix || generated_typed) && !self.engine.contains(&c.word) {
                         continue;
                     }
                     let extra = c.word.chars().count().saturating_sub(n);
@@ -7262,6 +7341,50 @@ mod tests {
     }
 
     #[test]
+    fn a_dictionary_hyphen_is_applied_as_soon_as_its_last_letter_arrives() {
+        let mut k = ime_ctx(
+            &[
+                ("что-то", 100),
+                ("что", 10000),
+                ("то", 10000),
+                ("такое", 500),
+            ],
+            &[],
+        );
+        type_str(&mut k, "что то");
+        assert_eq!(k.before.to_lowercase(), "что-то ");
+        assert!(k.word.is_empty(), "word={:?}", k.word);
+        type_str(&mut k, "такое ");
+        assert_eq!(k.before.to_lowercase(), "что-то такое ");
+        let mut k = ime_ctx(&[("что-то", 100), ("что", 10000), ("тат", 10000)], &[]);
+        type_str(&mut k, "что тат");
+        assert_eq!(k.before.to_lowercase(), "что-то ");
+    }
+
+    #[test]
+    fn always_does_not_append_to_an_already_productive_word() {
+        let mut k = ime(&[("сверх", 500), ("дед", 500), ("дедов", 500)]);
+        k.set_settings(Settings {
+            strength: crate::settings::Strength::Always,
+            ..k.settings.clone()
+        });
+        type_str(&mut k, "сверхдед ");
+        assert_eq!(k.before.to_lowercase(), "сверхдед ");
+        let mut k = ime(&[
+            ("свер", 100),
+            ("сверх", 500),
+            ("пират", 500),
+            ("пиратский", 500),
+        ]);
+        k.set_settings(Settings {
+            strength: crate::settings::Strength::Always,
+            ..k.settings.clone()
+        });
+        type_str(&mut k, "сверзпират ");
+        assert_eq!(k.before.to_lowercase(), "сверхпират ");
+    }
+
+    #[test]
     fn backspace_takes_only_the_accepted_completion_and_typing_can_continue() {
         let mut k = productive_engine();
         type_str(&mut k, "сверхш");
@@ -7290,6 +7413,27 @@ mod tests {
             (k.word.as_str(), k.shown.as_str()),
             ("сверхширокий", "сверхширокий")
         );
+    }
+
+    #[test]
+    fn emoji_scrolling_continues_as_a_fling_and_stops_on_a_new_touch() {
+        let mut k = ime(WORDS);
+        k.open_panel();
+        let frame = k.panel_frame();
+        let (x, y, w, h) = frame.cell(2 * panel::COLS, 0.0);
+        k.touch(DOWN, 0, x + w / 2.0, y + h / 2.0, 1_000);
+        k.touch(MOVE, 0, x + w / 2.0, y + h / 2.0 - h * 0.7, 1_020);
+        k.touch(MOVE, 0, x + w / 2.0, y + h / 2.0 - h * 1.4, 1_040);
+        k.touch(UP, 0, x + w / 2.0, y + h / 2.0 - h * 1.4, 1_060);
+        assert!(matches!(k.timer, Timer::Fling { .. }), "{:?}", k.timer);
+        let before = k.panel.unwrap().scroll;
+        k.timer_at(1_090);
+        let after = k.panel.unwrap().scroll;
+        assert!(after > before, "{before} → {after}");
+        k.timer_at(1_140);
+        assert!(k.panel.unwrap().scroll > after);
+        k.touch(DOWN, 0, x + w / 2.0, y + h / 2.0, 1_200);
+        assert!(matches!(k.timer, Timer::None));
     }
 
     #[test]

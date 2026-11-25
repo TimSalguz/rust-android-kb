@@ -3,6 +3,31 @@ use std::collections::HashSet;
 use super::{Candidate, Engine, Evidence};
 
 const PREFIXES: &[&str] = &[
+    "дигидро",
+    "диметил",
+    "триметил",
+    "триокси",
+    "диокси",
+    "тетра",
+    "гидро",
+    "моно",
+    "нитро",
+    "нитрозо",
+    "сульфо",
+    "фосфо",
+    "хлор",
+    "бром",
+    "фтор",
+    "иод",
+    "оксо",
+    "тио",
+    "азо",
+    "циано",
+    "амино",
+    "метил",
+    "этил",
+    "пропил",
+    "бутил",
     "сверх",
     "супер",
     "мега",
@@ -61,7 +86,7 @@ const SUFFIXES: &[&str] = &[
     "овка",
 ];
 const MAX_PREFIXES: usize = 4;
-const MAX_STATES: usize = 24;
+const MAX_STATES: usize = 8;
 const PREFIX_PENALTY: f32 = 0.65;
 
 #[derive(Clone, Debug, Default)]
@@ -179,6 +204,186 @@ impl<D: AsRef<[u8]>> Engine<D> {
         out
     }
 
+    pub(crate) fn loan_derivation(&self, word: &str) -> bool {
+        ["ный", "но"].iter().any(|suffix| {
+            let Some(stem) = word.strip_suffix(suffix) else {
+                return false;
+            };
+            if stem.chars().count() < 3 {
+                return false;
+            }
+            crate::morph::transliterations(stem)
+                .into_iter()
+                .take(8)
+                .any(|latin| {
+                    self.suggest(&latin)
+                        .into_iter()
+                        .take(2)
+                        .any(|c| c.edit <= 3.5 && c.word.is_ascii())
+                })
+        })
+    }
+
+    pub(crate) fn compound_adjective_parts(&self, raw: &str) -> Vec<Candidate> {
+        let chars: Vec<char> = raw.chars().collect();
+        let mut out = Vec::new();
+        for i in 3..chars.len().saturating_sub(4) {
+            let left: String = chars[..i].iter().collect();
+            let Some(stem) = left.strip_suffix(['о', 'е']) else {
+                continue;
+            };
+            let right: String = chars[i..].iter().collect();
+            for ending in ["ой", "ий", "ый"] {
+                let adjective = format!("{stem}{ending}");
+                let Some(left_cost) = self
+                    .word_cost(&adjective)
+                    .filter(|_| self.contains(&adjective))
+                else {
+                    continue;
+                };
+                for suffix in ["ный", "ий", "ый"] {
+                    let Some(noun) = right.strip_suffix(suffix) else {
+                        continue;
+                    };
+                    if noun.chars().count() < 2 {
+                        continue;
+                    }
+                    let noun = if self.contains(noun) {
+                        noun.to_string()
+                    } else {
+                        format!("{}я", noun.strip_suffix('й').unwrap_or(noun))
+                    };
+                    let Some(right_cost) = self.word_cost(&noun).filter(|_| self.contains(&noun))
+                    else {
+                        continue;
+                    };
+                    out.push(Candidate {
+                        word: raw.to_string(),
+                        cost: left_cost + right_cost + 1.0,
+                        edit: 1.0,
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    fn compound_parts(&self, raw: &str) -> Vec<Candidate> {
+        let chars: Vec<char> = raw.chars().collect();
+        let mut out = Vec::new();
+        for i in 4..chars.len().saturating_sub(3) {
+            let left: String = chars[..i].iter().collect();
+            let Some(stem) = left.strip_suffix(['о', 'е']) else {
+                continue;
+            };
+            let right: String = chars[i..].iter().collect();
+            let adjective = format!("{stem}{}", if left.ends_with('о') { "ый" } else { "ий" });
+            let Some(left_cost) = self
+                .word_cost(&adjective)
+                .filter(|_| self.contains(&adjective))
+            else {
+                continue;
+            };
+            {
+                let right_candidates = if self.contains(&right) {
+                    vec![Candidate {
+                        word: right.clone(),
+                        cost: self.word_cost(&right).unwrap_or(7.0),
+                        edit: 0.0,
+                    }]
+                } else {
+                    self.suggest(&right)
+                };
+                for c in right_candidates.into_iter().take(2) {
+                    if c.word.chars().next() != right.chars().next() || c.edit > 1.5 {
+                        continue;
+                    }
+                    out.push(Candidate {
+                        word: format!("{left}{}", c.word),
+                        cost: left_cost + c.cost + 1.0,
+                        edit: c.edit + 1.0,
+                    });
+                }
+            }
+        }
+        out.sort_by(|a, b| a.cost.total_cmp(&b.cost));
+        out.truncate(4);
+        out
+    }
+
+    fn exact_incomplete(&self, raw: &str) -> bool {
+        let chars: Vec<char> = raw.chars().collect();
+        let mut at = 0;
+        let mut depth = 0;
+        while depth < MAX_PREFIXES {
+            let rest: String = chars[at..].iter().collect();
+            let Some(prefix) = PREFIXES
+                .iter()
+                .filter(|p| rest.starts_with(**p))
+                .max_by_key(|p| p.chars().count())
+            else {
+                break;
+            };
+            at += prefix.chars().count();
+            depth += 1;
+        }
+        depth > 0 && chars.len() - at < 3
+    }
+
+    fn exact_parts(&self, raw: &str, begun: bool) -> Vec<Candidate> {
+        let chars: Vec<char> = raw.chars().collect();
+        let mut state = State::default();
+        while state.depth < MAX_PREFIXES {
+            let rest: String = chars[state.at..].iter().collect();
+            let Some(prefix) = PREFIXES
+                .iter()
+                .filter(|p| rest.starts_with(**p))
+                .max_by_key(|p| p.chars().count())
+            else {
+                break;
+            };
+            let plen = prefix.chars().count();
+            if chars.len() - state.at - plen < if begun { 1 } else { 3 } {
+                break;
+            }
+            let part = Candidate {
+                word: prefix.to_string(),
+                cost: if begun {
+                    0.0
+                } else {
+                    self.word_cost(prefix).unwrap_or(7.0)
+                },
+                edit: 0.0,
+            };
+            state = join(&state, &part, &chars[state.at..state.at + plen]);
+        }
+        if state.depth == 0 || chars.len() - state.at < if begun { 1 } else { 3 } {
+            return Vec::new();
+        }
+        let rest: String = chars[state.at..].iter().collect();
+        let base = if begun {
+            self.complete_n(&rest, 32)
+        } else if self.contains(&rest) {
+            vec![Candidate {
+                word: rest.clone(),
+                cost: self.word_cost(&rest).unwrap_or(7.0),
+                edit: 0.0,
+            }]
+        } else {
+            self.suggest(&rest)
+        };
+        base.into_iter()
+            .take(4)
+            .filter(|c| begun || c.word.chars().next() == rest.chars().next())
+            .filter(|c| !begun || c.word.chars().count() > rest.chars().count())
+            .map(|c| Candidate {
+                word: format!("{}{}", state.word, c.word),
+                cost: state.cost + c.cost,
+                edit: state.edit + c.edit,
+            })
+            .collect()
+    }
+
     fn productive_parts(&self, raw: &str, begun: bool) -> Vec<Candidate> {
         let chars: Vec<char> = raw.to_lowercase().chars().collect();
         let n = chars.len();
@@ -190,8 +395,25 @@ impl<D: AsRef<[u8]>> Engine<D> {
         {
             return Vec::new();
         }
-        let mut states = vec![State::default()];
         let mut out = self.derived_parts(raw, begun);
+        let exact = self.exact_parts(raw, begun);
+        if !exact.is_empty() {
+            out.extend(exact);
+            out.retain(|c| !begun || c.word.starts_with(raw));
+            out.sort_by(|a, b| a.cost.total_cmp(&b.cost).then_with(|| a.word.cmp(&b.word)));
+            let mut seen = HashSet::new();
+            out.retain(|c| seen.insert(c.word.clone()));
+            out.truncate(32);
+            return out;
+        }
+        if self.exact_incomplete(raw) {
+            return out;
+        }
+        let mut states = vec![State::default()];
+        if !begun {
+            out.extend(self.compound_adjective_parts(raw));
+            out.extend(self.compound_parts(raw));
+        }
         for _ in 0..=MAX_PREFIXES {
             let mut next = Vec::new();
             for state in states {
@@ -263,11 +485,22 @@ impl<D: AsRef<[u8]>> Engine<D> {
     }
 
     pub(crate) fn productive(&self, evidence: Evidence) -> Vec<Candidate> {
-        match evidence {
-            Evidence::Taps(raw, _) => self.productive_parts(raw, false),
-            Evidence::Begun(raw) => self.productive_parts(raw, true),
-            _ => Vec::new(),
+        let (raw, begun) = match evidence {
+            Evidence::Taps(raw, _) => (raw, false),
+            Evidence::Begun(raw) => (raw, true),
+            _ => return Vec::new(),
+        };
+        let cache = if begun {
+            &self.productive_begun
+        } else {
+            &self.productive_taps
+        };
+        if cache.borrow().0 == raw {
+            return cache.borrow().1.clone();
         }
+        let out = self.productive_parts(raw, begun);
+        *cache.borrow_mut() = (raw.to_string(), out.clone());
+        out
     }
 
     /// The dictionary root of a generated compound and its prior, for showing
@@ -413,6 +646,39 @@ mod tests {
         let got = e.productive_parts("девайсн", true);
         assert!(got.iter().any(|c| c.word == "девайснутый"), "{got:?}");
         assert!(got.iter().any(|c| c.word == "девайснуть"), "{got:?}");
+    }
+
+    #[test]
+    fn joins_an_adjective_stem_and_a_dictionary_root() {
+        let e = engine(&[("кривошейный", 500), ("зерновой", 500)]);
+        assert!(e.contains("кривошейный") && e.contains("зерновой"));
+        let got = e.compound_parts("кривошейнозерновой");
+        assert!(
+            got.iter().any(|c| c.word == "кривошейнозерновой"),
+            "{got:?}"
+        );
+        let got = e.productive_parts("кривошейнозернвой", false);
+        assert!(
+            !got.iter().any(|c| c.word == "кривошейнозеревой"),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn builds_an_adjective_from_an_adjective_and_a_noun() {
+        let e = engine(&[("кривой", 500), ("шея", 500)]);
+        assert!(e.contains("кривой") && e.contains("шея"));
+        let got = e.compound_adjective_parts("кривошейный");
+        assert!(got.iter().any(|c| c.word == "кривошейный"), "{got:?}");
+    }
+
+    #[test]
+    fn recognizes_a_borrowed_adjective_and_adverb() {
+        let e = engine(&[("volatile", 500), ("кривой", 500), ("шея", 500)]);
+        assert!(e.loan_derivation("волатильный"));
+        assert!(e.is_combining_compound("Волатильно-кривошейный"));
+        assert!(e.loan_derivation("волатильно"));
+        assert!(!e.loan_derivation("фывапрол"));
     }
 
     #[test]

@@ -15,6 +15,7 @@
 //! The input is read under several hypotheses (as typed, wrong layout, hands on
 //! the home row), each with its own precomputed cost table and penalty.
 
+use std::cell::RefCell;
 use std::collections::{BinaryHeap, HashMap};
 use std::fs::File;
 use std::io;
@@ -443,6 +444,8 @@ pub struct Engine<D: AsRef<[u8]>> {
     pub(crate) user: Option<Map<Vec<u8>>>,
     kb: Keyboard,
     pub(crate) cfg: Config,
+    productive_taps: RefCell<(String, Vec<Candidate>)>,
+    productive_begun: RefCell<(String, Vec<Candidate>)>,
 }
 
 /// How a word is written however it was typed (see [`Engine::casing`]).
@@ -593,6 +596,8 @@ impl<D: AsRef<[u8]>> Engine<D> {
             user: None,
             kb: Keyboard::new(&cfg),
             cfg,
+            productive_taps: RefCell::new((String::new(), Vec::new())),
+            productive_begun: RefCell::new((String::new(), Vec::new())),
         }
     }
 
@@ -605,6 +610,8 @@ impl<D: AsRef<[u8]>> Engine<D> {
     pub fn set_config(&mut self, cfg: Config) {
         self.kb = Keyboard::new(&cfg);
         self.cfg = cfg;
+        self.productive_taps.borrow_mut().0.clear();
+        self.productive_begun.borrow_mut().0.clear();
     }
 
     /// Whether `word` is a dictionary word (case-insensitive, exact) or one
@@ -629,6 +636,14 @@ impl<D: AsRef<[u8]>> Engine<D> {
     /// A compound beginning with a combining form (авто, био, микро…).
     pub fn is_combining_compound(&self, word: &str) -> bool {
         let lower = word.to_lowercase();
+        if lower.contains('-') {
+            return lower.split('-').all(|part| {
+                self.contains(part)
+                    || crate::morph::combining(part)
+                    || self.loan_derivation(part)
+                    || !self.compound_adjective_parts(part).is_empty()
+            });
+        }
         self.is_compound(&lower)
             && lower
                 .char_indices()
@@ -637,6 +652,8 @@ impl<D: AsRef<[u8]>> Engine<D> {
 
     /// The words the user added by hand (replaces the previous set).
     pub fn set_user_words<S: AsRef<str>>(&mut self, words: &[S]) {
+        self.productive_taps.borrow_mut().0.clear();
+        self.productive_begun.borrow_mut().0.clear();
         let mut keys: Vec<Vec<u8>> = words
             .iter()
             .filter_map(|w| remap(w.as_ref()))

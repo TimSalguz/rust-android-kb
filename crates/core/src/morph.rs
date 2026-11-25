@@ -223,7 +223,7 @@ fn variants(c: char, last: bool) -> &'static [&'static str] {
     }
 }
 
-fn transliterations(word: &str) -> Vec<String> {
+pub(crate) fn transliterations(word: &str) -> Vec<String> {
     let chars: Vec<char> = word.chars().collect();
     let mut out = vec![String::new()];
     for (i, c) in chars.iter().copied().enumerate() {
