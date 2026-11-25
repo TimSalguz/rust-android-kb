@@ -6405,30 +6405,56 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 } else {
                     pal.text_dim
                 };
-                // A long word gets smaller to fit its third of the strip;
-                // past the smallest size, it is cut short.
                 let avail = slot_w - 14.0 * dp;
                 let per_char = if bold { 0.62 } else { 0.58 };
                 let n = s.chars().count().max(1) as f32;
                 let size = (avail / (n * per_char)).min(17.0 * dp);
                 let smallest = 10.0 * dp;
-                let (label, size) = if size >= smallest {
-                    (s.clone(), size)
+                if size >= smallest {
+                    text(
+                        &mut ops,
+                        &mut texts,
+                        s.clone(),
+                        (i as f32 + 0.5) * slot_w,
+                        strip_mid,
+                        size,
+                        color,
+                        bold,
+                    );
                 } else {
-                    let keep = (avail / (smallest * per_char)).floor() as usize;
-                    let cut: String = s.chars().take(keep.saturating_sub(1)).collect();
-                    (format!("{cut}…"), smallest)
-                };
-                text(
-                    &mut ops,
-                    &mut texts,
-                    label,
-                    (i as f32 + 0.5) * slot_w,
-                    strip_mid,
-                    size,
-                    color,
-                    bold,
-                );
+                    let keep = ((avail / (smallest * per_char)).floor() as usize).max(1);
+                    let chars: Vec<char> = s.chars().collect();
+                    let (first, second) = if chars.len() <= 2 * keep {
+                        let at = chars.len().div_ceil(2);
+                        (
+                            chars[..at].iter().collect::<String>(),
+                            chars[at..].iter().collect::<String>(),
+                        )
+                    } else {
+                        (
+                            chars[..keep].iter().collect::<String>(),
+                            format!(
+                                "…{}",
+                                chars[chars.len() + 1 - keep..].iter().collect::<String>()
+                            ),
+                        )
+                    };
+                    for (line, y) in [
+                        (first, strip_mid - 8.0 * dp),
+                        (second, strip_mid + 10.0 * dp),
+                    ] {
+                        text(
+                            &mut ops,
+                            &mut texts,
+                            line,
+                            (i as f32 + 0.5) * slot_w,
+                            y,
+                            smallest,
+                            color,
+                            bold,
+                        );
+                    }
+                }
             }
         }
 
@@ -9713,6 +9739,23 @@ mod tests {
                 Op::Commit("и".into())
             ]
         );
+    }
+
+    #[test]
+    fn long_suggestions_wrap_and_keep_their_beginnings_and_endings() {
+        let mut k = ime(WORDS);
+        k.slots = [
+            Some("недоинтеллектуал".into()),
+            Some("сверхсупермегаультразащищенныйсверхсупермегаультразащищенный".into()),
+            Some("недоинтеллектуал".into()),
+        ];
+        let (_, texts) = k.draw();
+        assert!(texts.iter().all(|s| s != "недоинтеллектуал…"));
+        assert!(texts.iter().any(|s| s.starts_with("недоинтел")));
+        assert!(texts.iter().any(|s| s.ends_with("туал")));
+        assert!(texts
+            .iter()
+            .any(|s| s.starts_with('…') && s.ends_with("щенный")));
     }
 
     #[test]
