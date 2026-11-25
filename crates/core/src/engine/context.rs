@@ -197,7 +197,12 @@ impl<D: AsRef<[u8]>> Engine<D> {
             .and_then(frame_of);
         let last = phrase.len().checked_sub(1);
         let next = last
-            .filter(|&l| gram::governing(&phrase[l].1))
+            .filter(|&l| {
+                gram::governing(&phrase[l].1)
+                    || !phrase[l].1.is_empty()
+                        && phrase[l].1.iter().all(|&r| r & gram::bit::NOUN != 0)
+                        && self.frame(&phrase[l].0).is_some()
+            })
             .and_then(frame_of);
         let clause = walk.clause.and_then(|v| self.clause_frame(&phrase[v].0));
         let mut topics: Vec<u64> = sentence
@@ -631,6 +636,12 @@ impl<D: AsRef<[u8]>> Engine<D> {
             .or(ctx.prev_frame)
             .map_or(0.0, |f| f.next(&readings));
         self.phrase_nats(ctx, &readings).0 + frame
+    }
+
+    /// The typed word's least fitting case after a governing noun, if it has a frame.
+    pub fn government_fit(&self, ctx: &Context, word: &str) -> Option<f32> {
+        let readings = self.readings(word);
+        ctx.next.or(ctx.prev_frame).map(|f| f.next_worst(&readings))
     }
 }
 

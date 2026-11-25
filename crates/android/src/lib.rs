@@ -532,8 +532,9 @@ pub extern "system" fn Java_io_github_timsalguz_rustkb_Native_timer(
     _: JNIEnv,
     _: JClass,
     h: jlong,
+    time: jlong,
 ) -> jint {
-    with(h, 0, |k| Ok(k.ime.timer()))
+    with(h, 0, |k| Ok(k.ime.timer_at(time)))
 }
 
 #[no_mangle]

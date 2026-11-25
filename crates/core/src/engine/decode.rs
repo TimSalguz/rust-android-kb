@@ -57,11 +57,26 @@ impl<D: AsRef<[u8]>> Engine<D> {
         }
     }
 
+    /// [`Engine::decode`] plus productive derivations for the word being typed.
+    pub fn decode_productive(&self, ctx: &Context, evidence: Evidence) -> Vec<Candidate> {
+        let out = self.decode(ctx, evidence);
+        let mut generated = self.productive(evidence);
+        self.weigh(ctx, &mut generated);
+        self.merge_productive(out, generated, evidence)
+    }
+
     /// What fits the evidence alone, cheapest first — each candidate's
     /// `edit` what the evidence says against it, `cost` that plus its prior
     /// on its own.
     pub fn read(&self, evidence: Evidence) -> Vec<Candidate> {
         self.read_at(&Context::default(), evidence)
+    }
+
+    /// [`Engine::read`] plus productive derivations for the word being typed.
+    pub fn read_productive(&self, evidence: Evidence) -> Vec<Candidate> {
+        let mut out = self.read(evidence);
+        self.extend_productive(&mut out, evidence);
+        out
     }
 
     /// [`Engine::read`], where the place may bring in words of its own: the

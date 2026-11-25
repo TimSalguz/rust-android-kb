@@ -10,6 +10,7 @@
 //! turns live correction on;
 //! `WINDOW=<margin>` sets the two-word window's margin (`inf`: off);
 //! `KNOWN=<cost>` how cheap a slip must be to replace a typed real word;
+//! `STRENGTH=careful|normal|bold|always` picks the autocorrect strength;
 //! `INSIDE=1` keeps every noisy tap inside the key meant (careful typing:
 //! off-center, never a wrong key — every change is then a false correction).
 //! `[x/y]` in a line: the finger meant y and caught x, just past the border
@@ -34,7 +35,7 @@ use std::io::{BufRead, Write};
 use kbcore::{Config, Engine, Profile};
 use kbime::ime::{Ime, DOWN, MOVE, UP};
 use kbime::layout::Action;
-use kbime::settings::{Settings, Strip};
+use kbime::settings::{Settings, Strength, Strip};
 
 mod common;
 
@@ -134,6 +135,12 @@ fn main() {
         // The sentences are compared word for word: commas only on request.
         auto_commas: std::env::var("COMMAS").is_ok_and(|v| v == "1"),
         strip: Strip::Full,
+        strength: match std::env::var("STRENGTH").as_deref() {
+            Ok("always") => Strength::Always,
+            Ok("bold") => Strength::Bold,
+            Ok("careful") => Strength::Careful,
+            _ => Strength::Normal,
+        },
         ..Settings::default()
     });
     if let Some(m) = std::env::var("WINDOW").ok().and_then(|s| s.parse().ok()) {

@@ -249,17 +249,21 @@ fn transliterated(word: &str, known: impl Fn(&str) -> bool) -> bool {
     word.chars().count() >= 3 && transliterations(word).into_iter().any(|w| known(&w))
 }
 
+/// A combining form that joins the following root without a space.
+pub fn combining(word: &str) -> bool {
+    COMBINING.contains(&word)
+}
+
 fn simple(word: &str, known: impl Fn(&str) -> bool + Copy) -> bool {
-    known(word) || COMBINING.contains(&word) || transliterated(word, known)
+    known(word) || combining(word) || transliterated(word, known)
 }
 
 fn direct(word: &str, known: impl Fn(&str) -> bool + Copy) -> bool {
-    known(word)
-        || COMBINING.contains(&word)
-        || word.chars().count() >= 4 && transliterated(word, known)
+    known(word) || combining(word) || word.chars().count() >= 4 && transliterated(word, known)
 }
 
-fn compound(word: &str, known: impl Fn(&str) -> bool + Copy) -> bool {
+/// Whether the word is composed of two independently supported roots.
+pub fn compound(word: &str, known: impl Fn(&str) -> bool + Copy) -> bool {
     let chars: Vec<char> = word.chars().collect();
     if chars.len() < 6 {
         return false;
@@ -267,6 +271,10 @@ fn compound(word: &str, known: impl Fn(&str) -> bool + Copy) -> bool {
     for i in 3..=chars.len() - 3 {
         let left: String = chars[..i].iter().collect();
         let right: String = chars[i..].iter().collect();
+        if right.chars().count() <= 3 && !right.chars().any(|c| "аеёиоуыэюя".contains(c))
+        {
+            continue;
+        }
         let left_ok = simple(&left, known)
             || ["о", "е"].iter().any(|vowel| {
                 left.strip_suffix(vowel)
@@ -347,6 +355,8 @@ mod tests {
             "ход",
             "сеть",
             "кризис",
+            "мело",
+            "чть",
             "дом",
             "работница",
             "нейрон",
@@ -372,8 +382,14 @@ mod tests {
         ] {
             assert!(plausible(word, known), "{word}");
         }
-        for word in ["фывапрол", "привет", "несуществующий", "кат", "blah"]
-        {
+        for word in [
+            "фывапрол",
+            "привет",
+            "несуществующий",
+            "кат",
+            "смелочть",
+            "blah",
+        ] {
             assert!(!plausible(word, known), "{word}");
         }
     }

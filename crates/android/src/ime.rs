@@ -80,6 +80,9 @@ const SPACE_EARLY: f32 = 2.5;
 /// this over the key's own, in the engine's units) may be read as the
 /// neighbor when no word goes on with the key's own letter.
 const ZONE_NEAR: f32 = 0.25;
+/// A generated derivation must beat the best dictionary reading by this much
+/// for space to apply it; explicit selection has no such margin.
+const PRODUCTIVE_MARGIN: f32 = 2.0;
 /// A missing space inside the typed word (`приветкак`).
 const MISSING_SPACE: f32 = 3.0;
 /// A letter just above the space bar typed instead of the space (`приветькак`).
@@ -482,6 +485,14 @@ struct Undo {
     pairs: Vec<String>,
 }
 
+struct Completion {
+    typed: String,
+    completed: String,
+    hints: Vec<Hint>,
+    durs: Vec<Option<f32>>,
+    clean: bool,
+}
+
 /// A sentence's proofreading: the text from its first new comma
 /// on as it was and as it is now, and the word pairs the commas went
 /// between (⌫ right after puts it back; those commas don't come again).
@@ -692,6 +703,7 @@ pub struct Ime<D: AsRef<[u8]>> {
     predicted: Vec<String>,
     /// What space will turn `word` into.
     autocorrect: Option<String>,
+    completion: Option<Completion>,
     /// Right after an autocorrect + space — backspace reverts.
     undo: Option<Undo>,
     /// Corrections the user undid at this spot, as (typed, fix), lowercase:
@@ -1043,6 +1055,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
             known_slip: KNOWN_SLIP,
             predicted: Vec::new(),
             autocorrect: None,
+            completion: None,
             undo: None,
             rejected: Vec::new(),
             comma_undo: None,
@@ -2852,6 +2865,25 @@ impl<D: AsRef<[u8]>> Ime<D> {
         self.gate(flags)
     }
 
+    /// A timer reaching the native worker late must not turn a short press,
+    /// or a newer press with the same pointer id, into a long one.
+    pub fn timer_at(&mut self, time_ms: i64) -> i32 {
+        self.now_ms = time_ms;
+        if let Timer::LongPress(id) = self.timer {
+            if let Some(p) = self.pointers.iter().find(|p| p.id == id && !p.done) {
+                let delay = match p.target {
+                    Some(Target::Key(k)) if self.keys[k].action == Action::Space => SPACE_MENU_MS,
+                    _ => LONG_PRESS_MS,
+                };
+                let left = i64::from(delay) - time_ms.saturating_sub(p.down_ms);
+                if left > 0 {
+                    return self.gate(timer_flag(left.max(1) as i32));
+                }
+            }
+        }
+        self.timer()
+    }
+
     fn timer_inner(&mut self) -> i32 {
         match self.timer {
             Timer::LongPress(id) => {
@@ -3259,6 +3291,14 @@ impl<D: AsRef<[u8]>> Ime<D> {
 
     fn type_char_now(&mut self, c: char) {
         self.undo = None;
+        if self.completion.take().is_some()
+            && self.word.ends_with('о')
+            && "аеёиоуэюя".contains(c.to_lowercase().next().unwrap_or(c))
+        {
+            self.word.pop();
+            self.hints.pop();
+            self.durs.pop();
+        }
         self.clip_offer = None;
         self.comma_undo = None;
         self.proof_undo = None;
@@ -3452,6 +3492,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
     /// The cursor leaves the word: what editing it showed no longer applies.
     fn leave_word(&mut self) {
         self.live_off = false;
+        self.completion = None;
         self.drawn = None;
         self.pair_undo = None;
         self.rejected.clear();
@@ -4281,6 +4322,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
         if m < 4 || self.engine.contains(lower) {
             return None;
         }
+        let compound = self.engine.is_compound(lower);
         let above = self.above_space();
         let one = one_letter_words(self.lang);
         let part_ok = |p: &[char]| p.len() >= 2 || p.first().is_some_and(|c| one.contains(*c));
@@ -4296,6 +4338,9 @@ impl<D: AsRef<[u8]>> Ime<D> {
                     continue;
                 }
                 let (l, r): (String, String) = (l.iter().collect(), r.iter().collect());
+                if compound && kbcore::morph::combining(&l) {
+                    continue;
+                }
                 let (Some(cl), Some(cr)) = (self.engine.word_cost(&l), self.engine.word_cost(&r))
                 else {
                     continue;
@@ -4489,6 +4534,22 @@ impl<D: AsRef<[u8]>> Ime<D> {
             // Nothing typed here now: a sentence's start takes a capital again.
             self.update_shift();
             self.update_slots();
+            return;
+        }
+        if let Some(c) = self
+            .completion
+            .take()
+            .filter(|c| !self.word.is_empty() && self.word == c.completed)
+        {
+            self.word = c.typed;
+            self.hints = c.hints;
+            self.durs = c.durs;
+            self.clean = c.clean;
+            self.chosen = None;
+            self.editing = false;
+            self.erased = 0;
+            self.update_slots();
+            self.show();
             return;
         }
         if !self.word.is_empty() {
@@ -5265,6 +5326,30 @@ impl<D: AsRef<[u8]>> Ime<D> {
             return;
         }
         self.prev_word = None;
+        let completion = (s.starts_with(&self.word)
+            && s.chars().count() > self.word.chars().count()
+            && !self.engine.contains(&s.to_lowercase()))
+        .then(|| Completion {
+            typed: self.word.clone(),
+            completed: s.clone(),
+            hints: self.hints.clone(),
+            durs: self.durs.clone(),
+            clean: self.clean,
+        });
+        if let Some(completion) = completion {
+            let added = s.chars().count() - self.word.chars().count();
+            self.hints
+                .extend(std::iter::repeat_n(Hint::default(), added));
+            self.durs.extend(std::iter::repeat_n(None, added));
+            self.word = s.clone();
+            self.completion = Some(completion);
+            self.autocorrect = None;
+            self.undo = None;
+            self.chosen = Some(s);
+            self.update_slots();
+            self.show();
+            return;
+        }
         self.word.clear();
         self.shown.clear();
         self.hints.clear();
@@ -5427,7 +5512,9 @@ impl<D: AsRef<[u8]>> Ime<D> {
             return;
         }
         let lower = self.word.to_lowercase();
-        let mut corrections = self.engine.read(Evidence::Taps(&lower, &self.hints));
+        let mut corrections = self
+            .engine
+            .read_productive(Evidence::Taps(&lower, &self.hints));
         corrections.retain(|c| !self.blocked(&c.word, &lower));
         // Stretched interjections (ааа, ммм, эээ) are words when typed on
         // purpose, but never what a slip was meant to be.
@@ -5437,7 +5524,10 @@ impl<D: AsRef<[u8]>> Ime<D> {
         let insisted = self.rejected.iter().any(|(t, _)| *t == lower);
         let rejected = |w: &str| self.rejected.iter().any(|(_, f)| f == w);
         if !self.settings.one_row && !insisted {
-            let alone = corrections.first().map_or(f32::INFINITY, |c| c.cost);
+            let alone = corrections
+                .iter()
+                .find(|c| self.engine.contains(&c.word) || c.word == lower)
+                .map_or(f32::INFINITY, |c| c.cost);
             self.merge = self
                 .find_hyphen(&lower)
                 .or_else(|| self.find_merge(&lower, alone));
@@ -5445,11 +5535,15 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 self.split = self.find_split(&lower, alone);
             }
         }
-        let plain = corrections.clone();
+        let plain: Vec<Candidate> = corrections
+            .iter()
+            .filter(|c| self.engine.contains(&c.word) || c.word == lower)
+            .cloned()
+            .collect();
         let ctx = self.context_at(&self.before);
         let mut corrections = self
             .engine
-            .decode(&ctx, Evidence::Taps(&lower, &self.hints));
+            .decode_productive(&ctx, Evidence::Taps(&lower, &self.hints));
         corrections.retain(|c| !self.blocked(&c.word, &lower));
         corrections.retain(|c| c.word == lower || !stretched(&c.word));
         self.last_cands = corrections
@@ -5479,8 +5573,25 @@ impl<D: AsRef<[u8]>> Ime<D> {
             }
             return;
         }
-        let mut completions = self.engine.decode(&ctx, Evidence::Begun(&lower));
+        let mut completions = self.engine.decode_productive(&ctx, Evidence::Begun(&lower));
         completions.retain(|c| !stretched(&c.word) && !self.blocked(&c.word, &lower));
+        let ordinary_correction = corrections
+            .iter()
+            .filter(|c| self.engine.contains(&c.word))
+            .map(|c| c.cost)
+            .fold(f32::INFINITY, f32::min);
+        let productive_correction = corrections
+            .iter()
+            .filter(|c| !self.engine.contains(&c.word))
+            .any(|c| ordinary_correction - c.cost >= PRODUCTIVE_MARGIN);
+        let productive_completion = completions.iter().any(|c| {
+            !self.engine.contains(&c.word) && self.engine.productive_root(&c.word).is_some()
+        });
+        let dictionary_fix = corrections
+            .iter()
+            .any(|c| self.engine.contains(&c.word) && c.edit <= self.known_slip);
+        let productive_continuation =
+            productive_completion && !productive_correction && !dictionary_fix;
         // Abbreviations are left alone: several capitals (ГОСТ, iPhone) or a
         // short vowel-less token (тс, хз, спс, lmk).
         // Known abbreviations live in the dictionary (slang list); an unknown
@@ -5492,22 +5603,29 @@ impl<D: AsRef<[u8]>> Ime<D> {
         let vowelless = (2..=5).contains(&lower.chars().count())
             && !lower.chars().any(|c| VOWELS.contains(c))
             && !one_slip;
-        // A letter drawn out on purpose (каааак) is emphasis, not a slip.
+        // A letter drawn out on purpose (каааак) is emphasis unless there is
+        // a close, confident correction (кааая → какая).
         let drawn_out = lower
             .chars()
             .collect::<Vec<_>>()
             .windows(3)
-            .any(|w| w[0] == w[1] && w[1] == w[2]);
+            .any(|w| w[0] == w[1] && w[1] == w[2])
+            && corrections.first().is_none_or(|c| c.edit > 4.0);
         let shaped =
             vowelless || drawn_out || self.word.chars().filter(|c| c.is_uppercase()).count() >= 2;
         let n = lower.chars().count();
-        if self.settings.autocorrect && !shaped && !insisted && n >= 2 {
+        if self.settings.autocorrect && !shaped && !insisted && !productive_continuation && n >= 2 {
             let (per_letter, lead, known_margin) = self.settings.strength.limits();
-            let known = self.engine.plausible(&lower);
-            // A real word typed is guarded: kept unless a cheap slip, or a
-            // form the grammar asks for. Not at «Always»: there it gives way
-            // to any reading clearly likelier (the margin still protects what
-            // is itself likely).
+            let generated_typed = corrections
+                .iter()
+                .any(|c| c.word == lower && !self.engine.contains(&c.word));
+            let known = self.engine.contains(&lower)
+                || generated_typed
+                || self.engine.is_combining_compound(&lower) && !productive_correction;
+            // A real word typed is guarded: kept unless a cheap slip, a clearly
+            // likelier word with one more letter, or a form the grammar asks
+            // for. Not at «Always»: there it gives way to any reading clearly
+            // likelier (the margin still protects what is itself likely).
             let always = self.settings.strength == crate::settings::Strength::Always;
             let guarded = known && !always;
             // What the typed word costs here: the search at the place may have
@@ -5534,6 +5652,9 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 .collect();
             if !guarded && n >= COMPLETE_FROM {
                 for c in &completions {
+                    if dictionary_fix && !self.engine.contains(&c.word) {
+                        continue;
+                    }
                     let extra = c.word.chars().count().saturating_sub(n);
                     if !(1..=COMPLETE_ON_SPACE).contains(&extra) || rejected(&c.word) {
                         continue;
@@ -5548,12 +5669,30 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 }
                 pool.sort_by(|a, b| a.cost.total_cmp(&b.cost));
             }
-            let typed_fit = known.then(|| self.engine.grammar_fit(&ctx, &lower));
+            let noun_governor = ctx.prev().is_some_and(|p| {
+                let readings = self.engine.readings(p);
+                !readings.is_empty()
+                    && readings.iter().all(|r| r & kbcore::gram::bit::NOUN != 0)
+                    && self.engine.government_fit(&ctx, &lower).is_some()
+            });
+            let typed_fit = known.then(|| {
+                if noun_governor {
+                    self.engine.government_fit(&ctx, &lower).unwrap_or(0.0)
+                } else {
+                    self.engine.grammar_fit(&ctx, &lower)
+                }
+            });
             let other_form = |c: &Candidate| {
+                let gap = if noun_governor { 1.5 } else { GRAMMAR_GAP };
                 typed_fit.is_some_and(|t| {
                     c.edit <= GRAMMAR_SLIP
-                        && same_stem(&lower, &c.word)
-                        && self.engine.grammar_fit(&ctx, &c.word) - t >= GRAMMAR_GAP
+                        && (same_stem(&lower, &c.word)
+                            || noun_governor && c.word.chars().count() == lower.chars().count() + 1)
+                        && if noun_governor {
+                            self.engine.government_fit(&ctx, &c.word).unwrap_or(0.0) - t >= gap
+                        } else {
+                            self.engine.grammar_fit(&ctx, &c.word) - t >= gap
+                        }
                 })
             };
             // A guarded word's completion too, when it is the form the
@@ -5586,26 +5725,40 @@ impl<D: AsRef<[u8]>> Ime<D> {
             if !early.is_empty() {
                 pool.sort_by(|a, b| a.cost.total_cmp(&b.cost));
             }
+            let ordinary_best = pool
+                .iter()
+                .filter(|c| self.engine.contains(&c.word))
+                .map(|c| c.cost)
+                .fold(f32::INFINITY, f32::min);
             let mut others = pool.into_iter();
             let best = others.next();
-            let runner_up = others.next().map_or(f32::INFINITY, |c| c.cost);
+            let runner_up = others
+                .find(|c| self.engine.contains(&c.word))
+                .map_or(f32::INFINITY, |c| c.cost);
             self.autocorrect = best
                 .filter(|c| c.edit <= per_letter * n.max(3) as f32)
-                .filter(|c| runner_up - c.cost >= lead)
-                // A real word typed: only a cheap slip, or another form of
-                // it the grammar asks for, clearly likelier (the context is
-                // already in the costs — a missing word pair only means the
-                // previous word doesn't change its odds).
+                .filter(|c| noun_governor && other_form(c) || runner_up - c.cost >= lead)
+                .filter(|c| {
+                    self.engine.contains(&c.word) || ordinary_best - c.cost >= PRODUCTIVE_MARGIN
+                })
+                // A real word typed: a cheap slip, a clearly likelier word
+                // with one more letter, or another form the grammar asks for
+                // (the context is already in the costs — a missing word pair
+                // only means the previous word doesn't change its odds).
                 // (A completion the grammar asks for has paid for space
                 // before the word's end: no margin on top.)
                 .filter(|c| {
-                    let margin = if early.iter().any(|e| std::ptr::eq(e, *c)) {
+                    let common_form = c.edit <= 3.5
+                        && c.word.chars().count() == n + 1
+                        && typed_cost.is_some_and(|t| c.cost < t);
+                    let margin = if common_form || early.iter().any(|e| std::ptr::eq(e, *c)) {
                         0.0
                     } else {
                         known_margin
                     };
                     !known
-                        || (c.edit <= self.known_slip || other_form(c) || !guarded)
+                        || noun_governor && other_form(c)
+                        || (c.edit <= self.known_slip || other_form(c) || common_form || !guarded)
                             && typed_cost.is_some_and(|t| c.cost + margin < t)
                 })
                 .map(|c| c.word.clone());
@@ -5624,7 +5777,10 @@ impl<D: AsRef<[u8]>> Ime<D> {
             return;
         }
 
-        let mut merged: Vec<Candidate> = corrections.into_iter().chain(completions).collect();
+        let mut merged: Vec<Candidate> = corrections
+            .into_iter()
+            .chain(completions.iter().cloned())
+            .collect();
         merged.sort_by(|a, b| a.cost.total_cmp(&b.cost));
         self.alternatives.clear();
         for c in &merged {
@@ -5673,6 +5829,9 @@ impl<D: AsRef<[u8]>> Ime<D> {
                 right.map(|w| self.cased(&typed, &w)),
             ];
             self.place_merge();
+            if productive_completion {
+                self.place_productive(&completions);
+            }
             self.fit_strip();
             return;
         }
@@ -5691,7 +5850,63 @@ impl<D: AsRef<[u8]>> Ime<D> {
         let right = rest.next().map(|w| self.cased(&typed, &w));
         self.slots = [left, Some(self.cased(&typed, &center)), right];
         self.place_merge();
+        if productive_completion {
+            self.place_productive(&completions);
+        }
         self.fit_strip();
+    }
+
+    fn place_productive(&mut self, completions: &[Candidate]) {
+        let typed = self.word.clone();
+        let mut choices: Vec<(String, String, f32)> = completions
+            .iter()
+            .filter(|c| !self.engine.contains(&c.word))
+            .filter_map(|c| {
+                self.engine
+                    .productive_root(&c.word)
+                    .and_then(|(root, cost)| {
+                        let derived = self.engine.readings(&root).iter().any(|r| {
+                            use kbcore::gram::bit::*;
+                            r & ADVB != 0
+                                || r & (ADJF | PRTF) != 0
+                                    && r & NOMN != 0
+                                    && r & MASC != 0
+                                    && r & SING != 0
+                        });
+                        derived.then(|| {
+                            let score = cost - 0.2 * root.chars().count() as f32;
+                            (c.word.clone(), root, score)
+                        })
+                    })
+            })
+            .collect();
+        choices.sort_by(|a, b| a.2.total_cmp(&b.2));
+        let mut seen = std::collections::HashSet::new();
+        choices.retain(|(word, _, _)| seen.insert(word.clone()));
+        let Some((first, root, _)) = choices.first().cloned() else {
+            return;
+        };
+        let key: String = root.chars().take(5).collect();
+        let second = choices
+            .iter()
+            .skip(1)
+            .find(|(_, r, _)| r.chars().take(5).eq(key.chars()))
+            .or_else(|| choices.get(1))
+            .map(|(w, _, _)| w.clone());
+        if self.autocorrect.is_some() || self.merge.is_some() || self.split.is_some() {
+            let alternative = if self.slots[1].as_deref() == Some(first.as_str()) {
+                second
+            } else {
+                Some(first)
+            };
+            self.slots[2] = alternative.map(|w| self.cased(&typed, &w));
+        } else {
+            self.slots[1] = Some(self.cased(&typed, &first));
+            self.slots[2] = second.map(|w| self.cased(&typed, &w));
+        }
+        if self.slots[0] == self.slots[1] || self.slots[0] == self.slots[2] {
+            self.slots[0] = None;
+        }
     }
 
     /// Trim the strip to the chosen mode: "two" keeps what was typed on the
@@ -6122,7 +6337,7 @@ impl<D: AsRef<[u8]>> Ime<D> {
             let line = if q.is_empty() {
                 line
             } else {
-                format!("{line}│")
+                format!("{line}|")
             };
             let left = back + 36.0 * dp;
             ops.extend([
@@ -6887,7 +7102,8 @@ mod tests {
         assert!(k.keys.iter().all(|key| key.y >= 2.0 * k.strip_h()));
         type_str(&mut k, "огон");
         assert_eq!(k.emoji_search.as_deref(), Some("огон"));
-        assert!(k.draw().1.iter().any(|s| s == "огон│"));
+        assert!(k.draw().1.iter().any(|s| s == "огон|"));
+        assert!(!k.draw().1.iter().any(|s| s == "огон │" || s == "огон│"));
         assert!(
             k.stash.found.iter().any(|e| e == "🔥"),
             "{:?}",
@@ -6945,6 +7161,109 @@ mod tests {
         type_str(&mut k, "фывапр ");
         k.open_panel();
         assert!(k.stash.found.is_empty());
+    }
+
+    fn productive_engine() -> Ime<Vec<u8>> {
+        let mut k = ime(&[
+            ("свер", 100),
+            ("сверх", 500),
+            ("мега", 500),
+            ("меша", 80),
+            ("продуктивный", 500),
+            ("сверхрегенеративный", 500),
+            ("широко", 1000),
+            ("широкий", 900),
+            ("широкоформатный", 100),
+            ("школа", 800),
+        ]);
+        k.set_settings(Settings {
+            auto_caps: false,
+            ..k.settings.clone()
+        });
+        k.shift = Shift::Off;
+        k
+    }
+
+    #[test]
+    fn a_misspelled_productive_compound_is_corrected_by_morphemes() {
+        let mut k = productive_engine();
+        type_str(&mut k, "сверзмешапродктивныы ");
+        assert_eq!(k.before.to_lowercase(), "сверхмегапродуктивный ");
+        let mut k = productive_engine();
+        type_str(&mut k, "фывапролджэ ");
+        assert_ne!(k.before.to_lowercase(), "сверхмегапродуктивный ");
+
+        let mut k = ime(&[
+            ("дев", 100),
+            ("девайс", 500),
+            ("другой", 1000),
+            ("нуты", 100),
+        ]);
+        type_str(&mut k, "девайснутыы");
+        assert_eq!(k.autocorrect.as_deref(), Some("девайснутый"));
+        tap(&mut k, ' ');
+        assert_eq!(k.before.to_lowercase(), "девайснутый ");
+        let mut k = ime(&[
+            ("дев", 100),
+            ("девайс", 500),
+            ("другой", 1000),
+            ("нуты", 100),
+        ]);
+        type_str(&mut k, "девайснутый ");
+        assert_eq!(k.before.to_lowercase(), "девайснутый ");
+        let mut k = ime(&[("девайс", 500), ("девайснутыв", 3000)]);
+        type_str(&mut k, "девайснутыы ");
+        assert_eq!(
+            k.before.to_lowercase(),
+            "девайснутыы ",
+            "not enough margin over the dictionary: {:?}",
+            k.decoded
+        );
+        let mut k = ime(&[("поможе", 100), ("поможет", 100), ("поможем", 10000)]);
+        type_str(&mut k, "поможеи ");
+        assert_eq!(
+            k.before.to_lowercase(),
+            "поможет ",
+            "a suffix completion must not suppress correction"
+        );
+        let mut k = ime(&[("полу", 10000), ("получил", 500), ("сил", 500)]);
+        type_str(&mut k, "полусил ");
+        assert_eq!(
+            k.before.to_lowercase(),
+            "получил ",
+            "a cheap dictionary fix comes first"
+        );
+    }
+
+    #[test]
+    fn backspace_takes_only_the_accepted_completion_and_typing_can_continue() {
+        let mut k = productive_engine();
+        type_str(&mut k, "сверхш");
+        let slot = k
+            .slots
+            .iter()
+            .position(|s| s.as_deref() == Some("сверхшироко"))
+            .unwrap_or_else(|| panic!("no completion in {:?}", k.slots));
+        k.pick_slot(slot);
+        assert_eq!(
+            (k.word.as_str(), k.shown.as_str()),
+            ("сверхшироко", "сверхшироко")
+        );
+        assert!(k.before.is_empty(), "the completion stays composing");
+        tap(&mut k, '⌫');
+        assert_eq!((k.word.as_str(), k.shown.as_str()), ("сверхш", "сверхш"));
+
+        let slot = k
+            .slots
+            .iter()
+            .position(|s| s.as_deref() == Some("сверхшироко"))
+            .unwrap_or_else(|| panic!("no completion in {:?}", k.slots));
+        k.pick_slot(slot);
+        type_str(&mut k, "ий");
+        assert_eq!(
+            (k.word.as_str(), k.shown.as_str()),
+            ("сверхширокий", "сверхширокий")
+        );
     }
 
     #[test]
@@ -7998,6 +8317,26 @@ mod tests {
     }
 
     #[test]
+    fn a_timer_delivered_early_or_after_a_short_press_opens_no_menu() {
+        let mut k = ime(WORDS);
+        let (x, y) = k.key_center(Action::Space).unwrap();
+        let t = now();
+        k.touch(DOWN, 0, x, y, t);
+        assert_eq!(k.timer_at(t + 80) >> 16, SPACE_MENU_MS - 80);
+        assert!(k.popup.is_none());
+        k.touch(UP, 0, x, y, t + 80);
+        k.timer_at(t + SPACE_MENU_MS as i64);
+        assert!(k.popup.is_none());
+
+        k.touch(DOWN, 0, x, y, t + 1_000);
+        assert_eq!(k.timer_at(t + 1_080) >> 16, SPACE_MENU_MS - 80);
+        assert!(k.popup.is_none());
+        k.touch(UP, 0, x, y, t + 1_080);
+        k.timer_at(t + 1_700);
+        assert!(k.popup.is_none());
+    }
+
+    #[test]
     fn languages_go_round_in_the_settings_order_with_their_packs() {
         let mut k = ime(WORDS);
         k.set_settings(Settings {
@@ -8557,6 +8896,14 @@ mod tests {
     }
 
     #[test]
+    fn a_plausible_compound_is_not_split_into_two_words() {
+        let mut k = ime(&[("авто", 5000), ("исправлений", 3000)]);
+        k.start_input("", 1);
+        type_str(&mut k, "автоисправлений ");
+        assert!(k.take_ops().contains(&Op::Commit("автоисправлений".into())));
+    }
+
+    #[test]
     fn roll_over_keeps_order() {
         // Second finger lands before the first lifts.
         let mut k = ime(WORDS);
@@ -8825,6 +9172,18 @@ mod tests {
     }
 
     #[test]
+    fn always_strength_applies_a_distant_single_substitution() {
+        let mut k = ime(&[("смелость", 1153), ("смелостью", 96), ("смелости", 500)]);
+        k.set_settings(Settings {
+            strength: crate::settings::Strength::Always,
+            ..Settings::default()
+        });
+        k.start_input("", 1);
+        type_str(&mut k, "смелочть ");
+        assert!(k.take_ops().contains(&Op::Commit("смелость".into())));
+    }
+
+    #[test]
     fn edited_words_do_not_teach_the_rhythm() {
         let mut k = ime(&[("тер", 3000)]);
         k.start_input("", 1);
@@ -9071,6 +9430,25 @@ mod tests {
     }
 
     #[test]
+    fn a_clear_correction_wins_over_a_rare_word_or_a_repeated_letter() {
+        let mut k = ime(&[("прсто", 16000), ("просто", 3000), ("посто", 10000)]);
+        type_str(&mut k, "прсто ");
+        assert_eq!(k.before.to_lowercase(), "просто ");
+
+        let mut k = ime(&[("какая", 3000), ("кавая", 10000), ("капая", 10000)]);
+        type_str(&mut k, "кааая ");
+        assert_eq!(k.before.to_lowercase(), "какая ");
+
+        let mut k = ime(&[("ковпак", 500), ("кавасе", 1000), ("каравае", 1500)]);
+        type_str(&mut k, "каааак ");
+        assert_eq!(
+            k.before.to_lowercase(),
+            "каааак ",
+            "no close correction: emphasis stays"
+        );
+    }
+
+    #[test]
     fn stretched_interjections_do_not_attract_corrections() {
         let mut k = ime(&[("ааа", 500), ("дела", 3000)]);
         k.start_input("", 1);
@@ -9117,6 +9495,72 @@ mod tests {
         });
         k.start_input("", 1 | 0x4000);
         k
+    }
+
+    fn ime_government() -> Ime<Vec<u8>> {
+        let id = |w: &str| -> Vec<u8> {
+            w.chars()
+                .map(|c| kbcore::alphabet::char_to_id(c).unwrap())
+                .collect()
+        };
+        let words = [
+            ("проверка", 500),
+            ("вода", 500),
+            ("ввода", 500),
+            ("воды", 500),
+            ("влад", 10000),
+        ];
+        let mut kv: Vec<(Vec<u8>, u64)> = words.iter().map(|(w, v)| (id(w), *v)).collect();
+        kv.sort();
+        let dict = Map::from_iter(kv.iter().map(|(k, v)| (k.as_slice(), *v))).unwrap();
+        let mut bv: Vec<(Vec<u8>, u64)> = Vec::new();
+        for (set, tags) in [
+            (1, &["NOUN,inan,femn,sing,nomn"][..]),
+            (
+                2,
+                &["NOUN,inan,femn,sing,nomn", "NOUN,inan,masc,sing,gent"][..],
+            ),
+            (3, &["NOUN,inan,masc,sing,gent"][..]),
+            (4, &["NOUN,inan,femn,sing,gent"][..]),
+        ] {
+            for (i, tag) in tags.iter().enumerate() {
+                bv.push((vec![0, 9, 0, set, i as u8], kbcore::gram::parse(tag)));
+            }
+        }
+        for (word, set) in [("проверка", 1), ("вода", 2), ("ввода", 3), ("воды", 4)]
+        {
+            bv.push(([vec![0, 3], id(word)].concat(), (set << 16) | 1));
+        }
+        let frame: [f32; 8] = [-0.3, -0.65, 1.3, -0.45, 0.0, -0.6, -0.2, -2.95];
+        let packed = frame.iter().enumerate().fold(0u64, |v, (i, x)| {
+            v | ((((*x + 6.4) * 20.0).round() as u64) << (8 * i))
+        });
+        bv.push(([vec![0, 11], id("проверка")].concat(), packed));
+        bv.sort();
+        let bigrams = Map::from_iter(bv.iter().map(|(k, v)| (k.as_slice(), *v))).unwrap();
+        let cfg = Config::balanced().with_profile(Profile::Phone);
+        let mut k = Ime::new(Engine::new(dict, cfg).with_bigrams(bigrams), 2.625);
+        k.measure(1080);
+        k.set_settings(Settings {
+            auto_caps: false,
+            ..Settings::default()
+        });
+        k.start_input("", 1);
+        k.shift = Shift::Off;
+        k
+    }
+
+    #[test]
+    fn a_noun_governs_the_genitive_despite_a_rare_reading_of_the_typed_word() {
+        let mut k = ime_government();
+        type_str(&mut k, "проверка вода ");
+        assert_eq!(k.before, "проверка ввода ");
+        let mut k = ime_government();
+        type_str(&mut k, "проверка воды ");
+        assert_eq!(k.before, "проверка воды ");
+        let mut k = ime_government();
+        type_str(&mut k, "проверка ввода ");
+        assert_eq!(k.before, "проверка ввода ");
     }
 
     #[test]

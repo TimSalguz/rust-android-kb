@@ -48,7 +48,8 @@ public final class RustKbService extends InputMethodService implements SensorEve
     private HandlerThread nativeThread;
     private Handler nativeHandler;
     private final Handler main = new Handler(Looper.getMainLooper());
-    private final Runnable timer = () -> postNative(() -> Native.timer(handle));
+    private long timerGeneration;
+    private Runnable pendingTimer;
     /** Tilt, for telling the grip: only while the keyboard is up, at the UI rate. */
     private SensorManager sensors;
     private boolean listening;
@@ -90,7 +91,24 @@ public final class RustKbService extends InputMethodService implements SensorEve
         });
     }
 
+    private void cancelTimer() {
+        timerGeneration++;
+        if (view != null && pendingTimer != null) view.removeCallbacks(pendingTimer);
+        pendingTimer = null;
+    }
+
+    private void scheduleTimer(int delay) {
+        cancelTimer();
+        final long generation = timerGeneration;
+        pendingTimer = () -> postNative(() -> {
+            if (generation != timerGeneration) return 0;
+            return Native.timer(handle, SystemClock.uptimeMillis());
+        });
+        view.postDelayed(pendingTimer, delay);
+    }
+
     void touch(int action, int pointer, float x, float y, long time) {
+        if (action != 1) cancelTimer();
         postNative(() -> Native.touch(handle, action, pointer, x, y, time));
     }
 
@@ -207,6 +225,7 @@ public final class RustKbService extends InputMethodService implements SensorEve
 
     @Override
     public void onFinishInputView(boolean finishingInput) {
+        cancelTimer();
         stopTilt();
         super.onFinishInputView(finishingInput);
     }
@@ -385,10 +404,7 @@ public final class RustKbService extends InputMethodService implements SensorEve
         if ((flags & RELAYOUT) != 0) view.requestLayout();
         if ((flags & REDRAW) != 0) view.invalidate();
         int delay = flags >>> 16;
-        if (delay > 0) {
-            view.removeCallbacks(timer);
-            view.postDelayed(timer, delay);
-        }
+        if (delay > 0) scheduleTimer(delay);
     }
 
     private void deleteCodePoints(InputConnection ic, int count) {

@@ -475,6 +475,16 @@ impl Frame {
             .reduce(f32::max)
     }
 
+    /// The least fitting nominal reading, for checking a typed word whose
+    /// common case may be hidden by a rarer reading that happens to fit.
+    pub fn next_worst(&self, word: &[u64]) -> f32 {
+        word.iter()
+            .filter(|&&r| r & NOMINAL != 0 && r & CASE != 0)
+            .filter_map(|&r| self.case(r))
+            .reduce(f32::min)
+            .unwrap_or(0.0)
+    }
+
     /// How much likelier `word` (its readings) comes right after the
     /// governor than anywhere: by its best reading — a noun phrase by its
     /// case, anything else as `other` («казни» is a noun and a verb).

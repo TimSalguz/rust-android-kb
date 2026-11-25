@@ -21,7 +21,7 @@ final class Native {
     static native int selection(long h, int selStart, int selEnd, int candStart, int candEnd, String textBefore,
             String textAfter, String selectedText);
     static native int touch(long h, int action, int pointer, float x, float y, long timeMs);
-    static native int timer(long h);
+    static native int timer(long h, long timeMs);
     /** The settings file changed: re-read it (flags as from touch). */
     static native int reloadSettings(long h);
     static native int tilt(long h, float x, float y, float z);

@@ -458,6 +458,7 @@ pub enum Casing {
 mod commas;
 mod context;
 mod decode;
+mod productive;
 pub mod proof;
 pub use context::Context;
 pub use decode::Evidence;
@@ -618,6 +619,20 @@ impl<D: AsRef<[u8]>> Engine<D> {
     /// guards automatic replacement; it does not add candidates to the search.
     pub fn plausible(&self, word: &str) -> bool {
         crate::morph::plausible(word, |w| self.contains(w))
+    }
+
+    /// Whether `word` is composed of two independently supported roots.
+    pub fn is_compound(&self, word: &str) -> bool {
+        crate::morph::compound(&word.to_lowercase(), |w| self.contains(w))
+    }
+
+    /// A compound beginning with a combining form (авто, био, микро…).
+    pub fn is_combining_compound(&self, word: &str) -> bool {
+        let lower = word.to_lowercase();
+        self.is_compound(&lower)
+            && lower
+                .char_indices()
+                .any(|(i, _)| crate::morph::combining(&lower[..i]))
     }
 
     /// The words the user added by hand (replaces the previous set).
@@ -1473,6 +1488,21 @@ impl<D: AsRef<[u8]>> Engine<D> {
     /// cost there ([`Engine::weigh`]) — a word the previous one leads to
     /// comes up however rare on its own.
     pub(crate) fn complete_at(&self, ctx: &Context, raw: &str) -> Vec<Candidate> {
+        self.complete_limit(ctx, raw, self.cfg.top_k, self.cfg.c_complete_char)
+    }
+
+    /// A wider, deeper completion pool for productive compounds, still best first.
+    pub fn complete_n(&self, raw: &str, n: usize) -> Vec<Candidate> {
+        self.complete_limit(&Context::default(), raw, n, self.cfg.c_complete_char * 0.15)
+    }
+
+    fn complete_limit(
+        &self,
+        ctx: &Context,
+        raw: &str,
+        limit: usize,
+        char_cost: f32,
+    ) -> Vec<Candidate> {
         let input: Vec<char> = raw.trim().to_lowercase().chars().collect();
         if input.is_empty() {
             return Vec::new();
@@ -1483,16 +1513,23 @@ impl<D: AsRef<[u8]>> Engine<D> {
         } else {
             &silent
         };
-        let mut out = self.complete_in(ctx, self.map.as_fst(), self.priors(), &input);
+        let mut out = self.complete_in(
+            ctx,
+            self.map.as_fst(),
+            self.priors(),
+            &input,
+            limit,
+            char_cost,
+        );
         if let Some(user) = &self.user {
             let plain = Priors::Outputs(DictFormat::PLAIN);
-            for c in self.complete_in(ctx, user.as_fst(), plain, &input) {
+            for c in self.complete_in(ctx, user.as_fst(), plain, &input, limit, char_cost) {
                 if !out.iter().any(|o| o.word == c.word) {
                     out.push(c);
                 }
             }
             out.sort_by(|a, b| a.cost.total_cmp(&b.cost));
-            out.truncate(self.cfg.top_k);
+            out.truncate(limit);
         }
         out
     }
@@ -1507,6 +1544,8 @@ impl<D: AsRef<[u8]>> Engine<D> {
         fst: &Fst<F>,
         priors: Priors<'_, D>,
         input: &[char],
+        limit: usize,
+        char_cost: f32,
     ) -> Vec<Candidate> {
         let cfg = &self.cfg;
         let pair_fst = self.bigrams.as_ref().map(|b| b.as_fst());
@@ -1539,7 +1578,7 @@ impl<D: AsRef<[u8]>> Engine<D> {
         let speaks = ctx.speaks();
         let own = |v: u64| priors.word(v) as f32 * cfg.prior_scale;
         let least = |span: Span| priors.least(span) as f32 * cfg.prior_scale;
-        let typing = |extra: usize| cfg.c_complete_char * extra as f32;
+        let typing = |extra: usize| char_cost * extra as f32;
         // The least a word below costs; a word's exact cost.
         let floor = |span: Span, pairs: Option<(CompiledAddr, u64)>, extra: usize| {
             if speaks {
@@ -1588,7 +1627,7 @@ impl<D: AsRef<[u8]>> Engine<D> {
                     cost: f.cost,
                     edit: typing(extra),
                 });
-                if out.len() >= cfg.top_k {
+                if out.len() >= limit {
                     break;
                 }
                 continue;
@@ -1598,7 +1637,7 @@ impl<D: AsRef<[u8]>> Engine<D> {
                 // Out of steps: the words found so far, best first.
                 let mut found: Vec<Frontier> = heap.into_iter().filter(|f| f.found).collect();
                 found.sort_by(|a, b| a.cost.total_cmp(&b.cost));
-                for f in found.into_iter().take(cfg.top_k.saturating_sub(out.len())) {
+                for f in found.into_iter().take(limit.saturating_sub(out.len())) {
                     let extra = f.path.len() - prefix.len();
                     out.push(Candidate {
                         word: alphabet::ids_to_string(&f.path),
